@@ -1,0 +1,10 @@
+# Conservative starting risk envelope for a brand-new, unproven agent trading
+# real money. These are enforced by risk/engine.py and bounded by absolute
+# code-level ceilings in risk/limits.py that this file cannot exceed even by
+# mistake. Loosen deliberately and gradually, not as a side effect of wanting
+# a specific trade to go through.
+max_position_usd: 50.0
+max_daily_loss_usd: 100.0
+max_daily_exposure_usd: 250.0
+max_open_positions: 3
+price_drift_tolerance_pct: 0.5

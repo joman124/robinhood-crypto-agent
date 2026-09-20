@@ -1,0 +1,36 @@
+# Per-regime weights for the composite strategy (strategy/composite.py).
+# Each signal source contributes a score in [-1, 1] with its own confidence;
+# weights below control how much each source counts toward the composite,
+# per detected market regime. Weights need not sum to 1 - they're normalized
+# by total active weight at combination time.
+#
+# Trending markets: lean on trend/volume/relative-strength; mean-reversion
+# (RSI extremes) is deliberately down-weighted since "oversold" can just mean
+# "still falling" in a strong trend.
+#
+# Ranging markets: lean on mean-reversion and sentiment (contrarian); trend
+# signals are down-weighted since chasing MACD crossovers in chop is a
+# well-known way to bleed to fees.
+regimes:
+  trending:
+    trend: 0.35
+    mean_reversion: 0.10
+    volume: 0.20
+    relative_strength: 0.25
+    sentiment: 0.10
+  ranging:
+    trend: 0.10
+    mean_reversion: 0.35
+    volume: 0.15
+    relative_strength: 0.15
+    sentiment: 0.25
+
+# Composite score must clear this magnitude (after weighting/normalization)
+# to produce a proposal at all, and average signal confidence must clear
+# min_confidence.
+signal_threshold: 0.35
+min_confidence: 0.4
+
+regime:
+  adx_period: 14
+  adx_trending_threshold: 25.0
