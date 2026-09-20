@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Env / secrets
+.env
+*.env.local
+
+# Runtime data (audit log, caches) - never commit real trading history
+data/*.jsonl
+data/cache/
+data/*.db
+!data/.gitkeep
+
+# Kill switch state
+config/kill_switch.flag
+
+# Test / tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

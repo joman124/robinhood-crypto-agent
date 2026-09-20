@@ -1,0 +1,15 @@
+# Symbols the strategy and risk engine will consider. Any symbol not listed
+# here is hard-rejected by the risk engine regardless of what a strategy or a
+# human asks for (see risk/engine.py). Edit deliberately, not as a side
+# effect of a trade conversation (see CLAUDE.md).
+symbols:
+  - BTC
+  - ETH
+  - SOL
+  - DOGE
+  - LTC
+  - BCH
+  - AVAX
+  - LINK
+  - ADA
+  - SHIB
