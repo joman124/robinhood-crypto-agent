@@ -15,6 +15,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    # Pinned to a minor series: an unpinned ruff turns CI red on a release that
+    # adds a rule, which is a failure of the lint pin rather than of the code.
+    "ruff>=0.16,<0.17",
 ]
 
 [project.scripts]

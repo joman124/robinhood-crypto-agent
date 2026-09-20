@@ -59,10 +59,16 @@ hands it a payload after a human has approved a **specific proposal by id**.
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest                       # 245 tests, no network, no account needed
+ruff check src tests
 
 export RHCA_RHS_ACCOUNT_NUMBER=...   # the NUMERIC rhs_account_number
 rhca status
 ```
+
+CI runs the suite on Python 3.10, 3.11, 3.12 and 3.13, plus `ruff` and a smoke
+test of the installed `rhca` console script — the suite imports the package
+directly, so the console-script step is the only check that the packaging
+metadata and entry point actually work.
 
 `rhca status` works on a fresh checkout and will tell you, correctly, that it
 has no price history and cannot evaluate anything yet.
