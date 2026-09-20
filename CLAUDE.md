@@ -61,6 +61,20 @@ Claude Code:
 11. **Spot crypto only.** Do not use margin, leverage, or derivative products
     even if the MCP server exposes them, unless the human explicitly asks for
     that scope to change.
+12. **Follow the proposal's `execution_plan` when submitting via MCP.** It's
+    computed from the signal's regime (see `docs/strategy.md`) and tells you
+    *how* to fill an approved proposal:
+    - `PROMPT` (one tranche): submit one order, promptly, at/near the
+      reference price. The signal is time-sensitive — don't wait for a
+      better entry.
+    - `STAGED` (several tranches): submit one **limit** order per tranche at
+      its `target_price`. An unfilled tranche is expected, not a problem —
+      never chase it by crossing the spread, and never add size beyond the
+      plan's tranches even if another price looks attractive.
+    - Log every tranche fill with its own `log-execution` call against the
+      same proposal ID — the audit log sums multiple execution records per
+      proposal, which is the intended accumulation behavior. Track partial
+      fills yourself and stop once the plan's total quantity is reached.
 
 ## Typical workflow
 

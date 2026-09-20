@@ -15,6 +15,7 @@ from robinhood_crypto_agent.config import load_config
 from robinhood_crypto_agent.data.external.feargreed import FearGreedClient
 from robinhood_crypto_agent.data.public_market_data import PublicMarketDataClient
 from robinhood_crypto_agent.execution.kill_switch import disengage_kill_switch, engage_kill_switch
+from robinhood_crypto_agent.execution.plan import build_execution_plan
 from robinhood_crypto_agent.models import (
     ExecutionRecord,
     ProposalStatus,
@@ -147,6 +148,7 @@ def analyze(
         proposal.status = (
             ProposalStatus.PENDING if risk_check.passed else ProposalStatus.REJECTED
         )
+        proposal.execution_plan = build_execution_plan(proposal)
 
         audit_log.log_proposal(proposal)
         if not risk_check.passed:

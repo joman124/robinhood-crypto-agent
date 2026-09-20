@@ -34,6 +34,23 @@ class ProposalStatus(str, Enum):
     EXPIRED = "expired"
 
 
+class ExecutionStyle(str, Enum):
+    """How an approved proposal should be filled - informational only, never
+    a substitute for the human-approval safety gate in execution/adapter.py.
+
+    PROMPT: one order, near the reference price, submitted without delay -
+    for time-sensitive (TRENDING) signals where waiting for a better entry
+    risks missing the move entirely.
+
+    STAGED: several resting limit orders spread across favorable price
+    levels, filled gradually - for signals with more runway (RANGING) where
+    there's time to let the market come to a better average price.
+    """
+
+    PROMPT = "prompt"
+    STAGED = "staged"
+
+
 class Candle(BaseModel):
     symbol: str
     timestamp: datetime
@@ -70,6 +87,27 @@ class RiskCheckResult(BaseModel):
     violations: list[str] = Field(default_factory=list)
 
 
+class ExecutionTranche(BaseModel):
+    """One resting order within a STAGED ExecutionPlan (or the single order
+    of a PROMPT plan)."""
+
+    sequence: int
+    target_price: float
+    quantity: float
+    notional_usd: float
+
+
+class ExecutionPlan(BaseModel):
+    """How to fill an approved TradeProposal - built by
+    execution/plan.py:build_execution_plan(), attached before logging. Purely
+    informational: it guides how Claude places MCP orders for an
+    already-approved proposal, it does not itself authorize anything."""
+
+    style: ExecutionStyle
+    tranches: list[ExecutionTranche]
+    rationale: str
+
+
 class TradeProposal(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     symbol: str
@@ -82,6 +120,7 @@ class TradeProposal(BaseModel):
     rationale: str
     signal: Signal
     risk_check: RiskCheckResult
+    execution_plan: ExecutionPlan | None = None
     status: ProposalStatus = ProposalStatus.PENDING
     created_at: datetime = Field(default_factory=_utcnow)
 

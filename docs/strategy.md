@@ -57,6 +57,56 @@ size — and is always clamped by `risk_limits.max_position_usd` and the
 absolute code ceiling. Sizing decides how big to *propose*; the risk engine
 independently and unconditionally decides whether to *allow* it.
 
+## Execution planning (`execution/plan.py`)
+
+Every proposal also gets an `ExecutionPlan` describing *how* to fill it,
+built purely from its regime. This is informational only — it never affects
+whether a proposal is allowed (that's still the risk engine's job alone) and
+never touches the propose-only safety gate (`execution/adapter.py` still
+always refuses to submit; a human still approves every proposal by ID).
+
+The design was prompted by comparing four Polymarket-style trading bots for
+transferable ideas (see conversation history / PR discussion for the full
+writeup). Two ideas survived the trip to spot crypto with no derivatives and
+no shorting:
+
+- **Timeframe-conditional behavior** (the "mo-money" pattern): don't try to
+  optimize entry the same way regardless of how much time a signal gives
+  you. A TRENDING signal is time-sensitive — that bot's own short-timeframe
+  data showed it paying a premium (~$1.07 combined cost on 5-minute markets)
+  rather than waiting for a second entry, because waiting cost more than it
+  saved. A RANGING signal has more runway to be patient.
+- **Passive, staged accumulation** (the "almach" pattern): when there's
+  time, place resting limit orders at favorable levels instead of crossing
+  the spread, accepting that some orders may go unfilled. That bot's data
+  showed tightly matched, favorably-priced positions (e.g. ~$0.97–$0.99
+  combined cost on 1h/4h markets) built entirely from passive fills.
+
+Two other ideas from the same comparison were **excluded** as structurally
+inapplicable, not merely suboptimal:
+
+- A "temporal complete-set arbitrage" pattern depends on buying two
+  complementary conditional-outcome tokens that merge into a fixed $1
+  redemption at settlement — spot crypto has no complementary instrument and
+  no settlement event to redeem against, so the entire edge mechanism has no
+  analog here.
+- A sub-minute, near-100%-both-sided market-making pattern requires
+  continuous two-sided quoting against a hard resolution event, at a trade
+  cadence far beyond what a human-approval-gated execution model
+  (`execution/adapter.py`) can support.
+
+Concretely, `build_execution_plan(proposal)` maps `Signal.regime` to an
+`ExecutionStyle`:
+
+- **TRENDING → `PROMPT`**: a single tranche, sized to the full proposal, at
+  the reference price — submit without delay.
+- **RANGING → `STAGED`**: three tranches (weighted 40/35/25% of the size),
+  with limit prices stepped 0% / 0.35% / 0.70% away from the reference price
+  in the favorable direction (below reference for a BUY, above for a SELL).
+
+The proposal report shows the plan so the human approver can see exactly how
+it's meant to be filled before approving.
+
 ## Backtesting (`backtest/`)
 
 Before a strategy change is trusted to generate live proposals, it's

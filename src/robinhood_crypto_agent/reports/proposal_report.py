@@ -28,6 +28,14 @@ def format_proposal_report(proposals: list[TradeProposal]) -> str:
                 f"(conf {score.confidence:.2f}) - {score.rationale}"
             )
         lines.append(f"  Rationale: {p.rationale}")
+        if p.execution_plan is not None:
+            plan = p.execution_plan
+            lines.append(f"  Execution plan: {plan.style.value.upper()} - {plan.rationale}")
+            for tranche in plan.tranches:
+                lines.append(
+                    f"    - tranche {tranche.sequence}: {tranche.quantity:.6f} "
+                    f"@ ${tranche.target_price:.2f} (~${tranche.notional_usd:.2f})"
+                )
         if p.risk_check.passed:
             lines.append("  Risk check: PASSED")
         else:
