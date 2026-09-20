@@ -52,9 +52,12 @@ You are the bridge, and the only component that can reach Robinhood:
    or auto-engaged by the daily loss cap — refuse every execution and say why.
    Do not delete `data/KILL_SWITCH` to get past it.
 
-8. **Never change `execution_mode` to `auto`.** Unattended execution is not
-   implemented; setting it only makes every proposal fail the risk check. It is
-   not a shortcut to a working automation mode.
+8. **Never change `execution_mode` to `auto` on your own initiative.**
+   Unattended trading is the intended Phase 2, but promoting to it is a
+   deliberate human decision with preconditions (`docs/autonomy.md`), not
+   something to infer from a conversation going well. Today the mode is not
+   implemented, so setting it only makes every proposal fail the risk check --
+   it is not a shortcut to a working automation mode.
 
 9. **Never edit `config/risk_limits.yaml`, `config/agent.yaml`, or
    `config/strategy.yaml` as a side effect** of executing a trade or wanting a

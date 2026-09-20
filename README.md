@@ -105,7 +105,9 @@ rhca describe-tools
 rhca validate-order -f payload.json
 ```
 
-See [`docs/runbook.md`](./docs/runbook.md) for the full operating loop.
+See [`docs/runbook.md`](./docs/runbook.md) for the full operating loop, and
+[`docs/autonomy.md`](./docs/autonomy.md) for the route from supervised
+sign-off to unattended execution.
 
 ## Repository layout
 
@@ -131,7 +133,17 @@ src/robinhood_crypto_agent/
 
 ## Status
 
-Phase 1: **analyze and propose only**. `execution_mode: auto` exists as a
-named, *refused* value so that "is unattended trading on?" has an explicit
-answer in config rather than being an absence — setting it does not enable
-automation, it makes every proposal fail the `execution_mode` risk check.
+**Phase 1 (today): analyze and propose.** The agent prepares a trade, you sign
+it off by naming its proposal id, and it submits. Every control in
+[`docs/risk-controls.md`](./docs/risk-controls.md) is live.
+
+**Phase 2 (intended): autonomous execution.** `execution_mode: auto` is the
+destination, not a dead end — but it is refused until the promotion criteria in
+[`docs/autonomy.md`](./docs/autonomy.md) are met, and setting it today only
+makes every proposal fail the `execution_mode` risk check.
+
+The good news for Phase 2 is that only *one* step is human-shaped. Sizing, the
+16 risk rules, the kill switch, the price-drift re-check, the
+remaining-quantity accounting and the audit-log daily caps all already run
+without a human. Phase 2 swaps the authorization source; it does not rework the
+pipeline.

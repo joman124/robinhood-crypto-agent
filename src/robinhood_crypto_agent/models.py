@@ -107,9 +107,17 @@ class Regime(str, Enum):
 class ExecutionMode(str, Enum):
     """How far the agent is allowed to go on its own.
 
-    Only ``PROPOSE_ONLY`` is implemented. ``AUTO`` exists as a named, refused
-    value so that "is unattended trading on?" has an explicit answer in config
-    rather than being an absence, and so the refusal is testable.
+    ``PROPOSE_ONLY`` is Phase 1 and is what is implemented today. ``AUTO`` is
+    Phase 2 -- the intended destination, not a dead end -- and is refused until
+    the promotion criteria in ``docs/autonomy.md`` are met. It is a named value
+    rather than an absence so that "is unattended trading on?" has an explicit
+    answer in config, and so the gate is testable.
+
+    Everything between a proposal and an order is already independent of *who*
+    authorizes: sizing, the risk engine, the kill switch, the drift re-check,
+    the remaining-quantity accounting and the audit log all run unattended.
+    Only the approval step is human-shaped, so Phase 2 replaces one check
+    rather than reworking the pipeline.
     """
 
     PROPOSE_ONLY = "propose_only"

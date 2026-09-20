@@ -110,8 +110,9 @@ class RiskEngine:
             rule="execution_mode",
             passed=False,
             message=(
-                f"execution_mode is {mode.value!r}, but unattended execution is not "
-                "implemented in this codebase. Only 'propose_only' is supported."
+                f"execution_mode is {mode.value!r}. Unattended execution is Phase 2 "
+                "and is not implemented yet -- see docs/autonomy.md for what has to "
+                "be built and proven first. Until then only 'propose_only' runs."
             ),
         )
 
