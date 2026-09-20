@@ -1,0 +1,40 @@
+# Strategy parameters.
+#
+# Weights are per-regime and are L1-normalized on load, so they are read as
+# relative importance rather than needing to sum to 1 by hand.
+
+strategy:
+  # Bars are aggregated from ingested quotes -- see docs/data-constraints.md.
+  # A 60-minute bar needs roughly hourly ingestion to be well-sampled.
+  bar_interval_minutes: 60
+  min_bars: 30
+
+  fast_ma: 12
+  slow_ma: 26
+  signal_ma: 9
+  rsi_period: 14
+  atr_period: 14
+  adx_period: 14
+  adx_trend_threshold: 22
+  breakout_lookback: 20
+
+  # Sizing cuts exposure when realized volatility runs above this per-bar target.
+  target_volatility_pct: 1.0
+  volatility_lookback: 20
+
+  weights:
+    trending:
+      trend: 0.50
+      momentum: 0.25
+      breakout: 0.15
+      mean_reversion: 0.10
+    ranging:
+      mean_reversion: 0.50
+      breakout: 0.20
+      trend: 0.15
+      momentum: 0.15
+    unknown:
+      trend: 0.25
+      momentum: 0.25
+      breakout: 0.25
+      mean_reversion: 0.25

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robinhood-crypto-agent"
+version = "0.1.0"
+description = "A propose-only Robinhood crypto trading agent operated through Claude Code's RobinHood MCP server."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+rhca = "robinhood_crypto_agent.cli:main"
+robinhood-crypto-agent = "robinhood_crypto_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Correctness rules only. Stylistic rulesets are deliberately not enabled:
+# `Decimal("100")` over `Decimal(100)` is a house convention here, not a nit.
+select = ["E4", "E7", "E9", "F", "B", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["robinhood_crypto_agent"]

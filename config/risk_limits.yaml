@@ -1,0 +1,28 @@
+# Trading limits. Every value here is clamped against ABSOLUTE_CEILINGS in
+# src/robinhood_crypto_agent/config.py. Asking for more than a ceiling is a
+# load error, not a grant -- raising a ceiling is a reviewable code change.
+
+limits:
+  # Per-trade sizing
+  max_notional_per_trade_usd: 250      # ceiling: 2500
+  min_notional_per_trade_usd: 10
+
+  # Per-day caps, enforced from the audit log so they survive a restart
+  max_daily_notional_usd: 1000         # ceiling: 10000
+  max_daily_loss_usd: 200              # ceiling: 1000
+
+  # Concentration and breadth
+  max_position_pct_of_portfolio: 10    # ceiling: 25
+  max_open_positions: 5                # ceiling: 8
+
+  # Market-quality gates. Robinhood's market-maker-routed crypto quotes
+  # routinely show a spread over 1%, so this one blocks real trades.
+  max_spread_pct: 0.75                 # ceiling: 2.5
+  max_quote_age_seconds: 90            # ceiling: 300
+
+  # How far price may move between proposing and submitting
+  price_drift_tolerance_pct: 0.5       # ceiling: 1.5
+
+  # Signal quality floors
+  min_signal_confidence: 0.35
+  min_abs_score: 0.25
