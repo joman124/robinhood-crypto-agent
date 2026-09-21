@@ -89,8 +89,18 @@ class ApprovalGate:
         tranche_index: int = 0,
         ref_id: str | None = None,
         tool: str = CRYPTO_TOOLS["place"],
+        allow_override: bool = True,
     ) -> ExecutionAuthorization:
-        """Authorize one tranche, or raise explaining why not."""
+        """Authorize one tranche, or raise explaining why not.
+
+        ``allow_override`` is set to ``False`` for approvals that did not come
+        from a human typing them -- a recorded dashboard decision, say. Such an
+        approval can execute a proposal that *passed* the risk engine, but can
+        never override one that was blocked, whatever its text says. This is
+        belt-and-braces with the redaction in ``decisions.sanitize_note``: two
+        independent things would have to fail for a web button to override a
+        risk block.
+        """
         notes: list[str] = []
 
         if self.config.execution_mode is not ExecutionMode.PROPOSE_ONLY:
@@ -105,7 +115,9 @@ class ApprovalGate:
                 f"{state.describe()} -- no proposal may be executed until it is released"
             )
 
-        overridden = self._check_approval(proposal, approval_text)
+        overridden = self._check_approval(
+            proposal, approval_text, allow_override=allow_override
+        )
         if overridden:
             notes.append(
                 "risk check was overridden by explicit human instruction; "
@@ -135,7 +147,9 @@ class ApprovalGate:
 
     # -- checks -----------------------------------------------------------
 
-    def _check_approval(self, proposal: Proposal, approval_text: str) -> bool:
+    def _check_approval(
+        self, proposal: Proposal, approval_text: str, *, allow_override: bool = True
+    ) -> bool:
         text = (approval_text or "").strip()
         if not text:
             raise ApprovalError(
@@ -163,6 +177,13 @@ class ApprovalGate:
             return False
 
         failures = ", ".join(f.rule for f in proposal.risk.blocking_failures)
+        if not allow_override:
+            raise ApprovalError(
+                f"proposal {proposal.proposal_id} was blocked by the risk engine "
+                f"({failures}). This approval did not come from a typed human "
+                "instruction, and a recorded decision can never override a risk "
+                "block. Override it deliberately from the terminal, or let it stand."
+            )
         if OVERRIDE_PHRASE not in text:
             raise ApprovalError(
                 f"proposal {proposal.proposal_id} was blocked by the risk engine "

@@ -52,6 +52,13 @@ hands it a payload after a human has approved a **specific proposal by id**.
   Robinhood. See [`docs/architecture.md`](./docs/architecture.md#the-contract-layer).
 - **Logs everything, append-only.** Including proposals the risk engine
   blocked — that record is the evidence the controls do anything.
+- **Scores itself.** Every proposal is measured against what the price actually
+  did over a fixed horizon, past a hurdle set above the round-trip spread. A
+  gain smaller than the spread is not a win. With nothing resolved the hit rate
+  reads *unknown*, never 0%.
+- **Has a web dashboard** ([`dashboard/`](./dashboard)) for reviewing proposals,
+  seeing the measured hit rate, and accepting or declining — which records a
+  decision the agent replays through the same approval gate, never an order.
 
 ## Setup
 
@@ -96,6 +103,12 @@ rhca plan-order <proposal-id>
 rhca approve <proposal-id> --approval "execute <proposal-id>" --quote fresh.json
 rhca record-execution <proposal-id> --tranche 0 -f response.json
 
+# How good have the suggestions been?
+rhca accuracy
+
+# Push proposals + outcomes to the dashboard, pull back your accept/decline
+rhca dashboard-sync --url https://your-project.vercel.app --token "$TOKEN"
+
 # Housekeeping
 rhca status
 rhca audit --proposal-id <proposal-id>
@@ -125,10 +138,15 @@ src/robinhood_crypto_agent/
 ├── audit.py            # append-only log; the daily caps read from it
 ├── serde.py            # proposal round-trip through the log
 ├── reports.py          # human-readable output
+├── outcomes.py         # scoring proposals against what the price did next
+├── decisions.py        # accept/decline records from the dashboard
+├── dashboard.py        # the payload the dashboard renders
 ├── mcp/                # the RobinHood tool contract and response parsers
 ├── store/              # price history and cached account state
 ├── strategy/           # signals, regime detection, composite blending
 └── execution/          # plans, order payloads, approval gate, kill switch
+
+dashboard/              # Next.js app, deployable to Vercel
 ```
 
 ## Status

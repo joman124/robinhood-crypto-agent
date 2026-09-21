@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Sequence
 
+from . import dashboard as dashboard_mod
 from . import reports
 from .agent import Agent, MarketState
 from .audit import AuditLog, day_from
@@ -45,6 +47,7 @@ from .mcp.parse import (
 )
 from .models import Candle, parse_timestamp
 from .numeric import format_decimal, round_money, to_decimal
+from .outcomes import DEFAULT_HORIZON_BARS, DEFAULT_HURDLE_PCT
 from .serde import proposal_from_dict
 from .store import PriceStore, StateCache
 from .symbols import canonical
@@ -541,6 +544,152 @@ def cmd_validate_order(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _scoring_args(args: argparse.Namespace) -> tuple[int, Decimal]:
+    horizon = int(getattr(args, "horizon", None) or DEFAULT_HORIZON_BARS)
+    hurdle = (
+        to_decimal(args.hurdle, field="hurdle")
+        if getattr(args, "hurdle", None) is not None
+        else DEFAULT_HURDLE_PCT
+    )
+    return horizon, hurdle
+
+
+def cmd_accuracy(args: argparse.Namespace) -> int:
+    config, state, store, audit = _context(args)
+    horizon, hurdle = _scoring_args(args)
+    payload = dashboard_mod.build_payload(
+        config, audit=audit, store=store, horizon_bars=horizon, hurdle_pct=hurdle
+    )
+
+    if args.json:
+        print(json.dumps(payload["stats"], indent=2))
+        return EXIT_OK
+
+    overall = payload["stats"]["overall"]
+    print(
+        f"scored over {horizon} bars against a {hurdle}% hurdle "
+        f"({config.strategy.bar_interval_minutes}-minute bars)"
+    )
+    print()
+    rate = overall["win_rate"]
+    print(f"  proposals      : {overall['total']}")
+    print(f"  resolved       : {overall['resolved']} ({overall['pending']} still pending)")
+    print(
+        "  hit rate       : "
+        + (
+            f"{rate:.1%} ({overall['wins']}W / {overall['losses']}L, "
+            f"{overall['flat']} flat)"
+            if rate is not None
+            else "unknown -- nothing has resolved yet"
+        )
+    )
+    if overall["average_move_pct"] is not None:
+        print(f"  average move   : {overall['average_move_pct']}%")
+        print(f"  best / worst   : {overall['best_move_pct']}% / {overall['worst_move_pct']}%")
+
+    for label, key in (("by regime", "by_regime"), ("by symbol", "by_symbol")):
+        grouped = payload["stats"][key]
+        if not grouped:
+            continue
+        print(f"\n  {label}:")
+        for name, stats in sorted(grouped.items()):
+            group_rate = stats["win_rate"]
+            rendered = f"{group_rate:.1%}" if group_rate is not None else "unknown"
+            print(
+                f"    {name:12} {rendered:>8}  "
+                f"({stats['wins']}W/{stats['losses']}L/{stats['flat']}F, "
+                f"{stats['pending']} pending)"
+            )
+
+    if overall["resolved"] == 0:
+        print(
+            "\nNo proposal has resolved yet. Hit rate is unknown, not zero -- "
+            "ingest quotes over the horizon so outcomes can be scored."
+        )
+    return EXIT_OK
+
+
+def cmd_dashboard_export(args: argparse.Namespace) -> int:
+    config, state, store, audit = _context(args)
+    horizon, hurdle = _scoring_args(args)
+    payload = dashboard_mod.build_payload(
+        config,
+        audit=audit,
+        store=store,
+        horizon_bars=horizon,
+        hurdle_pct=hurdle,
+        limit=args.limit,
+        repo_url=args.repo_url,
+    )
+    rendered = json.dumps(payload, indent=2)
+    if args.out:
+        path = Path(args.out)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(rendered + "\n")
+        print(f"wrote {len(payload['proposals'])} proposal(s) to {path}")
+    else:
+        print(rendered)
+    return EXIT_OK
+
+
+def cmd_dashboard_sync(args: argparse.Namespace) -> int:
+    config, state, store, audit = _context(args)
+    token = args.token or os.environ.get("RHCA_DASHBOARD_TOKEN")
+    base_url = args.url or os.environ.get("RHCA_DASHBOARD_URL")
+    if not base_url:
+        raise AgentError(
+            "no dashboard URL. Pass --url or set RHCA_DASHBOARD_URL."
+        )
+    if not token:
+        raise AgentError(
+            "no dashboard token. Pass --token or set RHCA_DASHBOARD_TOKEN."
+        )
+
+    horizon, hurdle = _scoring_args(args)
+    payload = dashboard_mod.build_payload(
+        config,
+        audit=audit,
+        store=store,
+        horizon_bars=horizon,
+        hurdle_pct=hurdle,
+        limit=args.limit,
+        repo_url=args.repo_url,
+    )
+    result = dashboard_mod.push(payload, base_url=base_url, token=token)
+    print(
+        f"pushed {len(payload['proposals'])} proposal(s) to {base_url} "
+        f"({result.get('stored', '?')} stored)"
+    )
+
+    decisions = dashboard_mod.fetch_decisions(base_url=base_url, token=token)
+    if not decisions:
+        print("no pending decisions on the dashboard")
+        return EXIT_OK
+
+    print(f"\n{len(decisions)} decision(s) recorded on the dashboard:")
+    for decision in decisions:
+        audit.append(
+            "note",
+            {
+                "message": f"dashboard decision: {decision.kind.value} {decision.proposal_id}",
+                "decision": decision.to_dict(),
+            },
+        )
+        marker = "ACCEPT" if decision.kind.value == "accept" else "decline"
+        print(f"  [{marker}] {decision.proposal_id}  ({decision.decided_at.isoformat()})")
+        if decision.kind.value == "accept":
+            print(
+                f"      to act on it: rhca approve {decision.proposal_id} "
+                f'--approval "{decision.approval_text}" --quote fresh.json'
+            )
+    print(
+        "\nA recorded decision goes through the same approval gate as a typed one: "
+        "kill switch, live price-drift re-check, remaining quantity and contract "
+        "validation all still apply. It can never override a risk block."
+    )
+    return EXIT_OK
+
+
 # -- parser ---------------------------------------------------------------
 
 
@@ -629,6 +778,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     describe = sub.add_parser("describe-tools", help="the MCP tool contract this agent uses")
     describe.set_defaults(func=cmd_describe_tools)
+
+    accuracy = sub.add_parser("accuracy", help="how good the agent's proposals have been")
+    accuracy.add_argument("--horizon", type=int, default=None, help="bars to score over")
+    accuracy.add_argument("--hurdle", default=None, help="win threshold, percent")
+    accuracy.add_argument("--json", action="store_true")
+    accuracy.set_defaults(func=cmd_accuracy)
+
+    export = sub.add_parser("dashboard-export", help="write the dashboard payload as JSON")
+    export.add_argument("--out", "-o", default=None, help="file to write (default: stdout)")
+    export.add_argument("--limit", type=int, default=None)
+    export.add_argument("--horizon", type=int, default=None)
+    export.add_argument("--hurdle", default=None)
+    export.add_argument("--repo-url", default=None, dest="repo_url")
+    export.set_defaults(func=cmd_dashboard_export)
+
+    sync = sub.add_parser("dashboard-sync", help="push proposals and pull accept/decline decisions")
+    sync.add_argument("--url", default=None, help="dashboard base URL (or RHCA_DASHBOARD_URL)")
+    sync.add_argument("--token", default=None, help="bearer token (or RHCA_DASHBOARD_TOKEN)")
+    sync.add_argument("--limit", type=int, default=None)
+    sync.add_argument("--horizon", type=int, default=None)
+    sync.add_argument("--hurdle", default=None)
+    sync.add_argument("--repo-url", default=None, dest="repo_url")
+    sync.set_defaults(func=cmd_dashboard_sync)
 
     validate = sub.add_parser("validate-order", help="check an order payload offline")
     validate.add_argument("--file", "-f", default="-")
