@@ -165,3 +165,8 @@ The good news for Phase 2 is that only *one* step is human-shaped. Sizing, the
 remaining-quantity accounting and the audit-log daily caps all already run
 without a human. Phase 2 swaps the authorization source; it does not rework the
 pipeline.
+
+**Next up.** Running the ingest → analyze → sync loop on an hourly schedule (so
+the hit rate is measured against real trading rather than a backfill), and a
+round of dashboard UX work. Both are written up with their gotchas in
+[`docs/roadmap.md`](./docs/roadmap.md).
