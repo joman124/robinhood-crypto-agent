@@ -1,0 +1,25 @@
+# Agent configuration.
+#
+# Risk limits live in risk_limits.yaml and are clamped against hard ceilings in
+# src/robinhood_crypto_agent/config.py -- config can only make this agent more
+# conservative, never less.
+
+# Only 'propose_only' is implemented. 'auto' is a named, refused value so that
+# "is unattended trading on?" has an explicit answer rather than being an
+# absence. Changing it does not enable automation; it makes every proposal fail
+# the execution_mode risk check.
+execution_mode: propose_only
+
+# The allowlist. A symbol not listed here cannot be proposed, whatever the
+# signals say.
+watchlist:
+  - BTC-USD
+  - ETH-USD
+  - SOL-USD
+
+# The NUMERIC rhs_account_number from get_accounts -- not the alphanumeric
+# account_number. Leave blank and set RHCA_RHS_ACCOUNT_NUMBER in the
+# environment so a real account number is never committed.
+rhs_account_number: ""
+
+data_dir: data

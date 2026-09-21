@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime state: audit log, price history, kill switch. Never commit account data.
+data/*
+!data/.gitkeep
+*.local.yaml
+.env
