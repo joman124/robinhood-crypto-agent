@@ -63,6 +63,32 @@ rhca dashboard-sync
 That one command pushes proposals and outcomes up, and pulls your decisions
 back down. Run it on a schedule alongside your quote ingestion.
 
+## Keeping dependencies deployable
+
+Vercel **refuses to deploy a Next.js version with a known CVE**, so a stale
+dependency shows up as a blocked production deploy rather than a warning. CI
+runs `npm audit --audit-level=high` on this package to catch it a step earlier.
+
+When it fires:
+
+```bash
+cd dashboard
+npm audit                      # read the advisory and the fixed version
+npm install next@<fixed>       # for a direct dependency
+```
+
+For a **transitive** dependency, add an `overrides` entry instead — Next pins
+its own copies of `postcss` and `sharp`, and overriding them is how they get
+patched without waiting for a Next release:
+
+```json
+"overrides": { "postcss": "^8.5.23", "sharp": "^0.35.4" }
+```
+
+Re-run `npm run build` after any override: pinning a transitive to a version
+its parent did not expect is exactly the kind of change that compiles in
+theory and breaks in practice.
+
 ## Running locally
 
 ```bash

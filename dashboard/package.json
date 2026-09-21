@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "next": "15.5.4",
+    "next": "^15.5.25",
     "react": "19.1.1",
     "react-dom": "19.1.1"
   },
@@ -19,5 +19,9 @@
     "@types/react": "19.0.2",
     "@types/react-dom": "19.0.2",
     "typescript": "5.7.2"
+  },
+  "overrides": {
+    "postcss": "^8.5.23",
+    "sharp": "^0.35.4"
   }
 }
