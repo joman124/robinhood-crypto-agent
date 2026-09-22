@@ -15,9 +15,9 @@ config.py. Raising a risk ceiling is a deliberate code change, not a config edit
 
 | Limit | Ceiling | Shipped default |
 |---|---|---|
-| `max_notional_per_trade_usd` | 2500 | 250 |
-| `max_daily_notional_usd` | 10000 | 1000 |
-| `max_daily_loss_usd` | 1000 | 200 |
+| `max_notional_per_trade_usd` | 2500 | 50 (was 250; scaled to the $500 Agentic account on 2026-09-22) |
+| `max_daily_notional_usd` | 10000 | 200 (was 1000) |
+| `max_daily_loss_usd` | 1000 | 40 (was 200) |
 | `max_position_pct_of_portfolio` | 25 | 10 |
 | `max_open_positions` | 15 | 15 (raised from 5, ceiling from 8, on 2026-09-22) |
 | `max_spread_pct` | 2.5 | 2.0 (raised from 0.75 on 2026-09-21: live Robinhood spreads are ~1.9%) |

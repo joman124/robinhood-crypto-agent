@@ -3,13 +3,18 @@
 # load error, not a grant -- raising a ceiling is a reviewable code change.
 
 limits:
-  # Per-trade sizing
-  max_notional_per_trade_usd: 250      # ceiling: 2500
-  min_notional_per_trade_usd: 10
+  # Per-trade sizing. Scaled to the $500 Agentic account by the owner,
+  # 2026-09-22 (was 250 / 10). $50 matches the 10% concentration cap, and the
+  # $5 floor keeps a candidate that clears the escalation trigger (conviction
+  # of at least 0.15, so $7.50 before volatility scaling) large enough to size.
+  max_notional_per_trade_usd: 50       # ceiling: 2500
+  min_notional_per_trade_usd: 5
 
-  # Per-day caps, enforced from the audit log so they survive a restart
-  max_daily_notional_usd: 1000         # ceiling: 10000
-  max_daily_loss_usd: 200              # ceiling: 1000
+  # Per-day caps, enforced from the audit log so they survive a restart.
+  # Scaled with the per-trade cap, keeping the old ratios (was 1000 / 200):
+  # four full-size trades a day, and a loss cap of 8% of the account.
+  max_daily_notional_usd: 200          # ceiling: 10000
+  max_daily_loss_usd: 40               # ceiling: 1000
 
   # Concentration and breadth
   max_position_pct_of_portfolio: 10    # ceiling: 25
@@ -17,8 +22,7 @@ limits:
   # it). Counts every coin the account holds, not just the watchlist.
   max_open_positions: 15               # ceiling: 15
 
-  # Market-quality gates. Robinhood's market-maker-routed crypto quotes
-  # routinely show a spread over 1%, so this one blocks real trades.
+  # Market-quality gates.
   # Raised from 0.75 by the owner, 2026-09-21: Robinhood's market-maker-routed
   # quotes measured 1.89-1.90% on BTC, ETH and SOL, so 0.75 blocked every
   # proposal. Each round trip therefore costs ~1.9% before any edge.
