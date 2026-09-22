@@ -13,7 +13,9 @@ limits:
 
   # Concentration and breadth
   max_position_pct_of_portfolio: 10    # ceiling: 25
-  max_open_positions: 5                # ceiling: 8
+  # Raised from 5 by the owner, 2026-09-22 (the code ceiling moved 8 -> 15 with
+  # it). Counts every coin the account holds, not just the watchlist.
+  max_open_positions: 15               # ceiling: 15
 
   # Market-quality gates. Robinhood's market-maker-routed crypto quotes
   # routinely show a spread over 1%, so this one blocks real trades.
