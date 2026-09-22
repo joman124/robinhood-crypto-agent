@@ -88,3 +88,16 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Audit dependencies
+        # Vercel refuses to deploy a Next.js version with a known CVE, so
+        # without this the first thing to notice a vulnerable dependency is a
+        # blocked production deploy. Failing here instead costs a CI run rather
+        # than a release.
+        #
+        # When this fires: run `npm audit` in dashboard/ to see the advisory,
+        # then `npm install <pkg>@<fixed>` for a direct dependency, or add an
+        # `overrides` entry for a transitive one. Only suppress it with
+        # --omit=dev, or by narrowing the level, if the advisory genuinely
+        # cannot be reached from this app -- and say why in the commit.
+        run: npm audit --audit-level=high
