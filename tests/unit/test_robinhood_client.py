@@ -1,9 +1,8 @@
 """The read-only Robinhood Crypto API client: signing, key handling, REST shapes.
 
-The REST payloads below follow Robinhood's published examples. Unlike the MCP
-fixtures in test_mcp_parse.py they have not been captured from a live account
-yet -- the first ``rhca run --once`` with a real key is that check, and these
-should be replaced with trimmed live captures once it has run.
+The REST payloads below have the field names and types of live responses,
+captured on 2026-09-22 (every field is a string; quote timestamps carry
+nanoseconds). The values are illustrative, not anyone's account.
 """
 
 import base64
@@ -110,12 +109,12 @@ class TestRestShapes:
         "results": [
             {
                 "symbol": "BTC-USD",
-                "price": 81224.22,
-                "bid_inclusive_of_sell_spread": 80466.27,
-                "sell_spread": 0.0093,
-                "ask_inclusive_of_buy_spread": 81982.17,
-                "buy_spread": 0.0093,
-                "timestamp": "2026-09-20T17:32:55.452Z",
+                "timestamp": "2026-09-22T03:58:31.095125625Z",
+                "price": "81224.22",
+                "bid_inclusive_of_sell_spread": "80466.27",
+                "sell_spread": "0.0093",
+                "ask_inclusive_of_buy_spread": "81982.17",
+                "buy_spread": "0.0093",
             }
         ]
     }
@@ -127,7 +126,12 @@ class TestRestShapes:
         assert quote.bid == Decimal("80466.27")
         assert quote.ask == Decimal("81982.17")
         assert quote.mark == Decimal("81224.22")
-        assert quote.observed_at.isoformat().startswith("2026-09-20T17:32:55")
+
+    def test_a_nanosecond_timestamp_is_robinhoods_time_not_the_fetch_time(self):
+        """Rejected nanoseconds used to fall back to now -- a stale quote read as fresh."""
+        rh, _ = client(self.BEST_BID_ASK)
+        [quote] = rh.best_bid_ask(["BTC-USD"])
+        assert quote.observed_at.isoformat() == "2026-09-22T03:58:31.095125+00:00"
 
     def test_without_a_price_field_the_mark_is_the_mid(self):
         row = dict(self.BEST_BID_ASK["results"][0])

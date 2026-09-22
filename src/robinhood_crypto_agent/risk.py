@@ -312,6 +312,15 @@ class RiskEngine:
     def _check_concentration(
         self, sizing: SizingResult, context: RiskContext
     ) -> RiskFinding:
+        if sizing.side is Side.SELL:
+            # Spot-only, so a sell can only shrink the position. Blocking it for
+            # leaving the position above the cap would trap exactly the
+            # over-concentrated holdings this rule exists to reduce.
+            return RiskFinding(
+                rule="concentration",
+                passed=True,
+                message=f"a sell only reduces {sizing.symbol}'s share of the portfolio",
+            )
         portfolio = context.portfolio_value
         if portfolio is None or portfolio <= ZERO:
             return RiskFinding(

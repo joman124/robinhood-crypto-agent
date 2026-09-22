@@ -194,9 +194,18 @@ class Runner:
         if account.buying_power is None:
             return
         marks = {symbol: quote.mark for symbol, quote in self.cache.quotes().items()}
-        # Holdings off the watchlist have no quote here and are left out. That
-        # understates the portfolio, which makes the concentration limit
-        # stricter rather than looser.
+        # Holdings off the watchlist count toward the portfolio too. Leaving
+        # them out inflated every watched position's share of it: on the first
+        # live run, SOL at 17.5% of the account read as 100%.
+        unpriced = [p.symbol for p in positions if p.symbol not in marks]
+        if unpriced:
+            try:
+                marks.update({q.symbol: q.mark for q in robinhood.best_bid_ask(unpriced)})
+            except AgentError as exc:
+                log.warning("could not price held %s: %s", ", ".join(unpriced), exc)
+        missing = [symbol for symbol in unpriced if symbol not in marks]
+        if missing:
+            log.warning("portfolio value leaves out unpriced holdings: %s", ", ".join(missing))
         held = sum((p.quantity * marks[p.symbol] for p in positions if p.symbol in marks), ZERO)
         self.cache.put_portfolio_value(account.buying_power + held)
 

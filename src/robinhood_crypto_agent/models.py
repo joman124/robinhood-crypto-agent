@@ -9,6 +9,7 @@ without any of the trading machinery being reachable.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -27,12 +28,23 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+#: Fractional seconds, however many digits were sent.
+_FRACTION = re.compile(r"\.(\d+)")
+
+
 def parse_timestamp(value: str | datetime) -> datetime:
-    """Parse an ISO 8601 timestamp into an aware UTC datetime."""
+    """Parse an ISO 8601 timestamp into an aware UTC datetime.
+
+    Fractional seconds are normalized to the six digits ``fromisoformat``
+    accepts on every supported Python. Robinhood's Crypto API sends
+    nanoseconds (``03:58:31.095125625Z``); rejected, those used to fall back to
+    the fetch time silently, and a stale quote would then have read as fresh.
+    """
     if isinstance(value, datetime):
         parsed = value
     else:
         text = value.strip().replace("Z", "+00:00")
+        text = _FRACTION.sub(lambda m: "." + (m.group(1) + "000000")[:6], text, count=1)
         parsed = datetime.fromisoformat(text)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
