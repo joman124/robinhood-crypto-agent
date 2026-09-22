@@ -150,3 +150,28 @@ def test_allows_matches_across_symbol_spellings(tmp_path):
     config = load_config(tmp_path)
     assert config.allows("BTCUSD")
     assert not config.allows("DOGE-USD")
+
+
+class TestPipelineConfig:
+    """The pipeline's knobs bound spend and politeness, so they get ceilings too."""
+
+    def test_the_shipped_pipeline_file_loads(self):
+        pipeline = load_config("config").pipeline
+        assert pipeline.system2_model == "claude-sonnet-5"
+        assert pipeline.rss_feeds and all(u.startswith("https://") for u in pipeline.rss_feeds)
+
+    @pytest.mark.parametrize(
+        "setting",
+        [
+            {"max_escalations_per_day": 201},
+            {"quote_interval_seconds": 1},
+            {"trigger_min_confidence": 1.5},
+            {"rss_feeds": ["http://insecure.example/rss"]},
+            {"market_data_mcp_url": "http://insecure.example/mcp"},
+            {"no_such_setting": 1},
+        ],
+    )
+    def test_out_of_bounds_settings_are_refused(self, tmp_path, setting):
+        write(tmp_path, pipeline={"pipeline": setting})
+        with pytest.raises(ConfigError):
+            load_config(tmp_path)

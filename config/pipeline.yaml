@@ -1,0 +1,38 @@
+# The real-time pipeline: `rhca run`.
+#
+#   quotes + news -> System 1 (indicators + Jev news labels + 16 risk rules)
+#                 -> trigger (below) -> System 2 (Claude Sonnet 5) -> proposal
+#
+# Shadow mode: nothing here can place an order. Every candidate is logged and
+# scored against what the price did next, so the trigger can be tuned on
+# evidence. Ceilings on the spend-related settings live in config.py.
+
+pipeline:
+  # Cadences. Robinhood does not publish its rate limit; community clients
+  # budget ~100 requests/minute, and one quote poll covers the whole watchlist.
+  quote_interval_seconds: 60
+  account_interval_seconds: 600    # holdings, pairs, buying power
+  news_interval_seconds: 120       # RSS
+  sync_interval_seconds: 300       # dashboard push/pull, when configured
+
+  # The trigger. A candidate reaches System 2 only if it passed all 16 risk
+  # rules (whose minimums are confidence 0.35, |score| 0.25) AND clears these.
+  trigger_min_confidence: 0.5
+  trigger_min_abs_score: 0.3
+  escalation_cooldown_minutes: 60  # per symbol
+  max_escalations_per_day: 24      # also the cap on Sonnet spend
+
+  system2_model: claude-sonnet-5
+
+  rss_feeds:
+    - https://cointelegraph.com/rss
+    - https://decrypt.co/feed
+    - https://www.theblock.co/rss.xml
+    - https://bitcoinmagazine.com/feed
+    - https://cryptoslate.com/feed/
+
+  # Market data System 2 can read while it decides: Crypto.com Exchange's public
+  # MCP server (free, no key), attached through the Anthropic API's MCP
+  # connector. Its read-only tools are allowlisted by name in system2.py.
+  # Set to "" to turn it off.
+  market_data_mcp_url: https://mcp.crypto.com/market-data/mcp

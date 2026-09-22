@@ -127,6 +127,13 @@ class ExecutionMode(str, Enum):
 class ProposalStatus(str, Enum):
     PROPOSED = "proposed"
     REJECTED_BY_RISK = "rejected_by_risk"
+    #: Passed risk but not the escalation trigger, so System 2 never saw it.
+    #: Logged anyway: calibrating the trigger needs the outcomes of the
+    #: candidates it held back, not just the ones it let through.
+    NOT_ESCALATED = "not_escalated"
+    #: Escalated to System 2, which passed on it -- or failed to answer, which
+    #: is treated the same way, because silence is never approval.
+    DECLINED_BY_SYSTEM2 = "declined_by_system2"
 
 
 @dataclass(frozen=True)
@@ -282,6 +289,69 @@ class Signal(JsonMixin):
             raise ValueError(f"{self.name}: score {self.score} outside [-1, 1]")
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError(f"{self.name}: confidence {self.confidence} outside [0, 1]")
+
+
+#: Jev's ``asset`` answer for news about the crypto market as a whole, which
+#: applies to every symbol on the watchlist.
+MARKET_WIDE = "MARKET"
+
+#: How each direction label signs a news item's score.
+DIRECTION_SIGNS = {"bullish": 1.0, "bearish": -1.0, "neutral": 0.0}
+
+#: The top level of Jev's impact scale (levels 0..3).
+MAX_IMPACT = 3.0
+
+
+@dataclass(frozen=True)
+class NewsLabels(JsonMixin):
+    """Jev's typed read on one headline, with its calibrated confidences.
+
+    ``confidence`` here is how sure Jev is of its *label* -- that a headline is
+    about ETH and bearish -- not the probability that ETH falls. Whether the
+    labels predict anything is what outcome scoring measures.
+    """
+
+    asset: str
+    asset_confidence: float
+    direction: str
+    direction_confidence: float
+    impact: float
+    model: str = ""
+
+
+@dataclass(frozen=True)
+class NewsItem(JsonMixin):
+    """One headline or post, as fetched, and Jev's labels once it has them."""
+
+    item_id: str
+    source: str
+    title: str
+    published_at: datetime
+    url: str | None = None
+    summary: str = ""
+    labels: NewsLabels | None = None
+
+    def applies_to(self, symbol: str) -> bool:
+        """Whether this item is about ``symbol``'s asset, or the whole market."""
+        if self.labels is None:
+            return False
+        base = symbol.upper().partition("-")[0]
+        return self.labels.asset in (base, MARKET_WIDE)
+
+    @property
+    def score(self) -> float:
+        """Direction times impact, in [-1, 1]; zero when unlabeled or neutral."""
+        if self.labels is None:
+            return 0.0
+        sign = DIRECTION_SIGNS.get(self.labels.direction, 0.0)
+        return max(-1.0, min(1.0, sign * self.labels.impact / MAX_IMPACT))
+
+    @property
+    def confidence(self) -> float:
+        """Right asset *and* right direction: the product of the two confidences."""
+        if self.labels is None:
+            return 0.0
+        return max(0.0, min(1.0, self.labels.asset_confidence * self.labels.direction_confidence))
 
 
 @dataclass(frozen=True)

@@ -3,25 +3,51 @@
 ## The split
 
 ```
-Claude Code ──── MCP ────► Robinhood
+Claude Code ──── MCP ────► Robinhood         the only order path
      │
      │ JSON in / payloads out
      ▼
-rhca (this package) ──── no network at all ────►  ✗
+rhca (this package) ── read-only API ──► Robinhood   quotes, pairs, holdings
+                    ── HTTPS ──────────► RSS, Jev, Claude Sonnet 5
+                                           (+ Crypto.com market data via MCP)
+                    ── order? ─────────►  ✗   (no code path exists)
 ```
 
-The Python package has no HTTP client, no credentials, and no way to reach
-Robinhood. It computes decisions and validates payloads; Claude calls the
-tools. This is what makes the whole decision path — strategy, sizing, risk,
-audit — testable offline, with no account and no mocking of a trading API.
-The 245-test suite touches no network.
+The package now reads from Robinhood (`rhca run`, `robinhood.py`), and calls
+news feeds, Jev and Anthropic. It still cannot place or cancel an order: the
+Robinhood client has only GET methods, and System 2's tools are read-only apart
+from its own decision. So a bug in this repository still costs a bad proposal,
+never a bad order.
+
+The decision path is still testable offline. Every network client is injected
+(`runner.Services`), and the test suite fakes each one and touches no network.
+
+## The real-time loop (`rhca run`)
+
+```
+quotes (Robinhood) ─┐
+RSS ─► Jev ─────────┼─► System 1: candles ─► 4 price signals + news ─► composite
+                    │                                   │
+                    │               size ─► plan ─► 16 risk rules ─► candidate
+                    │                                   │
+                    │             trigger: confidence, |score|, cooldown, cap
+                    │                  no ─► logged (not_escalated)
+                    │                  yes ─► System 2: Sonnet 5, propose/pass
+                    │                                   │
+                    └────────────► audit log ─► outcomes ─► dashboard
+```
+
+System 1 is deterministic and fast. The one model call inside it is Jev, which
+labels text and never sees a price. System 2 runs only when System 1 is
+already confident *and* the risk engine has already said yes. So Sonnet can
+veto a trade, but it can never talk the system into one the rules refuse.
 
 ## The pipeline
 
 ```
 ingest ──► price store ──► candles ──► signals ──► composite ──► sizing
-                                                                   │
-                                            proposal ◄── plan ◄── risk
+                                          ▲                        │
+                          news (Jev) ─────┘   proposal ◄── plan ◄── risk
                                                 │
                                         approval gate ──► order payload
 ```
@@ -47,6 +73,14 @@ of five symbols have no data".
 | `execution/gate.py` | The approval gate — the one path to an order payload |
 | `execution/kill_switch.py` | File-based, fail-safe stop |
 | `audit.py` | Append-only log; the daily caps are computed from it |
+| `robinhood.py` | Read-only, Ed25519-signed Crypto Trading API client — no order methods |
+| `news.py` | RSS/Atom parsing and the append-only news store |
+| `jev.py` | Jev (TypeSafe AI) labels a headline: asset, direction, impact |
+| `trigger.py` | "Is confidence high?" — thresholds, cooldown, daily cap |
+| `system2.py` | Claude Sonnet 5: propose or pass, read-only tools, plus an allowlisted Crypto.com market-data MCP connector |
+| `runner.py` | `rhca run`: cadences, dedupe, heartbeat, per-task failure isolation |
+| `bootstrap.py` | Coinbase candles, so a fresh checkout has history at once |
+| `net.py` | The one HTTP helper: timeouts, size cap, error wording |
 
 ## The contract layer
 

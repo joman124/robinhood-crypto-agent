@@ -10,13 +10,19 @@ the failure it prevents would cost the user actual money.
 
 ## Your role
 
-You are the bridge, and the only component that can reach Robinhood:
+You are the only component that can **place an order**:
 
-- **You** call the `RobinHood` MCP tools. The Python package cannot — it has no
-  network access of any kind.
+- **You** call the `RobinHood` MCP tools, including the order tools. No code in
+  this repository can place or cancel an order.
 - **The CLI** (`rhca`) holds the strategy, the risk limits, and the audit log.
-  It gives you proposals and validated payloads; it never sends anything.
-- **A human** approves a specific proposal by its id. Nothing else is approval.
+  It gives you proposals and validated payloads.
+- **`rhca run`** is a shadow-mode loop that runs on its own. It *reads* from
+  Robinhood's Crypto API with a read-only client (quotes, pairs, holdings,
+  buying power). It labels news with Jev (TypeSafe AI), and asks Claude Sonnet 5
+  (System 2) to propose or pass on strong candidates. It logs proposals; it
+  never orders.
+- **A human** approves a specific proposal by its id. Nothing else is approval
+  — including a System 2 `propose`, which is a suggestion in the log.
 
 ## Hard rules
 
@@ -65,9 +71,9 @@ You are the bridge, and the only component that can reach Robinhood:
    human. If a limit blocks a trade, report that — do not widen the limit.
 
 10. **Never fabricate a tool response.** Quotes, balances, fills, order ids and
-    P&L go into the audit log only from real MCP output, piped in as JSON. Do
-    not retype, summarize, or reconstruct a response from memory. If a tool
-    call failed, say it failed.
+    P&L go into the audit log only from real MCP output, piped in as JSON, or
+    from `rhca run`'s own API reads. Do not retype, summarize, or reconstruct a
+    response from memory. If a tool call failed, say it failed.
 
 11. **Spot crypto only.** No margin, no leverage, no derivatives, even if the
     MCP server exposes them, unless the user explicitly widens the scope.
@@ -76,6 +82,17 @@ You are the bridge, and the only component that can reach Robinhood:
     before moving on. The daily notional and daily loss caps are computed from
     the audit log, so an unrecorded fill silently raises the day's remaining
     budget.
+
+13. **Keep the shadow run shadow.** Never add an order or cancel method to
+    `robinhood.py`, and never give System 2 (`system2.py`) a tool that writes
+    anything but its decision. Its MCP connector toolset stays an allowlist of
+    read-only tools by name — never the whole server. Unattended execution is
+    Phase 2: it goes behind `ApprovalGate`, with the preconditions in
+    `docs/autonomy.md`, as a deliberate human decision.
+
+14. **Never print or log a credential.** `rhca status` lists key *names* only.
+    Keys live in the environment or in the gitignored `.env`; they never go
+    into config files, the audit log, or the dashboard payload.
 
 ## Following an execution plan
 
@@ -125,6 +142,13 @@ rhca approve <id> --approval "<their exact words>" --quote fresh.json
 # call place_crypto_order with the payload it printed, verbatim
 rhca record-execution <id> --tranche 0 -f response.json
 ```
+
+When `rhca run` is running, its proposals are already in the audit log with a
+`status` (`proposed`, `declined_by_system2`, `not_escalated`,
+`rejected_by_risk`). Act only on `proposed` ones a human names by id, through
+the same `plan-order` → `approve` → `place_crypto_order` → `record-execution`
+steps. Check `rhca status` for whether the loop is alive before trusting its
+quotes.
 
 Once a day, record realized P&L so the daily loss cap is real:
 

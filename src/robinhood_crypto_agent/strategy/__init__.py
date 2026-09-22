@@ -7,6 +7,7 @@ from .signals import (
     BreakoutSignal,
     MeanReversionSignal,
     MomentumSignal,
+    NewsSignal,
     TrendSignal,
     default_signal_sources,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "BreakoutSignal",
     "MeanReversionSignal",
     "MomentumSignal",
+    "NewsSignal",
     "TrendSignal",
     "default_signal_sources",
 ]

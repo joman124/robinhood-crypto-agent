@@ -8,7 +8,7 @@ from typing import Protocol, Sequence, runtime_checkable
 
 from .. import indicators
 from ..config import StrategyConfig
-from ..models import Candle, Signal
+from ..models import Candle, NewsItem, Signal
 
 
 @dataclass
@@ -19,12 +19,16 @@ class SignalContext:
     context compute each series once rather than four times -- and, more
     importantly, all four see *identical* values rather than independently
     recomputed ones that could drift if a parameter were passed inconsistently.
+
+    ``news`` holds only items already known to be about this symbol (or the
+    whole market); filtering by asset happens before the context is built.
     """
 
     symbol: str
     candles: Sequence[Candle]
     config: StrategyConfig
     notes: list[str] = field(default_factory=list)
+    news: Sequence[NewsItem] = ()
 
     @cached_property
     def closes(self) -> list[float]:
@@ -80,7 +84,12 @@ class SignalContext:
 
 @runtime_checkable
 class SignalSource(Protocol):
-    """A named source of one bounded opinion about one symbol."""
+    """A named source of one bounded opinion about one symbol.
+
+    A source may also set ``optional = True`` when having no opinion is its
+    normal state (news), so the composite does not read its silence as missing
+    data. The attribute is read with ``getattr``; the price signals omit it.
+    """
 
     name: str
 

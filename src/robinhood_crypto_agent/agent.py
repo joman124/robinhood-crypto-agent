@@ -28,6 +28,7 @@ from .indicators import latest
 from .models import (
     CompositeView,
     Direction,
+    NewsItem,
     OrderType,
     PairConstraints,
     Position,
@@ -59,9 +60,14 @@ class MarketState:
     constraints: dict[str, PairConstraints] = field(default_factory=dict)
     positions: dict[str, Position] = field(default_factory=dict)
     portfolio_value: Decimal | None = None
+    #: Recent Jev-labeled news; each symbol sees only the items about it.
+    news: list[NewsItem] = field(default_factory=list)
 
     def quote_for(self, symbol: str) -> Quote | None:
         return self.quotes.get(canonical(symbol))
+
+    def news_for(self, symbol: str) -> list[NewsItem]:
+        return [item for item in self.news if item.applies_to(canonical(symbol))]
 
     def constraints_for(self, symbol: str) -> PairConstraints:
         return self.constraints.get(canonical(symbol)) or PairConstraints.permissive(
@@ -192,7 +198,7 @@ class Agent:
                 ),
             )
 
-        view = self.strategy.evaluate(symbol, candles)
+        view = self.strategy.evaluate(symbol, candles, news=state.news_for(symbol))
 
         if view.direction is Direction.FLAT:
             return SymbolOutcome(

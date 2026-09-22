@@ -1,7 +1,11 @@
 # robinhood-crypto-agent
 
-A crypto trading agent for Robinhood, operated through
-[Claude Code](https://claude.com/claude-code) and the **RobinHood MCP server**.
+A crypto trading agent for Robinhood with two layers. System 1 is fast and
+deterministic: indicators, a news signal labeled by
+[Jev](https://typesafe.ai/), and 16 risk rules. It escalates only its confident
+ideas to System 2, **Claude Sonnet 5**. Orders go only through
+[Claude Code](https://claude.com/claude-code) and the **RobinHood MCP server**,
+after a human approves.
 
 > ⚠️ **This trades real money.** `place_crypto_order` places a real order
 > against a real account. There is no paper-trading endpoint to point at.
@@ -11,7 +15,8 @@ A crypto trading agent for Robinhood, operated through
 ## The shape of the thing
 
 Claude holds the MCP connection. This Python package holds the decision logic,
-the risk limits, and the audit trail — and **cannot reach the network at all**.
+the risk limits, and the audit trail. It can *read* from Robinhood (see
+`rhca run` below), but **it has no code path that places an order**.
 
 ```
      ┌──────────────────────── Claude Code ────────────────────────┐
@@ -32,6 +37,27 @@ the risk limits, and the audit trail — and **cannot reach the network at all**
 The split is the safety property: no code path in this repository can place an
 order. Submitting one requires Claude to call an MCP tool, and the CLI only
 hands it a payload after a human has approved a **specific proposal by id**.
+
+### The real-time loop: `rhca run` (shadow mode)
+
+```
+Robinhood quotes ──┐
+RSS ─► Jev ────────┼─► System 1: indicators + news + 16 risk rules
+                   │        │
+                   │   confidence high?  no ─► logged, still scored
+                   │        │ yes
+                   │   System 2: Claude Sonnet 5 ─► propose / pass
+                   │        (+ Crypto.com market data, MCP connector)
+                   │        │
+                   └──────► audit log ─► outcome scoring ─► dashboard
+```
+
+`rhca run` polls Robinhood's Crypto Trading API with a **read-only** client (no
+order method exists). Jev labels every headline, and Sonnet judges only what
+already passed every risk rule and the trigger. Every candidate is logged and
+scored against what the price did next, including the ones held back. That is
+the evidence for whether each stage earns its place. Setup and keys:
+[`docs/runbook.md`](./docs/runbook.md#shadow-run-rhca-run).
 
 ## What it does
 
@@ -65,7 +91,7 @@ hands it a payload after a human has approved a **specific proposal by id**.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest                       # 245 tests, no network, no account needed
+pytest                       # all offline, no account needed
 ruff check src tests
 
 export RHCA_RHS_ACCOUNT_NUMBER=...   # the NUMERIC rhs_account_number
@@ -86,6 +112,11 @@ Every command that consumes MCP output takes JSON on a path or on stdin, so a
 tool response is never retyped or paraphrased.
 
 ```bash
+# The real-time loop (keys in .env -- see .env.example)
+rhca bootstrap-history          # Coinbase bars, so indicators work at once
+rhca run --once                 # one pass of every task: the smoke test
+rhca run --keep-awake           # shadow mode until Ctrl+C
+
 # 1. Ingest what Claude fetched
 rhca ingest accounts  -f accounts.json     # resolves rhs_account_number
 rhca ingest pairs     -f pairs.json        # increments, halts, market-only flags
@@ -126,7 +157,15 @@ sign-off to unattended execution.
 
 ```
 src/robinhood_crypto_agent/
-├── cli.py              # the command surface Claude drives
+├── cli.py              # the command surface
+├── runner.py           # rhca run: the real-time loop, shadow mode
+├── robinhood.py        # read-only Crypto Trading API client (no order methods)
+├── news.py             # RSS/Atom feeds and the news store
+├── jev.py              # Jev (TypeSafe AI) headline labels
+├── trigger.py          # "is confidence high?" before System 2
+├── system2.py          # Claude Sonnet 5: propose or pass
+├── bootstrap.py        # Coinbase candles for a fresh checkout
+├── net.py              # the one HTTP helper
 ├── agent.py            # the analysis pipeline
 ├── config.py           # config, clamped by hard code ceilings
 ├── models.py           # domain types
@@ -166,7 +205,8 @@ remaining-quantity accounting and the audit-log daily caps all already run
 without a human. Phase 2 swaps the authorization source; it does not rework the
 pipeline.
 
-**Next up.** Running the ingest → analyze → sync loop on an hourly schedule (so
-the hit rate is measured against real trading rather than a backfill), and a
-round of dashboard UX work. Both are written up with their gotchas in
+**Next up.** The first shadow run with real keys: confirm the Robinhood REST
+shapes, then let it run long enough to compare hit rates by status. Did what
+System 2 proposed beat what it passed on? Did escalated candidates beat the
+ones held back? Then a round of dashboard UX work. See
 [`docs/roadmap.md`](./docs/roadmap.md).

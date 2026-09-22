@@ -2,114 +2,117 @@
 
 Where the project stands, and what the next session should pick up.
 
+## The architecture (decided 2026-09-21)
+
+```
+[ Real-time crypto data / news ]      Robinhood quotes, RSS; Crypto.com market data for System 2
+              |
+              v
+[ Jev + System 1 ]                    Jev (TypeSafe AI) labels each headline;
+              |                       indicators + news signal + 16 risk rules
+      Is confidence high?             trigger: thresholds, cooldown, daily cap
+       |-- no  -> logged as not_escalated (and still scored)
+       '-- yes -> [ Claude Sonnet 5 ] System 2: propose or pass, with read-only tools
+                          |
+                          v
+              [ Robinhood Crypto API ]  shadow mode: a logged proposal, not an order
+```
+
+This replaced the previous Goal 1, an hourly scheduled ingest-analyze-sync
+loop. `rhca run` does the same job continuously, and it builds the track record
+that loop was meant to build.
+
 ## Where things stand
 
-- The agent is on `main` and deployed: proposals, 16 risk rules, the approval
-  gate, the audit log, outcome scoring, and a Vercel dashboard for sign-off.
-- **Not yet exercised against a funded account.** No order has been placed,
-  previewed or cancelled by this codebase. [`runbook.md`](./runbook.md) has the
-  first-run checklist — start by confirming the kill switch actually stops a
-  trade before trusting anything else.
-- **No real track record yet.** Any hit rate shown so far came from synthetic
-  data used to exercise the pipeline. The real number starts accumulating once
-  quotes are ingested on a schedule — which is goal 1.
+- **Built:** `rhca run`, in shadow mode. It polls Robinhood's Crypto Trading API
+  with a read-only, Ed25519-signed client (`robinhood.py`), which has no order
+  method. It fetches five free RSS feeds. (X was dropped on 2026-09-21: it
+  bills per post read.) Jev labels each headline with asset, direction and impact. The
+  labels feed a fifth, *optional* signal (`NewsSignal`), which drops out of the
+  blend entirely when there is no recent news. Candidates that pass every risk
+  rule and the trigger go to Claude Sonnet 5 (`system2.py`), which answers
+  propose or pass. Sonnet can also read a second venue's market data (ticker,
+  order book, candles, trades) from Crypto.com's free public MCP server, through
+  the Anthropic API's MCP connector. That toolset is an allowlist of its
+  read-only tools. Every candidate is logged with its status and scored.
+  `rhca accuracy` groups hit rates by status.
+- **Also built:** `rhca bootstrap-history` imports free Coinbase bars, so the
+  indicators work from the first minute instead of after 30 hours. The price
+  store reads incrementally. Dashboard sync no longer re-notes the same
+  decision on every sync.
+- **Not yet exercised with real keys.** No key has been used yet. The Robinhood
+  REST response shapes come from the docs and have not been confirmed against
+  a live account. The first `rhca run --once` is that check; see the runbook.
+- **Still no live order path anywhere in the package.** Orders still go only
+  through Claude Code's MCP tools, behind a human approval by proposal id.
 
-## Goal 1 — run the loop hourly
+## Next: the shadow run
 
-**The trap: an hourly cron running only `rhca dashboard-sync` does nothing useful.**
+1. **Keys.** Robinhood Crypto API, TypeSafe (Jev), and Anthropic. The Crypto.com connector needs none.
+   The owner creates them. `.env.example` lists them, and
+   `docs/runbook.md` covers setup.
+2. **First `rhca run --once`.** Confirm quotes, pairs, holdings and buying
+   power parse. Then replace the invented REST fixtures in
+   `tests/unit/test_robinhood_client.py` with trimmed live captures.
+3. **Let it run for days, not hours.** Outcomes resolve six bars after each
+   candidate. The questions only have answers once there are dozens of
+   resolved rows per status:
+   - Does System 2 add value? Compare hit rate for `proposed` against
+     `declined_by_system2`.
+   - Is the trigger in the right place? Compare escalated candidates against
+     `not_escalated`.
+   - Does news help? Compare candidates with a `news` signal against those
+     without. Not grouped yet; this is the next small report worth adding.
+4. **Tune from evidence, not feel.** The trigger thresholds and news weight
+   live in `config/pipeline.yaml` and `config/strategy.yaml`. Jev's
+   confidence measures how sure it is of a *label*, not whether the trade
+   wins, so its threshold is only as good as the outcomes behind it.
 
-`dashboard-sync` reads local state and pushes it. It does not fetch quotes and
-does not analyze. Run alone on a timer it would re-push the same proposals
-forever, and — because outcomes resolve by comparing a proposal against the
-bars that came *after* it — every pending proposal would stay pending. The hit
-rate would never move.
+## Then: dashboard UX
 
-The hourly job has to be the whole loop:
+Unchanged from before, plus what the shadow run adds:
 
-```
-get_crypto_quotes (MCP)  ->  rhca ingest quotes   # new bars; resolves outcomes
-                             rhca analyze         # new proposals
-                             rhca dashboard-sync  # push up, pull decisions back
-```
+- **Show the pipeline's fields.** The payload already carries `status`,
+  `trigger_reason`, `system2_decision` and `system2_confidence`, but the page
+  shows none of them yet. Also add a status filter, and render `by_status`
+  from the stats.
+- **Show whether a proposal is still live.** Past `price_drift_tolerance_pct`
+  the gate refuses it; grey out Accept before the click, not after.
+- **Relative timestamps**, **explain the signal column**, **surface the
+  per-signal rationale**, **collapse single-row accuracy panels**, a
+  **hit-rate trend**, **pagination**, **pair/outcome filters**, a **mobile
+  card layout**.
 
-Only the first step is the problem: fetching quotes goes through the RobinHood
-MCP server, which means it needs Claude. Plain `crontab` cannot do it, because
-`cron` has no MCP connection and this package deliberately has no Robinhood
-credentials of its own.
-
-**Recommended: a scheduled Claude session** (a Routine on an hourly cron) that
-runs the four steps above. It keeps the architecture intact — Claude stays the
-only thing that touches Robinhood — and it is the same mechanism Phase 2 would
-use, so building it now is a step toward autonomy rather than a detour.
-
-Worth deciding when building it:
-
-- **Ingest more often than you analyze.** Bar quality is driven by sampling
-  density — roughly four quotes per bar interval is where confidence stops
-  being penalised (see [`data-constraints.md`](./data-constraints.md)). At
-  60-minute bars that is a quote every ~15 minutes, with `analyze` hourly.
-- **The job must not place orders.** It proposes and syncs; execution still
-  waits for a human decision. That boundary is the whole design.
-- **Failures must be visible.** A scheduled job that silently stops looks
-  exactly like a quiet market. Some heartbeat — even just noticing that
-  `rhca status` reports a stale last-observation age — is worth having before
-  relying on it. This is the same dead-man's-switch problem Phase 2 needs
-  solved properly ([`autonomy.md`](./autonomy.md)).
-
-## Goal 2 — improve the dashboard UX
-
-Observations from building and using it. Roughly in order of value:
-
-**Stops wasted clicks**
-- **Show whether a proposal is still live.** A proposal drifts out of
-  acceptability as the price moves; past `price_drift_tolerance_pct` the
-  approval gate refuses it. The page currently offers Accept on proposals the
-  agent would then reject. Showing an age or a "likely stale" marker — and
-  greying out the button past the tolerance — would stop the dead-end click.
-- **Relative timestamps** ("2h ago") instead of absolute ones. The question
-  being asked of that column is *is this still fresh*, not *what time was it*.
-
-**Makes the numbers legible**
-- **Explain the signal column.** `0.33 · 100%` is opaque. It is composite score
-  and confidence; it should say so, on hover at least.
-- **Surface why a proposal exists.** The per-signal breakdown and rationale are
-  already in the audit log and already pushed in the payload's `outcome`, but
-  the page never shows them. A detail view or expandable row would make a
-  proposal reviewable rather than just approvable.
-- **Collapse the accuracy panels when they are single-row.** With one regime
-  and one pair, "by regime" and "by pair" are two identical bars and add
-  nothing. Render them only when there are at least two groups.
-- **A hit-rate trend.** The single headline number hides whether the agent is
-  getting better or worse. A sparkline of rolling hit rate over time answers
-  the question the number is standing in for.
-
-**Scale and ergonomics**
-- **Paginate or virtualise the table.** It renders every proposal ever; the
-  filter helps, but "All" will eventually be thousands of rows.
-- **Filter by pair and by outcome**, not just decision state.
-- **A card layout on mobile.** The table scrolls horizontally on a phone, which
-  is workable but not good.
+System 2's written rationale deliberately stays out of the payload, because
+Sonnet reads the holdings and may quote them. Show it locally (`rhca audit`),
+not on the dashboard.
 
 ## Carried over
 
-- **Phase 2, unattended execution.** Gated, with written promotion criteria, in
-  [`autonomy.md`](./autonomy.md). Goal 1 is a prerequisite: without a scheduled
-  loop there is no evidence to promote on.
-- **joman124/robinhood-crypto-agent#1** is still open and superseded — it
-  targets an MCP endpoint that does not exist and assumes crypto candles are
-  available. Closing it is the owner's call.
+- **Phase 2, unattended execution.** The shadow run is the evidence phase. The
+  promotion checklist and the missing machinery are in
+  [`autonomy.md`](./autonomy.md): an auto-approval policy, a dead-man's
+  switch, per-cycle reconciliation and a tested rollback. The order call
+  belongs behind `ApprovalGate`, never in `robinhood.py` directly.
+- **joman124/robinhood-crypto-agent#1** is still open and superseded. Closing
+  it is the owner's call.
 
 ## What not to erode
 
-Each of these was load-bearing enough to be worth writing down:
-
 1. **The dashboard never places orders and holds no Robinhood credentials.**
    Accepting records a decision; the agent replays it through the full gate.
-2. **`OVERRIDE RISK CHECK` stays typed-only.** Guarded twice — redacted from
-   decision notes on both sides, and refused by the gate for any approval that
-   did not come from a typed instruction.
-3. **Config can only tighten.** Raising a ceiling is a code change.
+2. **`OVERRIDE RISK CHECK` stays typed-only.**
+3. **Config can only tighten.** Raising a ceiling is a code change. The
+   pipeline's spend settings have ceilings too.
 4. **An unknown hit rate reads "unknown", never 0%**, and an unresolved
    proposal is never scored as a loss.
-5. **Proposals are scored whether or not they were accepted**, so the record is
-   not flattered by only counting the ones a human liked.
+5. **Every candidate is scored, whatever its status**, so the record is not
+   flattered by counting only what a stage let through.
+6. **The Robinhood client stays read-only until Phase 2.** System 2's tools
+   stay read-only too. Its only write is `submit_decision`, and that writes
+   a log row.
+7. **A failure is never an approval.** An API error, a refusal, a timeout, a
+   malformed answer or running out of turns all record as not approved.
+8. **Only a pre-approved candidate reaches System 2.** A candidate the risk
+   engine blocked is never escalated, so no headline can talk Sonnet into a
+   trade the rules would refuse.
