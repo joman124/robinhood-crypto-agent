@@ -61,7 +61,7 @@ from .numeric import format_decimal, round_money, to_decimal
 from .outcomes import DEFAULT_HORIZON_BARS, DEFAULT_HURDLE_PCT
 from .robinhood import API_KEY_ENV as ROBINHOOD_KEY_ENV
 from .robinhood import PRIVATE_KEY_ENV as ROBINHOOD_PRIVATE_KEY_ENV
-from .robinhood import RobinhoodClient
+from .robinhood import RobinhoodClient, generate_key_pair
 from .serde import proposal_from_dict
 from .store import PriceStore, StateCache
 from .symbols import canonical
@@ -70,6 +70,31 @@ from .system2 import System2
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_BLOCKED = 2
+
+#: The crypto account ``rhca run`` must read -- the full number or its last 4
+#: digits. A Robinhood API key belongs to one account, and a key made on the
+#: wrong one would otherwise run silently against the wrong money.
+CRYPTO_ACCOUNT_ENV = "RHCA_CRYPTO_ACCOUNT"
+
+
+def mask(number: str | None) -> str:
+    """An account number as its last 4 digits, the way Robinhood shows it."""
+    return f"****{number[-4:]}" if number else "unknown"
+
+
+def check_account(account: Any, expected: str) -> None:
+    """Refuse to run against any crypto account but the pinned one."""
+    if account is None:
+        raise AgentError("Robinhood returned no account for this API key")
+    if not expected:
+        return
+    if len(expected) < 4 or not account.account_number.endswith(expected):
+        raise AgentError(
+            f"this Robinhood API key reads crypto account {mask(account.account_number)}, "
+            f"but {CRYPTO_ACCOUNT_ENV} pins {mask(expected)}. Create the API key under the "
+            f"pinned account (docs/runbook.md, 'Keys'), or correct {CRYPTO_ACCOUNT_ENV}."
+        )
+
 
 #: Every credential ``rhca run`` reads. Only names are ever printed.
 CREDENTIAL_ENVS = (
@@ -82,27 +107,62 @@ CREDENTIAL_ENVS = (
 )
 
 
+def _dotenv_key(line: str) -> str:
+    """The key a ``KEY=VALUE`` line sets, or "" for a comment or blank line."""
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        return ""
+    return line.partition("=")[0].strip().removeprefix("export ").strip()
+
+
+def read_dotenv(path: Path) -> dict[str, str]:
+    """The non-empty ``KEY=VALUE`` pairs in a .env file. An empty value is unset."""
+    if not path.is_file():
+        return {}
+    values = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        key = _dotenv_key(raw)
+        if not key:
+            continue
+        value = raw.partition("=")[2].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if value:
+            values[key] = value
+    return values
+
+
 def load_dotenv(path: Path) -> list[str]:
-    """Load ``KEY=VALUE`` lines into the environment, never overriding what is set.
+    """Load a .env file into the environment, never overriding what is set.
 
     Returns the names it loaded. Values are not echoed anywhere.
     """
-    if not path.is_file():
-        return []
     loaded = []
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip().removeprefix("export ").strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        if key and key not in os.environ:
+    for key, value in read_dotenv(path).items():
+        if key not in os.environ:
             os.environ[key] = value
             loaded.append(key)
     return loaded
+
+
+def set_dotenv_value(path: Path, key: str, value: str) -> None:
+    """Set ``key`` in a .env file, replacing its line or appending one.
+
+    A missing .env starts as a copy of the ``.env.example`` beside it, so the
+    other keys keep their comments.
+    """
+    if path.is_file():
+        lines = path.read_text(encoding="utf-8").splitlines()
+    else:
+        example = path.with_name(".env.example")
+        lines = example.read_text(encoding="utf-8").splitlines() if example.is_file() else []
+    for index, line in enumerate(lines):
+        if _dotenv_key(line) == key:
+            lines[index] = f"{key}={value}"
+            break
+    else:
+        lines.append(f"{key}={value}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _read_json(source: str | None) -> Any:
@@ -190,6 +250,16 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  keys set     : {', '.join(present) or 'none'}")
     if missing:
         print(f"  keys missing : {', '.join(missing)}")
+    cached = state.account()
+    if cached is not None:
+        expected = os.environ.get(CRYPTO_ACCOUNT_ENV, "").strip()
+        if not expected:
+            verdict = f"not pinned -- set {CRYPTO_ACCOUNT_ENV}"
+        elif cached.account_number.endswith(expected):
+            verdict = "matches the pin"
+        else:
+            verdict = f"DOES NOT MATCH the pinned {mask(expected)}"
+        print(f"  robinhood    : last read crypto account {mask(cached.account_number)} ({verdict})")
     print()
 
     coverages = [
@@ -778,6 +848,43 @@ def cmd_bootstrap_history(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_keygen(args: argparse.Namespace) -> int:
+    """Make the Ed25519 key pair Robinhood's API key setup asks for.
+
+    The private half goes straight into .env and is never printed; only the
+    public half is shown, for pasting into Robinhood's "Add key" form.
+    """
+    env_path = _env_file(args)
+    in_file = read_dotenv(env_path).get(ROBINHOOD_PRIVATE_KEY_ENV)
+    in_environment = os.environ.get(ROBINHOOD_PRIVATE_KEY_ENV)
+    if (in_file or in_environment) and not args.force:
+        raise AgentError(
+            f"{ROBINHOOD_PRIVATE_KEY_ENV} is already set. A new private key would not match "
+            "the public key already registered with Robinhood. Pass --force only if you are "
+            "replacing the key at Robinhood too."
+        )
+
+    private_key, public_key = generate_key_pair()
+    set_dotenv_value(env_path, ROBINHOOD_PRIVATE_KEY_ENV, private_key)
+    print(f"Wrote a new {ROBINHOOD_PRIVATE_KEY_ENV} to {env_path.resolve()}.")
+    print("It is not shown here, and it never leaves this machine: it only signs requests.")
+    if in_environment:
+        print(
+            f"Note: {ROBINHOOD_PRIVATE_KEY_ENV} is also set in your environment, which wins "
+            "over .env. Remove it there, or this new key will not be used."
+        )
+    print()
+    print("Paste this PUBLIC key into Robinhood's \"Add key\" form:")
+    print()
+    print(f"    {public_key}")
+    print()
+    print(
+        f"Then copy the API key Robinhood shows you into {env_path.name} as "
+        f"{ROBINHOOD_KEY_ENV}=... (docs/runbook.md, 'Keys', has the full steps)."
+    )
+    return EXIT_OK
+
+
 def _keep_awake() -> bool:
     """Ask Windows not to sleep while this process runs (reverts when it exits)."""
     if sys.platform != "win32":
@@ -800,6 +907,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"{ROBINHOOD_KEY_ENV} and {ROBINHOOD_PRIVATE_KEY_ENV} must be set, in the "
             "environment or in .env -- see docs/runbook.md, 'Shadow run'"
         )
+    account = robinhood.account()
+    expected_account = os.environ.get(CRYPTO_ACCOUNT_ENV, "").strip()
+    check_account(account, expected_account)
 
     system2 = None
     if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
@@ -837,6 +947,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     print("rhca run -- SHADOW MODE: proposes and records, never places an order")
     if loaded:
         print(f"  loaded from .env : {', '.join(loaded)}")
+    buying_power = (
+        f"${round_money(account.buying_power)}" if account.buying_power is not None else "unknown"
+    )
+    pin = "pinned" if expected_account else f"NOT pinned -- set {CRYPTO_ACCOUNT_ENV}"
+    print(
+        f"  robinhood account: crypto {mask(account.account_number)}, "
+        f"buying power {buying_power} ({pin})"
+    )
     print(f"  watchlist        : {', '.join(config.watchlist)}")
     print("  System 1         : indicators + news signal + 16 risk rules")
     print(f"  Jev news labels  : {'on' if services.jev else f'OFF (set {JEV_KEY_ENV})'}")
@@ -889,6 +1007,14 @@ def build_parser() -> argparse.ArgumentParser:
         "bootstrap-history", help="import recent bars from Coinbase so indicators work at once"
     )
     bootstrap.set_defaults(func=cmd_bootstrap_history)
+
+    keygen = sub.add_parser(
+        "keygen", help="make the Robinhood API key pair; the private half goes into .env"
+    )
+    keygen.add_argument(
+        "--force", action="store_true", help="replace a private key that is already set"
+    )
+    keygen.set_defaults(func=cmd_keygen)
 
     status = sub.add_parser("status", help="mode, kill switch, risk usage, data coverage")
     status.set_defaults(func=cmd_status)

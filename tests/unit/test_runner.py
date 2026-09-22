@@ -21,13 +21,15 @@ from robinhood_crypto_agent.models import (
     NewsItem,
     NewsLabels,
     PairConstraints,
+    Position,
     Quote,
     utcnow,
 )
 from robinhood_crypto_agent.net import HttpError
 from robinhood_crypto_agent.news import NewsStore
 from robinhood_crypto_agent.runner import Runner, Services
-from robinhood_crypto_agent.store import PriceStore
+from robinhood_crypto_agent.store import PriceStore, StateCache
+from robinhood_crypto_agent.symbols import canonical
 from robinhood_crypto_agent.system2 import System2Decision
 from tests.conftest import make_candles, uptrend
 
@@ -188,3 +190,23 @@ def test_one_failing_task_does_not_stop_the_others(config):
     assert heartbeat["last_error"]["task"] == "account"
     assert heartbeat["counts"]["quotes"] == 1
     assert len(proposals(config)) == 1
+
+
+def test_holdings_off_the_watchlist_count_toward_the_portfolio(config):
+    """First live run: SOL at 17.5% of the account read as 100% without the others."""
+
+    class Holder(FakeRobinhood):
+        def holdings(self):
+            return [Position("BTC-USD", Decimal("0.001")), Position("XRP-USD", Decimal("1000"))]
+
+        def best_bid_ask(self, symbols):
+            wanted = {canonical(s) for s in symbols}
+            quotes = super().best_bid_ask(symbols) if "BTC-USD" in wanted else []
+            if "XRP-USD" in wanted:
+                mark = Decimal("1.50")
+                quotes.append(Quote("XRP-USD", mark - Decimal("0.01"), mark + Decimal("0.01"), mark, utcnow()))
+            return quotes
+
+    make_runner(config, robinhood=Holder()).cycle(force=True)
+    value = StateCache(config.data_dir / "market_state.json").portfolio_value()
+    assert value == Decimal("5000") + Decimal("80") + Decimal("1500")  # cash + BTC + XRP

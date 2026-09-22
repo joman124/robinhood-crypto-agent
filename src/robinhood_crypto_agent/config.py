@@ -33,7 +33,8 @@ ABSOLUTE_CEILINGS: dict[str, Decimal] = {
     "max_daily_notional_usd": Decimal("10000"),
     "max_daily_loss_usd": Decimal("1000"),
     "max_position_pct_of_portfolio": Decimal("25"),
-    "max_open_positions": Decimal("8"),
+    # Raised from 8 at the owner's instruction, 2026-09-22.
+    "max_open_positions": Decimal("15"),
     "max_spread_pct": Decimal("2.5"),
     "price_drift_tolerance_pct": Decimal("1.5"),
     "max_quote_age_seconds": Decimal("300"),

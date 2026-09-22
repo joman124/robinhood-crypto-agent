@@ -231,6 +231,19 @@ def test_concentration_limit_blocks(config):
     assert not rule(decision, "concentration").passed
 
 
+def test_selling_an_over_concentrated_position_is_not_blocked_by_concentration(config):
+    """A sell can only shrink the position -- the rule must not trap it (first live run)."""
+    context = make_context(
+        config,
+        portfolio_value=Decimal("500"),
+        positions={"BTC-USD": Position("BTC-USD", Decimal("0.005"))},  # ~$400: 80% of it
+    )
+    decision = RiskEngine(config).evaluate(
+        make_view(score=-0.8), make_sizing(notional="80", side=Side.SELL), context
+    )
+    assert rule(decision, "concentration").passed
+
+
 def test_missing_portfolio_value_warns_instead_of_silently_passing(config):
     context = make_context(config, portfolio_value=None)
     decision = RiskEngine(config).evaluate(make_view(), make_sizing(), context)

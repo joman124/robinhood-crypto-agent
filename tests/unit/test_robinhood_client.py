@@ -1,9 +1,8 @@
 """The read-only Robinhood Crypto API client: signing, key handling, REST shapes.
 
-The REST payloads below follow Robinhood's published examples. Unlike the MCP
-fixtures in test_mcp_parse.py they have not been captured from a live account
-yet -- the first ``rhca run --once`` with a real key is that check, and these
-should be replaced with trimmed live captures once it has run.
+The REST payloads below have the field names and types of live responses,
+captured on 2026-09-22 (every field is a string; quote timestamps carry
+nanoseconds). The values are illustrative, not anyone's account.
 """
 
 import base64
@@ -13,8 +12,10 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from robinhood_crypto_agent.errors import ConfigError
-from robinhood_crypto_agent.robinhood import RobinhoodClient, load_private_key
+from robinhood_crypto_agent.cli import check_account, main, read_dotenv
+from robinhood_crypto_agent.errors import AgentError, ConfigError
+from robinhood_crypto_agent.models import Account
+from robinhood_crypto_agent.robinhood import RobinhoodClient, generate_key_pair, load_private_key
 
 SEED = bytes(range(32))
 SEED_B64 = base64.b64encode(SEED).decode()
@@ -109,12 +110,12 @@ class TestRestShapes:
         "results": [
             {
                 "symbol": "BTC-USD",
-                "price": 81224.22,
-                "bid_inclusive_of_sell_spread": 80466.27,
-                "sell_spread": 0.0093,
-                "ask_inclusive_of_buy_spread": 81982.17,
-                "buy_spread": 0.0093,
-                "timestamp": "2026-09-20T17:32:55.452Z",
+                "timestamp": "2026-09-22T03:58:31.095125625Z",
+                "price": "81224.22",
+                "bid_inclusive_of_sell_spread": "80466.27",
+                "sell_spread": "0.0093",
+                "ask_inclusive_of_buy_spread": "81982.17",
+                "buy_spread": "0.0093",
             }
         ]
     }
@@ -126,7 +127,12 @@ class TestRestShapes:
         assert quote.bid == Decimal("80466.27")
         assert quote.ask == Decimal("81982.17")
         assert quote.mark == Decimal("81224.22")
-        assert quote.observed_at.isoformat().startswith("2026-09-20T17:32:55")
+
+    def test_a_nanosecond_timestamp_is_robinhoods_time_not_the_fetch_time(self):
+        """Rejected nanoseconds used to fall back to now -- a stale quote read as fresh."""
+        rh, _ = client(self.BEST_BID_ASK)
+        [quote] = rh.best_bid_ask(["BTC-USD"])
+        assert quote.observed_at.isoformat() == "2026-09-22T03:58:31.095125+00:00"
 
     def test_without_a_price_field_the_mark_is_the_mid(self):
         row = dict(self.BEST_BID_ASK["results"][0])
@@ -194,3 +200,82 @@ class TestRestShapes:
             }
         )
         assert rh.account().buying_power == Decimal("1234.56")
+
+
+class TestKeygen:
+    """``rhca keygen``: the one step of key setup that is easy to get wrong by hand."""
+
+    def test_a_generated_pair_round_trips(self):
+        private, public = generate_key_pair()
+        derived = load_private_key(private).public_key()
+        assert base64.b64encode(derived.public_bytes(Encoding.Raw, PublicFormat.Raw)).decode() == public
+
+    def test_the_private_key_goes_to_env_and_only_the_public_key_is_shown(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.delenv("ROBINHOOD_PRIVATE_KEY", raising=False)
+        (tmp_path / ".env.example").write_text("# keys\nROBINHOOD_API_KEY=\nROBINHOOD_PRIVATE_KEY=\n")
+        env = tmp_path / ".env"
+
+        assert main(["--env-file", str(env), "keygen"]) == 0
+
+        private = read_dotenv(env)["ROBINHOOD_PRIVATE_KEY"]
+        public_bytes = load_private_key(private).public_key().public_bytes(
+            Encoding.Raw, PublicFormat.Raw
+        )
+        out = capsys.readouterr().out
+        assert private not in out
+        assert base64.b64encode(public_bytes).decode() in out
+        assert env.read_text().startswith("# keys")  # the template's comments survive
+
+    def test_an_existing_key_is_never_silently_replaced(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ROBINHOOD_PRIVATE_KEY", raising=False)
+        env = tmp_path / ".env"
+        env.write_text("ROBINHOOD_PRIVATE_KEY=already-registered\n")
+        assert main(["--env-file", str(env), "keygen"]) == 1
+        assert env.read_text() == "ROBINHOOD_PRIVATE_KEY=already-registered\n"
+        assert main(["--env-file", str(env), "keygen", "--force"]) == 0
+        assert read_dotenv(env)["ROBINHOOD_PRIVATE_KEY"] != "already-registered"
+
+    def test_empty_values_in_env_count_as_unset(self, tmp_path):
+        env = tmp_path / ".env"
+        env.write_text("# c\nROBINHOOD_API_KEY=\nexport TYPESAFE_API_KEY=\"abc\"\n")
+        assert read_dotenv(env) == {"TYPESAFE_API_KEY": "abc"}
+
+
+class TestAccountPin:
+    """RHCA_CRYPTO_ACCOUNT: the loop must never run silently against the wrong money."""
+
+    def account(self, number="311267873958"):
+        return Account(account_number=number, rhs_account_number="", buying_power=Decimal("500"))
+
+    def test_the_pinned_account_passes_by_full_number_or_last_four(self):
+        check_account(self.account(), "311267873958")
+        check_account(self.account(), "3958")
+        check_account(self.account(), "")  # unpinned: allowed, and the banner says so
+
+    def test_any_other_account_is_refused(self):
+        with pytest.raises(AgentError) as excinfo:
+            check_account(self.account("311130671977"), "3958")
+        assert "****1977" in str(excinfo.value) and "****3958" in str(excinfo.value)
+
+    def test_a_pin_shorter_than_four_digits_is_refused(self):
+        with pytest.raises(AgentError):
+            check_account(self.account(), "58")
+
+    def test_run_refuses_to_start_on_the_wrong_account(self, tmp_path, monkeypatch, capsys):
+        class MainAccountKey:
+            def account(self):
+                return Account("311130671977", "", buying_power=Decimal("0"))
+
+        monkeypatch.setattr(
+            RobinhoodClient, "from_env", classmethod(lambda cls, environ=None: MainAccountKey())
+        )
+        monkeypatch.setenv("RHCA_CRYPTO_ACCOUNT", "3958")
+        data = tmp_path / "data"
+        code = main(
+            ["--env-file", str(tmp_path / ".env"), "--data-dir", str(data), "run", "--once"]
+        )
+        assert code == 1
+        assert "****1977" in capsys.readouterr().err
+        assert not data.exists()  # refused before the loop touched anything
