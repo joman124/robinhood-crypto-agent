@@ -67,6 +67,14 @@ there are two options, and they are not equivalent:
   its own. Not recommended, and it would invalidate most of the safety
   argument in `docs/architecture.md`.
 
+**Decision, 2026-09-21.** The owner chose the second shape. A direct client
+feeds a real-time System 1, and Claude Sonnet 5 is System 2 over the API; see
+[`roadmap.md`](./roadmap.md). It is built *read-only* first: `robinhood.py`
+holds credentials but has no order or cancel method. So today the blast radius
+of a bug is still a bad proposal, and `rhca run` is the shadow-mode evidence
+phase this document asks for. The order call is the Phase 2 change. It belongs
+behind `ApprovalGate` with the `AutoPolicy` above, not added to the client.
+
 ### 3. A dead-man's switch
 
 In propose-only, a loop that silently stops is harmless — you just get no

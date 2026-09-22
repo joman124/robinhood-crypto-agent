@@ -100,16 +100,23 @@ class AuditLog:
             handle.write(json.dumps(record, separators=(",", ":"), sort_keys=False) + "\n")
         return record
 
-    def record_proposal(self, proposal: Proposal) -> dict[str, Any]:
+    def record_proposal(
+        self, proposal: Proposal, extra: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """Log a proposal -- including one the risk engine rejected.
 
         Rejected proposals are logged deliberately: a record of what the agent
         *wanted* to do and was stopped from doing is the main evidence that the
         risk controls are doing anything.
+
+        ``extra`` carries annotations such as the escalation trigger's verdict
+        and System 2's decision. The core fields are written after it, so an
+        annotation can never overwrite what was actually proposed.
         """
         return self.append(
             KIND_PROPOSAL,
             {
+                **(extra or {}),
                 "proposal_id": proposal.proposal_id,
                 "symbol": proposal.symbol,
                 "side": proposal.side.value,

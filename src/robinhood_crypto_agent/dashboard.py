@@ -1,40 +1,34 @@
 """Building the dashboard payload, and (optionally) pushing it.
 
-A note on the "no network" claim
---------------------------------
-Elsewhere this package states that it has no network access. That claim is
-about **Robinhood**, and it still holds exactly: nothing here has Robinhood
-credentials, knows a Robinhood URL, or can place an order. Claude remains the
-only thing that can reach the broker.
-
+The network boundary
+--------------------
 :func:`build_payload` is pure — it reads local files and returns a dict, and is
-what the tests exercise. :func:`push` is the one function in the package that
-opens a socket, and it talks only to a dashboard URL the operator configures,
-carrying proposals and their outcomes. If you would rather the package never
-opened a socket at all, use ``rhca dashboard-export`` to write the JSON and
-push it with curl or a cron job; nothing depends on :func:`push`.
+what the tests exercise. :func:`push` and :func:`fetch_decisions` talk only to a
+dashboard URL the operator configures. If you would rather nothing here opened
+a socket, use ``rhca dashboard-export`` to write the JSON and push it with curl;
+nothing depends on :func:`push`.
 
 What is deliberately **not** in the payload
 -------------------------------------------
-Account numbers, buying power, portfolio value, position sizes and order ids.
-The dashboard's job is to show what the agent *suggested* and whether those
-suggestions were any good. It does not need to know how much money is behind
-them, and a dashboard that never receives that data cannot leak it.
+Account numbers, buying power, portfolio value, position sizes, order ids — and
+System 2's written rationale, because Sonnet reads the holdings and may quote
+them. The dashboard's job is to show what the agent *suggested* and whether
+those suggestions were any good. It does not need to know how much money is
+behind them, and a dashboard that never receives that data cannot leak it.
 """
 
 from __future__ import annotations
 
-import json
-import urllib.error
-import urllib.request
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Sequence
 
-from .audit import KIND_PROPOSAL, AuditLog
+from . import net
+from .audit import KIND_NOTE, KIND_PROPOSAL, AuditLog
 from .config import AgentConfig
 from .decisions import Decision, decision_from_dict
 from .errors import AgentError
-from .models import utcnow
+from .models import ProposalStatus, utcnow
 from .numeric import round_money
 from .outcomes import (
     DEFAULT_HORIZON_BARS,
@@ -65,6 +59,9 @@ PROPOSAL_FIELDS = (
     "score",
     "confidence",
     "regime",
+    "trigger_reason",
+    "system2_decision",
+    "system2_confidence",
 )
 
 
@@ -113,8 +110,11 @@ def build_payload(
         else:
             row["outcome"] = None
 
-        # A proposal the risk engine blocked is shown, and is not actionable.
-        row["actionable"] = bool(record.get("risk_passed"))
+        # Blocked, never-escalated and System-2-declined candidates are shown
+        # for the record, but only a live proposal gets an Accept button.
+        row["actionable"] = bool(record.get("risk_passed")) and (
+            record.get("status", ProposalStatus.PROPOSED.value) == ProposalStatus.PROPOSED.value
+        )
         proposals.append(row)
 
     proposals.sort(key=lambda r: str(r.get("proposed_at") or ""), reverse=True)
@@ -138,6 +138,9 @@ def build_payload(
             "by_regime": {k: v.to_dict() for k, v in group_by(outcomes, "regime").items()},
             "by_symbol": {k: v.to_dict() for k, v in group_by(outcomes, "symbol").items()},
             "by_side": {k: v.to_dict() for k, v in group_by(outcomes, "side").items()},
+            # The shadow run's question: did what System 2 proposed beat what
+            # it passed on, and what the trigger held back?
+            "by_status": {k: v.to_dict() for k, v in group_by(outcomes, "status").items()},
         },
         "today": {
             "executions": activity.execution_count,
@@ -151,24 +154,9 @@ def build_payload(
 def _request(
     url: str, *, token: str, method: str, body: dict[str, Any] | None = None, timeout: int
 ) -> Any:
-    data = json.dumps(body).encode() if body is not None else None
-    request = urllib.request.Request(url, data=data, method=method)
-    request.add_header("Authorization", f"Bearer {token}")
-    request.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode(errors="replace")[:400]
-        raise AgentError(f"{method} {url} failed: HTTP {exc.code} {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise AgentError(f"{method} {url} failed: {exc.reason}") from exc
-    if not raw.strip():
-        return None
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise AgentError(f"{url} returned a non-JSON response: {exc}") from exc
+    return net.request_json(
+        method, url, headers={"Authorization": f"Bearer {token}"}, body=body, timeout=timeout
+    )
 
 
 def push(
@@ -178,7 +166,7 @@ def push(
     token: str,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """POST the payload to the dashboard. The only socket this package opens."""
+    """POST the payload to the dashboard."""
     if not base_url.startswith("https://") and "localhost" not in base_url:
         # A bearer token over plaintext would be readable in transit.
         raise AgentError(
@@ -215,6 +203,64 @@ def fetch_decisions(
             # One malformed row must not discard the rest.
             continue
     return decisions
+
+
+@dataclass(frozen=True)
+class SyncResult:
+    pushed: int
+    decisions: list[Decision]
+    new_decisions: list[Decision]
+
+
+def sync(
+    config: AgentConfig,
+    *,
+    audit: AuditLog,
+    store: PriceStore,
+    base_url: str,
+    token: str,
+    horizon_bars: int = DEFAULT_HORIZON_BARS,
+    hurdle_pct: Decimal = DEFAULT_HURDLE_PCT,
+    limit: int | None = None,
+    repo_url: str | None = None,
+) -> SyncResult:
+    """Push proposals up, pull decisions back, and note each *new* decision once.
+
+    The dashboard returns every decision it holds on each call, so recording
+    them all every time would append the same note on every sync -- which, from
+    a scheduler, means every few minutes forever.
+    """
+    payload = build_payload(
+        config,
+        audit=audit,
+        store=store,
+        horizon_bars=horizon_bars,
+        hurdle_pct=hurdle_pct,
+        limit=limit,
+        repo_url=repo_url,
+    )
+    push(payload, base_url=base_url, token=token)
+    decisions = fetch_decisions(base_url=base_url, token=token)
+
+    noted = {
+        (str(n["decision"].get("proposal_id")), str(n["decision"].get("decided_at")))
+        for n in audit.events(kind=KIND_NOTE)
+        if isinstance(n.get("decision"), dict)
+    }
+    new: list[Decision] = []
+    for decision in decisions:
+        record = decision.to_dict()
+        if (str(record.get("proposal_id")), str(record.get("decided_at"))) in noted:
+            continue
+        audit.append(
+            KIND_NOTE,
+            {
+                "message": f"dashboard decision: {decision.kind.value} {decision.proposal_id}",
+                "decision": record,
+            },
+        )
+        new.append(decision)
+    return SyncResult(pushed=len(payload["proposals"]), decisions=decisions, new_decisions=new)
 
 
 def latest_decision_for(decisions: Sequence[Decision], proposal_id: str) -> Decision | None:

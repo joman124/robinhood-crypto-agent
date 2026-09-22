@@ -19,6 +19,10 @@ The rules it enforces, and why each one exists:
   proposal rather than filling against a stale quote.
 * **Already-filled quantity is subtracted.** A staged plan fills over several
   tranches, and re-approving one must not silently double the position.
+* **Only a proposal can be approved.** ``rhca run`` logs every candidate,
+  including ones the trigger held back (``not_escalated``) and ones System 2
+  passed on (``declined_by_system2``). Those are records, not proposals. To act
+  on one anyway, run ``rhca analyze`` for a fresh proposal and approve that.
 
 The gate returns a *payload*, not a filled order. Calling the MCP tool remains
 a separate, deliberate act.
@@ -34,7 +38,7 @@ from ..audit import AuditLog
 from ..config import AgentConfig
 from ..errors import ApprovalError, KillSwitchEngaged
 from ..mcp.contract import CRYPTO_TOOLS
-from ..models import ExecutionMode, OrderRequest, Proposal, Quote
+from ..models import ExecutionMode, OrderRequest, Proposal, ProposalStatus, Quote
 from ..numeric import ZERO, abs_pct_drift
 from ..symbols import same_pair
 from .kill_switch import KillSwitch
@@ -113,6 +117,13 @@ class ApprovalGate:
         if state.engaged:
             raise KillSwitchEngaged(
                 f"{state.describe()} -- no proposal may be executed until it is released"
+            )
+
+        if proposal.status in (ProposalStatus.NOT_ESCALATED, ProposalStatus.DECLINED_BY_SYSTEM2):
+            raise ApprovalError(
+                f"{proposal.proposal_id} is {proposal.status.value}: rhca run logged it but "
+                "did not propose it. To act on the idea anyway, run `rhca analyze` for a "
+                "fresh proposal and approve that one by its id."
             )
 
         overridden = self._check_approval(

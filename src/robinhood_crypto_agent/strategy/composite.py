@@ -11,6 +11,10 @@ confidence divides by the total configured weight including signals that
 reported nothing -- so if three of four sources have no history, the composite
 says so with a low confidence rather than presenting one source's reading as
 the settled view.
+
+The one exception is an *optional* source (news): its silence is the normal
+state, not missing data, so a silent optional source is dropped from the
+weights entirely. With no recent news, the blend is exactly the price-only one.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from ..config import StrategyConfig
-from ..models import Candle, CompositeView, Direction, Regime, Signal
+from ..models import Candle, CompositeView, Direction, NewsItem, Regime, Signal
 from ..symbols import canonical
 from .base import SignalContext, SignalSource
 from .regime import detect_regime
@@ -40,10 +44,12 @@ class CompositeStrategy:
         if self.sources is None:
             self.sources = default_signal_sources()
 
-    def evaluate(self, symbol: str, candles: Sequence[Candle]) -> CompositeView:
+    def evaluate(
+        self, symbol: str, candles: Sequence[Candle], news: Sequence[NewsItem] = ()
+    ) -> CompositeView:
         """Produce the blended view for one symbol."""
         symbol = canonical(symbol)
-        context = SignalContext(symbol=symbol, candles=candles, config=self.config)
+        context = SignalContext(symbol=symbol, candles=candles, config=self.config, news=news)
         notes: list[str] = []
 
         if len(candles) < self.config.min_bars:
@@ -61,7 +67,10 @@ class CompositeStrategy:
         for source in self.sources or []:
             signal = source.evaluate(context)
             if signal is None:
-                notes.append(f"{source.name}: insufficient history, no opinion")
+                if getattr(source, "optional", False):
+                    weights.pop(source.name, None)
+                else:
+                    notes.append(f"{source.name}: insufficient history, no opinion")
                 continue
             signals.append(signal)
 

@@ -1,5 +1,6 @@
 """Execution plans, order payload construction, and the approval gate."""
 
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -189,6 +190,17 @@ class TestApprovalGate:
         assert auth.proposal_id == "abc123def456"
         assert not auth.overridden
         assert validate_crypto_order_args(auth.request.arguments)
+
+    @pytest.mark.parametrize(
+        "status", [ProposalStatus.NOT_ESCALATED, ProposalStatus.DECLINED_BY_SYSTEM2]
+    )
+    def test_a_candidate_rhca_run_did_not_propose_cannot_be_approved(self, config, status):
+        """Held back or passed on is a record, not a proposal -- even with a named id."""
+        held = replace(make_proposal(), status=status)
+        with pytest.raises(ApprovalError, match=status.value):
+            self.gate(config).authorize(
+                held, approval_text="execute abc123def456", live_quote=self.live()
+            )
 
     @pytest.mark.parametrize(
         "text", ["that looks good", "yes", "go ahead", "approve the btc one", ""]

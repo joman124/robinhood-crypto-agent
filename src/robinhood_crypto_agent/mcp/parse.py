@@ -6,6 +6,13 @@ for a chat client and carries no data, so it is ignored here. A bare
 ``{"results": [...]}`` or a bare list is also accepted, because a caller may
 reasonably hand this layer the inner object it already unwrapped.
 
+The same parsers read Robinhood's Crypto Trading API (``trading.robinhood.com``),
+which ``rhca run`` polls directly. Its envelope is a bare ``{"results": [...]}``
+and its field names differ, so each parser also accepts the REST spelling:
+``bid_inclusive_of_sell_spread``/``ask_inclusive_of_buy_spread`` for a quote
+(prices you would actually get and pay), ``asset_code``/``total_quantity`` for a
+holding, and ``asset_increment``/``quote_increment``/``status`` for a pair.
+
 Two response quirks are handled deliberately rather than defensively:
 
 * ``get_crypto_quotes`` returns the symbol **unhyphenated** (``BTCUSD``) while
@@ -92,7 +99,11 @@ def parse_quotes(payload: Any, *, observed_at: datetime | None = None) -> list[Q
 
     A row whose mark is unusable falls back to the mid of a two-sided book, and
     a row with neither is skipped -- there is no price to act on, and inventing
-    one is how a bad limit price gets submitted.
+    one is how a bad limit price gets submitted. A row with a malformed price is
+    skipped too, rather than failing the batch: a missing quote only means that
+    symbol is not evaluated this time. (The pair, position and account parsers
+    deliberately still fail loudly -- skipping one of *those* rows would loosen
+    a risk check, not merely postpone it.)
     """
     quotes: list[Quote] = []
     for row in unwrap_results(payload):
@@ -101,9 +112,12 @@ def parse_quotes(payload: Any, *, observed_at: datetime | None = None) -> list[Q
             continue
         symbol = canonical(str(symbol_raw))
 
-        bid = _positive(decimal_field(row, "bid_price", "bid"))
-        ask = _positive(decimal_field(row, "ask_price", "ask"))
-        mark = _positive(decimal_field(row, "mark_price", "mark"))
+        try:
+            bid = _positive(decimal_field(row, "bid_price", "bid", "bid_inclusive_of_sell_spread"))
+            ask = _positive(decimal_field(row, "ask_price", "ask", "ask_inclusive_of_buy_spread"))
+            mark = _positive(decimal_field(row, "mark_price", "mark", "price"))
+        except AgentError:
+            continue
 
         if mark is None and bid is not None and ask is not None:
             mark = (bid + ask) / Decimal(2)
@@ -114,7 +128,12 @@ def parse_quotes(payload: Any, *, observed_at: datetime | None = None) -> list[Q
         bid = bid if bid is not None else mark
         ask = ask if ask is not None else mark
 
-        timestamp = row.get("updated_at") or row.get("ask_time") or row.get("bid_time")
+        timestamp = (
+            row.get("updated_at")
+            or row.get("timestamp")
+            or row.get("ask_time")
+            or row.get("bid_time")
+        )
         try:
             when = parse_timestamp(timestamp) if timestamp else (observed_at or utcnow())
         except ValueError:
@@ -140,16 +159,16 @@ def parse_currency_pairs(payload: Any) -> list[PairConstraints]:
         symbol_raw = row.get("symbol") or row.get("display_symbol")
         if not symbol_raw:
             continue
-        increment = decimal_field(row, "min_order_quantity_increment")
+        increment = decimal_field(row, "min_order_quantity_increment", "asset_increment")
         halted_regions = row.get("halted_regions") or []
-        tradability = str(row.get("tradability", "tradable")).lower()
+        tradability = str(row.get("tradability") or row.get("status") or "tradable").lower()
         pairs.append(
             PairConstraints(
                 symbol=canonical(str(symbol_raw)),
                 quantity_increment=increment if increment and increment > ZERO else Decimal("0.00000001"),
                 min_order_size=decimal_field(row, "min_order_size"),
                 max_order_size=decimal_field(row, "max_order_size"),
-                price_increment=decimal_field(row, "min_order_price_increment"),
+                price_increment=decimal_field(row, "min_order_price_increment", "quote_increment"),
                 min_notional=decimal_field(row, "min_order_quote_amount"),
                 market_orders_only=bool(row.get("market_orders_only", False)),
                 tradable=tradability == "tradable" and not row.get("display_only", False),
@@ -174,7 +193,7 @@ def parse_positions(payload: Any) -> list[Position]:
         code = None
         if isinstance(currency, dict):
             code = currency.get("code") or currency.get("symbol")
-        symbol_raw = row.get("symbol") or code
+        symbol_raw = row.get("symbol") or code or row.get("asset_code")
         if not symbol_raw:
             continue
         quantity = decimal_field(row, "quantity", "quantity_available", "total_quantity")

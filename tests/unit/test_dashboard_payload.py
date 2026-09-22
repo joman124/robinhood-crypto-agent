@@ -164,3 +164,31 @@ def test_latest_decision_wins():
     late = Decision("abc123def456", DecisionKind.DECLINE, utcnow())
     assert latest_decision_for([early, late], "abc123def456") is late
     assert latest_decision_for([early, late], "ffffffffffff") is None
+
+
+class TestSync:
+    def test_each_decision_is_noted_once_however_often_it_syncs(self, config, monkeypatch):
+        from robinhood_crypto_agent import dashboard
+
+        decision = Decision("abc123def456", DecisionKind.ACCEPT, utcnow())
+        monkeypatch.setattr(dashboard, "push", lambda payload, **kwargs: {})
+        monkeypatch.setattr(dashboard, "fetch_decisions", lambda **kwargs: [decision])
+        audit = AuditLog(config.audit_path)
+        store = PriceStore(config.price_store_path)
+
+        first = dashboard.sync(config, audit=audit, store=store, base_url="https://d", token="t")
+        second = dashboard.sync(config, audit=audit, store=store, base_url="https://d", token="t")
+        assert len(first.new_decisions) == 1 and second.new_decisions == []
+        assert len(list(audit.events(kind="note"))) == 1
+
+    def test_only_a_live_proposal_is_actionable(self, config):
+        audit = AuditLog(config.audit_path)
+        declined = proposal()
+        audit.record_proposal(
+            Proposal(**{**declined.__dict__, "status": ProposalStatus.DECLINED_BY_SYSTEM2}),
+            {"system2_decision": "pass", "system2": {"rationale": "you hold 2 BTC"}},
+        )
+        [row] = build_payload(config, audit=audit)["proposals"]
+        assert row["actionable"] is False
+        assert row["system2_decision"] == "pass"
+        assert "system2" not in row  # the rationale may quote holdings; it stays local

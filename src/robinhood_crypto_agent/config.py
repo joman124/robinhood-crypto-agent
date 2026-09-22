@@ -139,6 +139,11 @@ class StrategyConfig:
     #: proportionally when realized volatility runs above this.
     target_volatility_pct: Decimal = Decimal("1.0")
     volatility_lookback: int = 20
+    #: How long a headline can move the news signal; its confidence decays
+    #: linearly to zero across this window.
+    news_window_minutes: int = 120
+    #: ``news`` is optional: it only counts when a recent headline exists (see
+    #: strategy.composite), so its weight never dilutes a quiet-news blend.
     weights: dict[str, dict[str, float]] = field(
         default_factory=lambda: {
             "trending": {
@@ -146,18 +151,21 @@ class StrategyConfig:
                 "momentum": 0.25,
                 "breakout": 0.15,
                 "mean_reversion": 0.10,
+                "news": 0.50,
             },
             "ranging": {
                 "mean_reversion": 0.50,
                 "trend": 0.15,
                 "momentum": 0.15,
                 "breakout": 0.20,
+                "news": 0.50,
             },
             "unknown": {
                 "trend": 0.25,
                 "momentum": 0.25,
                 "breakout": 0.25,
                 "mean_reversion": 0.25,
+                "news": 0.50,
             },
         }
     )
@@ -194,7 +202,8 @@ class StrategyConfig:
         if self.target_volatility_pct <= ZERO:
             raise ConfigError("target_volatility_pct must be positive")
         for name in ("bar_interval_minutes", "min_bars", "rsi_period", "atr_period",
-                     "adx_period", "breakout_lookback", "signal_ma", "volatility_lookback"):
+                     "adx_period", "breakout_lookback", "signal_ma", "volatility_lookback",
+                     "news_window_minutes"):
             if getattr(self, name) < 1:
                 raise ConfigError(f"{name} must be at least 1")
         required = {"trend", "momentum", "breakout", "mean_reversion"}
@@ -229,6 +238,98 @@ def _normalize_weights(raw: Any) -> dict[str, dict[str, float]]:
     return normalized
 
 
+#: Crypto.com's public market-data MCP server: free, keyless, read-only.
+DEFAULT_MARKET_DATA_MCP_URL = "https://mcp.crypto.com/market-data/mcp"
+
+DEFAULT_RSS_FEEDS: tuple[str, ...] = (
+    "https://cointelegraph.com/rss",
+    "https://decrypt.co/feed",
+    "https://www.theblock.co/rss.xml",
+    "https://bitcoinmagazine.com/feed",
+    "https://cryptoslate.com/feed/",
+)
+
+#: Ceilings and floors for the real-time pipeline. These bound *spend and
+#: politeness*, not trading risk -- the risk engine is untouched by anything
+#: here -- but they are code ceilings for the same reason: a YAML typo must not
+#: turn into a thousand Sonnet calls or a rate-limit ban.
+PIPELINE_CEILINGS = {"max_escalations_per_day": 200}
+PIPELINE_FLOORS = {
+    "quote_interval_seconds": 10,
+    "account_interval_seconds": 60,
+    "news_interval_seconds": 60,
+    "sync_interval_seconds": 60,
+}
+
+@dataclass(frozen=True)
+class PipelineConfig:
+    """Cadences, the escalation trigger, and the news sources for ``rhca run``."""
+
+    quote_interval_seconds: int = 60
+    account_interval_seconds: int = 600
+    news_interval_seconds: int = 120
+    sync_interval_seconds: int = 300
+    #: The trigger: a candidate goes to System 2 only when it passed every
+    #: risk rule *and* clears these, which are meant to sit above the risk
+    #: engine's own minimums.
+    trigger_min_confidence: Decimal = Decimal("0.5")
+    trigger_min_abs_score: Decimal = Decimal("0.3")
+    escalation_cooldown_minutes: int = 60
+    max_escalations_per_day: int = 24
+    system2_model: str = "claude-sonnet-5"
+    rss_feeds: tuple[str, ...] = DEFAULT_RSS_FEEDS
+    #: A remote MCP server System 2 may query for market data, through the
+    #: Anthropic API's MCP connector. Its tools are allowlisted by name in
+    #: system2.py; "" turns it off.
+    market_data_mcp_url: str = DEFAULT_MARKET_DATA_MCP_URL
+
+    @classmethod
+    def from_mapping(cls, data: dict[str, Any] | None) -> "PipelineConfig":
+        data = dict(data or {})
+        config = cls()
+        for name, value in data.items():
+            if not hasattr(config, name):
+                raise ConfigError(f"unknown pipeline setting: {name}")
+            if value is None:
+                continue
+            current = getattr(config, name)
+            if isinstance(current, tuple):
+                if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                    raise ConfigError(f"{name} must be a list of strings")
+                coerced: Any = tuple(v.strip() for v in value)
+            elif isinstance(current, Decimal):
+                coerced = to_decimal(value, field=name)
+            elif isinstance(current, str):
+                coerced = str(value)
+            else:
+                coerced = int(value)
+            config = replace(config, **{name: coerced})
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        for name, floor in PIPELINE_FLOORS.items():
+            if getattr(self, name) < floor:
+                raise ConfigError(f"{name}={getattr(self, name)} is below the floor of {floor}")
+        for name, ceiling in PIPELINE_CEILINGS.items():
+            value = getattr(self, name)
+            if not 0 <= value <= ceiling:
+                raise ConfigError(f"{name}={value} must be between 0 and {ceiling}")
+        if not ZERO <= self.trigger_min_confidence <= Decimal(1):
+            raise ConfigError("trigger_min_confidence must be in [0, 1]")
+        if not ZERO < self.trigger_min_abs_score <= Decimal(1):
+            raise ConfigError("trigger_min_abs_score must be in (0, 1]")
+        if self.escalation_cooldown_minutes < 0:
+            raise ConfigError("escalation_cooldown_minutes must not be negative")
+        for url in self.rss_feeds:
+            if not url.startswith("https://"):
+                raise ConfigError(f"RSS feeds must be https URLs, got {url!r}")
+        if self.market_data_mcp_url and not self.market_data_mcp_url.startswith("https://"):
+            raise ConfigError(
+                f"market_data_mcp_url must be an https URL or empty, got {self.market_data_mcp_url!r}"
+            )
+
+
 @dataclass(frozen=True)
 class AgentConfig:
     """Everything the agent needs to run, assembled from the config directory."""
@@ -238,6 +339,7 @@ class AgentConfig:
     rhs_account_number: str | None = None
     risk: RiskLimits = field(default_factory=RiskLimits)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
+    pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     data_dir: Path = DEFAULT_DATA_DIR
 
     @property
@@ -255,6 +357,14 @@ class AgentConfig:
     @property
     def proposals_path(self) -> Path:
         return self.data_dir / "proposals.jsonl"
+
+    @property
+    def news_path(self) -> Path:
+        return self.data_dir / "news.jsonl"
+
+    @property
+    def heartbeat_path(self) -> Path:
+        return self.data_dir / "heartbeat.json"
 
     def allows(self, symbol: str) -> bool:
         """Whether ``symbol`` is on the watchlist allowlist."""
@@ -292,6 +402,7 @@ def load_config(
     agent_raw = _read_yaml(config_dir / "agent.yaml")
     risk_raw = _read_yaml(config_dir / "risk_limits.yaml")
     strategy_raw = _read_yaml(config_dir / "strategy.yaml")
+    pipeline_raw = _read_yaml(config_dir / "pipeline.yaml")
 
     mode_raw = str(agent_raw.get("execution_mode", ExecutionMode.PROPOSE_ONLY.value)).lower()
     try:
@@ -325,5 +436,6 @@ def load_config(
         rhs_account_number=account,
         risk=RiskLimits.from_mapping(risk_raw.get("limits", risk_raw)),
         strategy=StrategyConfig.from_mapping(strategy_raw.get("strategy", strategy_raw)),
+        pipeline=PipelineConfig.from_mapping(pipeline_raw.get("pipeline", pipeline_raw)),
         data_dir=resolved_data_dir,
     )

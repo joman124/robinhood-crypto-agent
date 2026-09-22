@@ -24,6 +24,11 @@ The file format is JSONL: append-only, survives a crash mid-write with at most
 one corrupt trailing line, and is greppable. Corrupt lines are skipped on read
 rather than aborting the load, because losing one observation must not make the
 whole history unreadable.
+
+Reads are incremental. Because the file only ever grows, a store remembers how
+far it has read and parses only what was appended since -- which is what lets
+``rhca run`` re-evaluate every minute without re-reading weeks of quotes. A
+file that shrank (replaced or truncated) is simply read again from the start.
 """
 
 from __future__ import annotations
@@ -97,6 +102,9 @@ class PriceStore:
 
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
+        self._rows: list[dict[str, object]] = []
+        self._by_symbol: dict[str, list[Quote]] = {}
+        self._offset = 0
 
     # -- writing ---------------------------------------------------------
 
@@ -168,56 +176,62 @@ class PriceStore:
 
     # -- reading ---------------------------------------------------------
 
-    def _iter_rows(self) -> Iterator[dict[str, object]]:
+    def _refresh(self) -> None:
+        """Parse whatever was appended since the last read."""
         if not self.path.exists():
+            self._rows, self._by_symbol, self._offset = [], {}, 0
             return
-        with self.path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    # A torn trailing line from an interrupted write. Skipping
-                    # one observation is strictly better than refusing to read
-                    # the history at all.
-                    continue
-                if isinstance(row, dict):
-                    yield row
+        size = self.path.stat().st_size
+        if size < self._offset:
+            self._rows, self._by_symbol, self._offset = [], {}, 0
+        if size == self._offset:
+            return
+        with self.path.open("rb") as handle:
+            handle.seek(self._offset)
+            chunk = handle.read(size - self._offset)
+        # Only complete lines are consumed; a line still being written is left
+        # for the next read rather than parsed half-finished.
+        end = chunk.rfind(b"\n")
+        if end < 0:
+            return
+        self._offset += end + 1
+
+        touched: set[str] = set()
+        for line in chunk[: end + 1].decode("utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                # A torn line from an interrupted write. Skipping one
+                # observation is strictly better than refusing to read the
+                # history at all.
+                continue
+            if not isinstance(row, dict):
+                continue
+            self._rows.append(row)
+            quote = _quote_from_row(row)
+            if quote is not None:
+                self._by_symbol.setdefault(quote.symbol, []).append(quote)
+                touched.add(quote.symbol)
+        # Imports can land out of order, so re-sort only what changed.
+        for symbol in touched:
+            self._by_symbol[symbol].sort(key=lambda q: q.observed_at)
+
+    def _iter_rows(self) -> Iterator[dict[str, object]]:
+        self._refresh()
+        return iter(self._rows)
 
     def observations(
         self, symbol: str, *, since: datetime | None = None
     ) -> list[Quote]:
         """All recorded observations for ``symbol``, oldest first."""
-        target = canonical(symbol)
-        quotes: list[Quote] = []
-        for row in self._iter_rows():
-            if canonical(str(row.get("symbol", ""))) != target:
-                continue
-            try:
-                observed_at = parse_timestamp(str(row["observed_at"]))
-                mark = to_decimal(row["mark"], field="mark")
-            except (KeyError, ValueError, AgentError):
-                continue
-            if mark <= ZERO:
-                continue
-            if since is not None and observed_at < since:
-                continue
-            bid = _safe_decimal(row.get("bid")) or mark
-            ask = _safe_decimal(row.get("ask")) or mark
-            quotes.append(
-                Quote(
-                    symbol=target,
-                    bid=bid,
-                    ask=ask,
-                    mark=mark,
-                    observed_at=observed_at,
-                    previous_close=_safe_decimal(row.get("previous_close")),
-                )
-            )
-        quotes.sort(key=lambda q: q.observed_at)
-        return quotes
+        self._refresh()
+        quotes = self._by_symbol.get(canonical(symbol), [])
+        if since is None:
+            return list(quotes)
+        return [q for q in quotes if q.observed_at >= since]
 
     def symbols(self) -> list[str]:
         """Every symbol with at least one observation."""
@@ -294,6 +308,28 @@ class PriceStore:
         """The most recently observed quote for ``symbol``."""
         quotes = self.observations(symbol)
         return quotes[-1] if quotes else None
+
+
+def _quote_from_row(row: dict[str, object]) -> Quote | None:
+    """A stored row as a Quote, or ``None`` when it has no usable mark."""
+    symbol = canonical(str(row.get("symbol", "")))
+    if not symbol:
+        return None
+    try:
+        observed_at = parse_timestamp(str(row["observed_at"]))
+        mark = to_decimal(row["mark"], field="mark")
+    except (KeyError, ValueError, AgentError):
+        return None
+    if mark <= ZERO:
+        return None
+    return Quote(
+        symbol=symbol,
+        bid=_safe_decimal(row.get("bid")) or mark,
+        ask=_safe_decimal(row.get("ask")) or mark,
+        mark=mark,
+        observed_at=observed_at,
+        previous_close=_safe_decimal(row.get("previous_close")),
+    )
 
 
 def _safe_decimal(value: object) -> Decimal | None:

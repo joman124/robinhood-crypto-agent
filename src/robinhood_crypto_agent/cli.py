@@ -1,9 +1,10 @@
-"""The command-line interface Claude drives.
+"""The command-line interface.
 
-The division of labour is the point of this file. Claude holds the MCP
-connection and is the only thing that can call a Robinhood tool; this CLI holds
-the decision logic, the risk limits and the audit trail, and cannot reach the
-network at all. So the loop is:
+There are two ways to drive the agent, and one way to place an order.
+
+**Claude Code, by hand.** Claude holds the MCP connection and is the only thing
+that can place a Robinhood order; this CLI holds the decision logic, the risk
+limits and the audit trail:
 
     Claude calls get_crypto_quotes  ->  rhca ingest quotes   (JSON in)
     Claude calls get_currency_pairs ->  rhca ingest pairs
@@ -14,12 +15,18 @@ network at all. So the loop is:
 Every command that accepts MCP output takes it as JSON on a path or on stdin,
 so nothing has to be retyped or paraphrased -- paraphrasing a tool response is
 how a fabricated fill ends up in an audit log.
+
+**``rhca run``, in shadow mode.** The real-time loop reads quotes and holdings
+from Robinhood's Crypto API with a read-only client, labels news with Jev and
+escalates strong candidates to Claude Sonnet 5 (see ``runner``). It proposes;
+it cannot order. Its proposals go through the same ``rhca approve`` gate.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from datetime import timedelta
@@ -29,13 +36,17 @@ from typing import Any, Sequence
 
 from . import dashboard as dashboard_mod
 from . import reports
+from . import runner as runner_mod
 from .agent import Agent, MarketState
 from .audit import AuditLog, day_from
+from .bootstrap import fetch_coinbase_candles
 from .config import AgentConfig, load_config
 from .errors import AgentError
 from .execution.gate import ApprovalGate
 from .execution.kill_switch import REASON_DAILY_LOSS, REASON_MANUAL, KillSwitch
 from .execution.orders import build_plan_requests
+from .jev import API_KEY_ENV as JEV_KEY_ENV
+from .jev import JevClient
 from .mcp.contract import CRYPTO_TOOLS, TOOL_CONTRACTS, validate_crypto_order_args
 from .mcp.parse import (
     parse_accounts,
@@ -48,13 +59,50 @@ from .mcp.parse import (
 from .models import Candle, parse_timestamp
 from .numeric import format_decimal, round_money, to_decimal
 from .outcomes import DEFAULT_HORIZON_BARS, DEFAULT_HURDLE_PCT
+from .robinhood import API_KEY_ENV as ROBINHOOD_KEY_ENV
+from .robinhood import PRIVATE_KEY_ENV as ROBINHOOD_PRIVATE_KEY_ENV
+from .robinhood import RobinhoodClient
 from .serde import proposal_from_dict
 from .store import PriceStore, StateCache
 from .symbols import canonical
+from .system2 import System2
 
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_BLOCKED = 2
+
+#: Every credential ``rhca run`` reads. Only names are ever printed.
+CREDENTIAL_ENVS = (
+    ROBINHOOD_KEY_ENV,
+    ROBINHOOD_PRIVATE_KEY_ENV,
+    JEV_KEY_ENV,
+    "ANTHROPIC_API_KEY",
+    "RHCA_DASHBOARD_URL",
+    "RHCA_DASHBOARD_TOKEN",
+)
+
+
+def load_dotenv(path: Path) -> list[str]:
+    """Load ``KEY=VALUE`` lines into the environment, never overriding what is set.
+
+    Returns the names it loaded. Values are not echoed anywhere.
+    """
+    if not path.is_file():
+        return []
+    loaded = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip().removeprefix("export ").strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+            loaded.append(key)
+    return loaded
 
 
 def _read_json(source: str | None) -> Any:
@@ -73,6 +121,13 @@ def _read_json(source: str | None) -> Any:
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise AgentError(f"input is not valid JSON: {exc}") from exc
+
+
+def _env_file(args: argparse.Namespace) -> Path:
+    """``--env-file``, else ``.env`` beside the config directory (the repo root)."""
+    if args.env_file:
+        return Path(args.env_file)
+    return Path(args.config_dir).parent / ".env"
 
 
 def _context(args: argparse.Namespace) -> tuple[AgentConfig, StateCache, PriceStore, AuditLog]:
@@ -122,6 +177,19 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     for age in state.ages():
         print(f"  {age.describe()}")
+    print()
+
+    load_dotenv(_env_file(args))
+    stale_after = max(180, 3 * config.pipeline.quote_interval_seconds)
+    for line in runner_mod.describe_heartbeat(
+        runner_mod.read_json(config.heartbeat_path), stale_after_seconds=stale_after
+    ):
+        print(line)
+    present = [name for name in CREDENTIAL_ENVS if os.environ.get(name)]
+    missing = [name for name in CREDENTIAL_ENVS if not os.environ.get(name)]
+    print(f"  keys set     : {', '.join(present) or 'none'}")
+    if missing:
+        print(f"  keys missing : {', '.join(missing)}")
     print()
 
     coverages = [
@@ -587,7 +655,11 @@ def cmd_accuracy(args: argparse.Namespace) -> int:
         print(f"  average move   : {overall['average_move_pct']}%")
         print(f"  best / worst   : {overall['best_move_pct']}% / {overall['worst_move_pct']}%")
 
-    for label, key in (("by regime", "by_regime"), ("by symbol", "by_symbol")):
+    for label, key in (
+        ("by regime", "by_regime"),
+        ("by symbol", "by_symbol"),
+        ("by status", "by_status"),
+    ):
         grouped = payload["stats"][key]
         if not grouped:
             continue
@@ -596,7 +668,7 @@ def cmd_accuracy(args: argparse.Namespace) -> int:
             group_rate = stats["win_rate"]
             rendered = f"{group_rate:.1%}" if group_rate is not None else "unknown"
             print(
-                f"    {name:12} {rendered:>8}  "
+                f"    {name:20} {rendered:>8}  "
                 f"({stats['wins']}W/{stats['losses']}L/{stats['flat']}F, "
                 f"{stats['pending']} pending)"
             )
@@ -646,35 +718,29 @@ def cmd_dashboard_sync(args: argparse.Namespace) -> int:
         )
 
     horizon, hurdle = _scoring_args(args)
-    payload = dashboard_mod.build_payload(
+    result = dashboard_mod.sync(
         config,
         audit=audit,
         store=store,
+        base_url=base_url,
+        token=token,
         horizon_bars=horizon,
         hurdle_pct=hurdle,
         limit=args.limit,
         repo_url=args.repo_url,
     )
-    result = dashboard_mod.push(payload, base_url=base_url, token=token)
-    print(
-        f"pushed {len(payload['proposals'])} proposal(s) to {base_url} "
-        f"({result.get('stored', '?')} stored)"
-    )
+    print(f"pushed {result.pushed} proposal(s) to {base_url}")
 
-    decisions = dashboard_mod.fetch_decisions(base_url=base_url, token=token)
+    decisions = result.decisions
     if not decisions:
         print("no pending decisions on the dashboard")
         return EXIT_OK
 
-    print(f"\n{len(decisions)} decision(s) recorded on the dashboard:")
+    print(
+        f"\n{len(decisions)} decision(s) recorded on the dashboard "
+        f"({len(result.new_decisions)} new since the last sync):"
+    )
     for decision in decisions:
-        audit.append(
-            "note",
-            {
-                "message": f"dashboard decision: {decision.kind.value} {decision.proposal_id}",
-                "decision": decision.to_dict(),
-            },
-        )
         marker = "ACCEPT" if decision.kind.value == "accept" else "decline"
         print(f"  [{marker}] {decision.proposal_id}  ({decision.decided_at.isoformat()})")
         if decision.kind.value == "accept":
@@ -690,6 +756,107 @@ def cmd_dashboard_sync(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_bootstrap_history(args: argparse.Namespace) -> int:
+    config, state, store, audit = _context(args)
+    interval = config.strategy.bar_interval_minutes
+    for symbol in config.watchlist:
+        candles = fetch_coinbase_candles(symbol, interval_minutes=interval)
+        existing = {
+            c.start
+            for c in store.candles(symbol, interval_minutes=interval, include_partial=True)
+        }
+        missing = [c for c in candles if c.start not in existing]
+        store.import_candles(missing)
+        coverage = store.coverage(
+            symbol, interval_minutes=interval, required_bars=config.strategy.min_bars
+        )
+        print(f"{symbol}: imported {len(missing)} bar(s) from Coinbase. {coverage.describe()}")
+    print(
+        "\nImported bars are marked source=import and feed only the indicators; proposals "
+        "are always priced off a live Robinhood quote."
+    )
+    return EXIT_OK
+
+
+def _keep_awake() -> bool:
+    """Ask Windows not to sleep while this process runs (reverts when it exits)."""
+    if sys.platform != "win32":
+        return False
+    import ctypes
+
+    es_continuous, es_system_required = 0x80000000, 0x00000001
+    return bool(
+        ctypes.windll.kernel32.SetThreadExecutionState(es_continuous | es_system_required)
+    )
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    loaded = load_dotenv(_env_file(args))
+    config = load_config(args.config_dir, data_dir=args.data_dir)
+
+    robinhood = RobinhoodClient.from_env()
+    if robinhood is None:
+        raise AgentError(
+            f"{ROBINHOOD_KEY_ENV} and {ROBINHOOD_PRIVATE_KEY_ENV} must be set, in the "
+            "environment or in .env -- see docs/runbook.md, 'Shadow run'"
+        )
+
+    system2 = None
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        import anthropic  # only the live loop needs the SDK
+
+        fetch_quote, fetch_holdings = runner_mod.system2_tools(robinhood)
+        system2 = System2(
+            anthropic.Anthropic(),
+            fetch_quote=fetch_quote,
+            fetch_holdings=fetch_holdings,
+            model=config.pipeline.system2_model,
+            bar_minutes=config.strategy.bar_interval_minutes,
+            market_data_url=config.pipeline.market_data_mcp_url or None,
+        )
+
+    dashboard_url = os.environ.get("RHCA_DASHBOARD_URL")
+    dashboard_token = os.environ.get("RHCA_DASHBOARD_TOKEN")
+    services = runner_mod.Services(
+        robinhood=robinhood,
+        jev=JevClient.from_env(),
+        system2=system2,
+        dashboard=(dashboard_url, dashboard_token) if dashboard_url and dashboard_token else None,
+    )
+
+    # Headlines carry curly quotes and emoji; a legacy Windows console encoding
+    # would otherwise turn one into a logging traceback.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    print("rhca run -- SHADOW MODE: proposes and records, never places an order")
+    if loaded:
+        print(f"  loaded from .env : {', '.join(loaded)}")
+    print(f"  watchlist        : {', '.join(config.watchlist)}")
+    print("  System 1         : indicators + news signal + 16 risk rules")
+    print(f"  Jev news labels  : {'on' if services.jev else f'OFF (set {JEV_KEY_ENV})'}")
+    system2_state = config.pipeline.system2_model if system2 else "OFF (set ANTHROPIC_API_KEY)"
+    print(f"  System 2         : {system2_state}")
+    market_data = config.pipeline.market_data_mcp_url if system2 else ""
+    print(f"  market data      : {market_data or 'off'} (System 2's MCP connector)")
+    print(f"  dashboard sync   : {'on' if services.dashboard else 'off'}")
+    if args.keep_awake:
+        print(f"  keep awake       : {'on' if _keep_awake() else 'unavailable on this OS'}")
+    print("Ctrl+C to stop.\n")
+
+    runner = runner_mod.Runner(config, services)
+    try:
+        runner.run(once=args.once, max_seconds=args.minutes * 60 if args.minutes else None)
+    except KeyboardInterrupt:
+        print("\nstopped")
+    return EXIT_OK
+
+
 # -- parser ---------------------------------------------------------------
 
 
@@ -698,12 +865,30 @@ def build_parser() -> argparse.ArgumentParser:
         prog="rhca",
         description=(
             "Robinhood crypto agent: analyzes, proposes, and gates execution. "
-            "It never calls Robinhood itself -- Claude does, via MCP."
+            "Orders are placed only by Claude Code via MCP, after a human approves."
         ),
     )
     parser.add_argument("--config-dir", default="config", help="configuration directory")
     parser.add_argument("--data-dir", default=None, help="override the data directory")
+    parser.add_argument(
+        "--env-file", default=None, help="credentials file (default: .env beside config/)"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    run = sub.add_parser(
+        "run", help="the real-time loop in shadow mode: poll, score, escalate, record"
+    )
+    run.add_argument("--once", action="store_true", help="one cycle of every task, then exit")
+    run.add_argument("--minutes", type=float, default=None, help="stop after this long")
+    run.add_argument(
+        "--keep-awake", action="store_true", help="stop Windows sleeping while it runs"
+    )
+    run.set_defaults(func=cmd_run)
+
+    bootstrap = sub.add_parser(
+        "bootstrap-history", help="import recent bars from Coinbase so indicators work at once"
+    )
+    bootstrap.set_defaults(func=cmd_bootstrap_history)
 
     status = sub.add_parser("status", help="mode, kill switch, risk usage, data coverage")
     status.set_defaults(func=cmd_status)

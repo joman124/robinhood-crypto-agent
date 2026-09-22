@@ -27,7 +27,7 @@ decorative — it is most of the battle.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -77,6 +77,10 @@ class Outcome:
     score: float
     confidence: float
     reason: str = ""
+    #: The proposal's status when logged -- proposed, not_escalated,
+    #: declined_by_system2, rejected_by_risk -- so hit rates can be compared
+    #: across what each stage let through and what it held back.
+    status: str = "proposed"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -288,8 +292,8 @@ def aggregate(outcomes: Iterable[Outcome]) -> AccuracyStats:
 
 
 def group_by(outcomes: Iterable[Outcome], key: str) -> dict[str, AccuracyStats]:
-    """Accuracy broken down by ``symbol``, ``regime``, or ``side``."""
-    if key not in {"symbol", "regime", "side"}:
+    """Accuracy broken down by ``symbol``, ``regime``, ``side`` or ``status``."""
+    if key not in {"symbol", "regime", "side", "status"}:
         raise ValueError(f"cannot group outcomes by {key!r}")
     grouped: dict[str, AccuracyStats] = {}
     for outcome in outcomes:
@@ -316,7 +320,7 @@ def outcome_from_proposal_record(
     except (KeyError, ValueError, TypeError):
         return None
 
-    return score_proposal(
+    outcome = score_proposal(
         proposal_id=proposal_id,
         symbol=symbol,
         side=side,
@@ -329,6 +333,7 @@ def outcome_from_proposal_record(
         horizon_bars=horizon_bars,
         hurdle_pct=hurdle_pct,
     )
+    return replace(outcome, status=str(record.get("status") or "proposed"))
 
 
 def horizon_elapsed_at(

@@ -22,19 +22,32 @@ strategy:
   target_volatility_pct: 1.0
   volatility_lookback: 20
 
+  # How long a headline can move the news signal. Its confidence decays
+  # linearly to zero across the window.
+  news_window_minutes: 120
+
+  # news is optional: it counts only when a recent headline exists, so its
+  # weight never dilutes the price signals on a quiet day. At 0.50 against
+  # price weights summing to 1, news alone moves a neutral price view to at
+  # most +/-0.33 -- past the 0.3 trigger (config/pipeline.yaml) only for a
+  # major headline labeled with near-full confidence. Mostly it tips a price
+  # signal that already leans the same way.
   weights:
     trending:
       trend: 0.50
       momentum: 0.25
       breakout: 0.15
       mean_reversion: 0.10
+      news: 0.50
     ranging:
       mean_reversion: 0.50
       breakout: 0.20
       trend: 0.15
       momentum: 0.15
+      news: 0.50
     unknown:
       trend: 0.25
       momentum: 0.25
       breakout: 0.25
       mean_reversion: 0.25
+      news: 0.50

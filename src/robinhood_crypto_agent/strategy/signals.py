@@ -1,4 +1,4 @@
-"""The four signal sources.
+"""The signal sources: four price signals and one news signal.
 
 Each returns a score in [-1, 1] and a confidence in [0, 1], or ``None`` when
 history is too thin to have an opinion. Scores are deliberately *normalized by
@@ -10,9 +10,11 @@ by signal strength.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from .. import indicators
 from ..indicators import clamp, latest
-from ..models import Direction, Signal
+from ..models import Direction, Signal, utcnow
 from .base import SignalContext
 
 
@@ -226,6 +228,69 @@ class BreakoutSignal:
         )
 
 
+#: Below "minor" on Jev's 0-3 impact scale a headline carries no opinion.
+MIN_NEWS_IMPACT = 1.0
+
+
+class NewsSignal:
+    """The strongest recent Jev-labeled headline about this symbol.
+
+    Strength is ``|score| * confidence``, and confidence decays linearly to zero
+    across ``news_window_minutes`` -- an hour-old headline is half as sure as a
+    fresh one. Neutral and sub-minor items are skipped rather than averaged in,
+    so a steady trickle of routine news cannot drag a real signal toward zero.
+
+    Unlike the price signals this source is **optional**: an hour with no
+    relevant headline is the normal state of the world, not missing data. The
+    composite therefore leaves its weight out of the confidence denominator
+    when it returns ``None``, so a quiet news day does not make the price
+    signals look less certain.
+    """
+
+    name = "news"
+    optional = True
+
+    def evaluate(self, context: SignalContext) -> Signal | None:
+        window = timedelta(minutes=context.config.news_window_minutes)
+        now = utcnow()
+        best = None
+        for item in context.news:
+            labels = item.labels
+            if labels is None or labels.direction == "neutral" or labels.impact < MIN_NEWS_IMPACT:
+                continue
+            age = max(timedelta(0), now - item.published_at)
+            if age >= window:
+                continue
+            confidence = item.confidence * (1.0 - age / window)
+            strength = abs(item.score) * confidence
+            if best is None or strength > best[0]:
+                best = (strength, item, confidence, age)
+
+        if best is None:
+            return None
+        _, item, confidence, age = best
+        minutes = age.total_seconds() / 60
+        return Signal(
+            name=self.name,
+            symbol=context.symbol,
+            score=item.score,
+            confidence=confidence,
+            direction=_direction(item.score),
+            rationale=(
+                f"{item.labels.direction} ({item.labels.direction_confidence:.2f}), "
+                f"impact {item.labels.impact:.1f}/3, {minutes:.0f}m ago via {item.source}: "
+                f"{item.title[:140]}"
+            ),
+            detail={
+                "item_id": item.item_id,
+                "source": item.source,
+                "url": item.url,
+                "published_at": item.published_at.isoformat(),
+                "age_minutes": round(minutes, 1),
+            },
+        )
+
+
 def default_signal_sources() -> list:
     """The signal sources the agent runs, in report order."""
-    return [TrendSignal(), MomentumSignal(), MeanReversionSignal(), BreakoutSignal()]
+    return [TrendSignal(), MomentumSignal(), MeanReversionSignal(), BreakoutSignal(), NewsSignal()]

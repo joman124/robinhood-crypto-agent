@@ -106,3 +106,23 @@ def test_latest_quote_returns_the_newest(tmp_path):
     store = PriceStore(tmp_path / "prices.jsonl")
     quotes = observations(store, 5)
     assert store.latest_quote("BTC-USD").mark == quotes[-1].mark
+
+
+def test_a_long_lived_store_sees_what_others_append(tmp_path):
+    """``rhca run`` keeps one store open; a separate ingest must still show up."""
+    path = tmp_path / "prices.jsonl"
+    reader = PriceStore(path)
+    observations(PriceStore(path), 4)
+    assert len(reader.observations("BTC-USD")) == 4
+    observations(PriceStore(path), 2, start=utcnow() - timedelta(hours=1))
+    assert len(reader.observations("BTC-USD")) == 6
+
+
+def test_a_replaced_file_is_read_again_from_the_start(tmp_path):
+    path = tmp_path / "prices.jsonl"
+    reader = PriceStore(path)
+    observations(reader, 6)
+    assert len(reader.observations("BTC-USD")) == 6
+    path.unlink()
+    observations(PriceStore(path), 2)
+    assert len(reader.observations("BTC-USD")) == 2

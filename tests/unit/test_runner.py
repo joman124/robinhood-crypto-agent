@@ -1,0 +1,190 @@
+"""``rhca run`` end to end, with every outside service faked.
+
+What these pin down: a strong candidate is escalated once and logged with
+System 2's answer; everything that is not a "propose" is logged as something
+else; the same idea is never logged twice, even across a restart; and one
+failing source never stops the loop.
+"""
+
+import json
+from dataclasses import replace
+from datetime import timedelta
+from decimal import Decimal
+
+import pytest
+
+from robinhood_crypto_agent.audit import KIND_PROPOSAL, AuditLog
+from robinhood_crypto_agent.config import AgentConfig, PipelineConfig
+from robinhood_crypto_agent.errors import AgentError
+from robinhood_crypto_agent.models import (
+    Account,
+    NewsItem,
+    NewsLabels,
+    PairConstraints,
+    Quote,
+    utcnow,
+)
+from robinhood_crypto_agent.net import HttpError
+from robinhood_crypto_agent.news import NewsStore
+from robinhood_crypto_agent.runner import Runner, Services
+from robinhood_crypto_agent.store import PriceStore
+from robinhood_crypto_agent.system2 import System2Decision
+from tests.conftest import make_candles, uptrend
+
+
+class FakeRobinhood:
+    def __init__(self):
+        self.fail_holdings = False
+
+    def best_bid_ask(self, symbols):
+        mark = Decimal("80000")
+        return [Quote("BTC-USD", mark * Decimal("0.999"), mark * Decimal("1.001"), mark, utcnow())]
+
+    def trading_pairs(self, symbols):
+        return [PairConstraints("BTC-USD", Decimal("0.00000001"), min_order_size=Decimal("0.000001"))]
+
+    def holdings(self):
+        if self.fail_holdings:
+            raise AgentError("holdings endpoint is down")
+        return []
+
+    def account(self):
+        return Account("RH123", "", buying_power=Decimal("5000"))
+
+
+class FakeSystem2:
+    market_data_url = None
+
+    def __init__(self, decision="propose"):
+        self.decision = System2Decision(decision, "because", 0.7, model="claude-sonnet-5")
+        self.calls = []
+
+    def decide(self, proposal, news):
+        self.calls.append((proposal, list(news)))
+        return self.decision
+
+
+class FakeJev:
+    def __init__(self, error=None):
+        self.error = error
+
+    def label(self, item, watchlist):
+        if self.error:
+            raise self.error
+        return NewsLabels("BTC", 0.95, "bullish", 0.9, 2.7, model="jev-test")
+
+
+@pytest.fixture
+def config(tmp_path):
+    return AgentConfig(
+        watchlist=("BTC-USD",),
+        data_dir=tmp_path / "data",
+        pipeline=PipelineConfig(rss_feeds=("https://feed.example/rss",)),
+    )
+
+
+def make_runner(config, *, system2=None, jev=None, feeds=(), **services):
+    store = PriceStore(config.price_store_path)
+    if not store.observations("BTC-USD"):
+        store.import_candles(make_candles(uptrend(), symbol="BTC-USD"))
+    return Runner(
+        config,
+        Services(
+            robinhood=services.pop("robinhood", FakeRobinhood()),
+            jev=jev,
+            system2=system2,
+            fetch_feed=lambda url: list(feeds),
+            **services,
+        ),
+    )
+
+
+def proposals(config):
+    return list(AuditLog(config.audit_path).events(kind=KIND_PROPOSAL))
+
+
+def headline(minutes_ago=5):
+    published = utcnow() - timedelta(minutes=minutes_ago)
+    return NewsItem("n1", "feed.example", "ETF inflows hit a record", published)
+
+
+def test_a_strong_candidate_is_escalated_and_logged_with_the_answer(config):
+    system2 = FakeSystem2("propose")
+    make_runner(config, system2=system2).cycle(force=True)
+
+    [record] = proposals(config)
+    assert record["status"] == "proposed"
+    assert record["escalated"] is True
+    assert record["system2_decision"] == "propose"
+    assert record["mode"] == "shadow"
+    assert len(system2.calls) == 1
+
+    heartbeat = json.loads(config.heartbeat_path.read_text())
+    assert heartbeat["counts"]["escalations"] == 1
+    assert heartbeat["services"]["system2"] is True
+
+
+def test_a_system2_pass_is_logged_as_declined(config):
+    make_runner(config, system2=FakeSystem2("pass")).cycle(force=True)
+    assert proposals(config)[0]["status"] == "declined_by_system2"
+
+
+def test_without_system2_nothing_is_approved(config):
+    make_runner(config).cycle(force=True)
+    [record] = proposals(config)
+    assert record["status"] == "declined_by_system2"
+    assert record["system2_decision"] == "error"
+    assert record["escalated"] is False  # no Sonnet call, so no budget spent
+
+
+def test_below_the_trigger_is_logged_but_not_escalated(config):
+    # A clean synthetic uptrend is fully confident, so hold it back on strength.
+    strict = replace(config, pipeline=replace(config.pipeline, trigger_min_abs_score=Decimal("1")))
+    system2 = FakeSystem2()
+    make_runner(strict, system2=system2).cycle(force=True)
+    [record] = proposals(strict)
+    assert record["status"] == "not_escalated"
+    assert "below the trigger" in record["trigger_reason"]
+    assert system2.calls == []
+
+
+def test_the_same_idea_is_logged_once_even_across_a_restart(config):
+    system2 = FakeSystem2()
+    runner = make_runner(config, system2=system2)
+    runner.cycle(force=True)
+    runner.cycle(force=True)
+    make_runner(config, system2=system2).cycle(force=True)  # a restart
+    assert len(proposals(config)) == 1
+    assert len(system2.calls) == 1
+    assert make_runner(config)._escalations_today == 1
+
+
+def test_news_is_labeled_stored_and_shown_to_system2(config):
+    system2 = FakeSystem2()
+    make_runner(config, system2=system2, jev=FakeJev(), feeds=[headline()]).cycle(force=True)
+
+    [stored] = NewsStore(config.news_path).items()
+    assert stored.labels.direction == "bullish"
+    _, news = system2.calls[0]
+    assert [n.item_id for n in news] == ["n1"]
+    assert "news" in [s["name"] for s in proposals(config)[0]["proposal"]["view"]["signals"]]
+
+
+def test_a_jev_outage_leaves_headlines_for_the_next_poll(config):
+    runner = make_runner(config, jev=FakeJev(HttpError("timed out")), feeds=[headline()])
+    runner.cycle(force=True)
+    assert NewsStore(config.news_path).items() == []
+
+    runner.services.jev = FakeJev()
+    runner.cycle(force=True)
+    assert [i.item_id for i in NewsStore(config.news_path).items()] == ["n1"]
+
+
+def test_one_failing_task_does_not_stop_the_others(config):
+    robinhood = FakeRobinhood()
+    robinhood.fail_holdings = True
+    make_runner(config, system2=FakeSystem2(), robinhood=robinhood).cycle(force=True)
+    heartbeat = json.loads(config.heartbeat_path.read_text())
+    assert heartbeat["last_error"]["task"] == "account"
+    assert heartbeat["counts"]["quotes"] == 1
+    assert len(proposals(config)) == 1
