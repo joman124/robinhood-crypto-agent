@@ -17,7 +17,10 @@ limits:
 
   # Market-quality gates. Robinhood's market-maker-routed crypto quotes
   # routinely show a spread over 1%, so this one blocks real trades.
-  max_spread_pct: 0.75                 # ceiling: 2.5
+  # Raised from 0.75 by the owner, 2026-09-21: Robinhood's market-maker-routed
+  # quotes measured 1.89-1.90% on BTC, ETH and SOL, so 0.75 blocked every
+  # proposal. Each round trip therefore costs ~1.9% before any edge.
+  max_spread_pct: 2.0                  # ceiling: 2.5
   max_quote_age_seconds: 90            # ceiling: 300
 
   # How far price may move between proposing and submitting
