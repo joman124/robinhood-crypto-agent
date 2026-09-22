@@ -12,8 +12,9 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from robinhood_crypto_agent.cli import main, read_dotenv
-from robinhood_crypto_agent.errors import ConfigError
+from robinhood_crypto_agent.cli import check_account, main, read_dotenv
+from robinhood_crypto_agent.errors import AgentError, ConfigError
+from robinhood_crypto_agent.models import Account
 from robinhood_crypto_agent.robinhood import RobinhoodClient, generate_key_pair, load_private_key
 
 SEED = bytes(range(32))
@@ -240,3 +241,41 @@ class TestKeygen:
         env = tmp_path / ".env"
         env.write_text("# c\nROBINHOOD_API_KEY=\nexport TYPESAFE_API_KEY=\"abc\"\n")
         assert read_dotenv(env) == {"TYPESAFE_API_KEY": "abc"}
+
+
+class TestAccountPin:
+    """RHCA_CRYPTO_ACCOUNT: the loop must never run silently against the wrong money."""
+
+    def account(self, number="311267873958"):
+        return Account(account_number=number, rhs_account_number="", buying_power=Decimal("500"))
+
+    def test_the_pinned_account_passes_by_full_number_or_last_four(self):
+        check_account(self.account(), "311267873958")
+        check_account(self.account(), "3958")
+        check_account(self.account(), "")  # unpinned: allowed, and the banner says so
+
+    def test_any_other_account_is_refused(self):
+        with pytest.raises(AgentError) as excinfo:
+            check_account(self.account("311130671977"), "3958")
+        assert "****1977" in str(excinfo.value) and "****3958" in str(excinfo.value)
+
+    def test_a_pin_shorter_than_four_digits_is_refused(self):
+        with pytest.raises(AgentError):
+            check_account(self.account(), "58")
+
+    def test_run_refuses_to_start_on_the_wrong_account(self, tmp_path, monkeypatch, capsys):
+        class MainAccountKey:
+            def account(self):
+                return Account("311130671977", "", buying_power=Decimal("0"))
+
+        monkeypatch.setattr(
+            RobinhoodClient, "from_env", classmethod(lambda cls, environ=None: MainAccountKey())
+        )
+        monkeypatch.setenv("RHCA_CRYPTO_ACCOUNT", "3958")
+        data = tmp_path / "data"
+        code = main(
+            ["--env-file", str(tmp_path / ".env"), "--data-dir", str(data), "run", "--once"]
+        )
+        assert code == 1
+        assert "****1977" in capsys.readouterr().err
+        assert not data.exists()  # refused before the loop touched anything

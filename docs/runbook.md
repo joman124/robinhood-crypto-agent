@@ -36,6 +36,22 @@ it.
 5. Save. Copy the API key Robinhood shows into `.env` as
    `ROBINHOOD_API_KEY=...`.
 
+**Which account.** An API key belongs to the one crypto account it was made
+on, and the agent reads (and, later, trades) that account. If you have an
+**Agentic** account, which is Robinhood's dedicated account for AI agents,
+make the key on its crypto account. Then pin it in `.env` with the full number
+or its last 4 digits:
+
+```
+RHCA_CRYPTO_ACCOUNT=1234
+```
+
+With a pin, `rhca run` refuses to start when the key reads any other account.
+Its banner and `rhca status` show which account it read, as `****1234`.
+Switching a key to another account means making a new pair:
+`rhca keygen --force`, then **Add key** on the new account. Delete the old key
+at Robinhood once it's unused.
+
 **Anthropic (System 2): Claude Sonnet 5**
 
 1. Sign in at <https://platform.claude.com> (console.anthropic.com redirects
