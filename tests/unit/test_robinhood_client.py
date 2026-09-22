@@ -13,8 +13,9 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+from robinhood_crypto_agent.cli import main, read_dotenv
 from robinhood_crypto_agent.errors import ConfigError
-from robinhood_crypto_agent.robinhood import RobinhoodClient, load_private_key
+from robinhood_crypto_agent.robinhood import RobinhoodClient, generate_key_pair, load_private_key
 
 SEED = bytes(range(32))
 SEED_B64 = base64.b64encode(SEED).decode()
@@ -194,3 +195,44 @@ class TestRestShapes:
             }
         )
         assert rh.account().buying_power == Decimal("1234.56")
+
+
+class TestKeygen:
+    """``rhca keygen``: the one step of key setup that is easy to get wrong by hand."""
+
+    def test_a_generated_pair_round_trips(self):
+        private, public = generate_key_pair()
+        derived = load_private_key(private).public_key()
+        assert base64.b64encode(derived.public_bytes(Encoding.Raw, PublicFormat.Raw)).decode() == public
+
+    def test_the_private_key_goes_to_env_and_only_the_public_key_is_shown(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.delenv("ROBINHOOD_PRIVATE_KEY", raising=False)
+        (tmp_path / ".env.example").write_text("# keys\nROBINHOOD_API_KEY=\nROBINHOOD_PRIVATE_KEY=\n")
+        env = tmp_path / ".env"
+
+        assert main(["--env-file", str(env), "keygen"]) == 0
+
+        private = read_dotenv(env)["ROBINHOOD_PRIVATE_KEY"]
+        public_bytes = load_private_key(private).public_key().public_bytes(
+            Encoding.Raw, PublicFormat.Raw
+        )
+        out = capsys.readouterr().out
+        assert private not in out
+        assert base64.b64encode(public_bytes).decode() in out
+        assert env.read_text().startswith("# keys")  # the template's comments survive
+
+    def test_an_existing_key_is_never_silently_replaced(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ROBINHOOD_PRIVATE_KEY", raising=False)
+        env = tmp_path / ".env"
+        env.write_text("ROBINHOOD_PRIVATE_KEY=already-registered\n")
+        assert main(["--env-file", str(env), "keygen"]) == 1
+        assert env.read_text() == "ROBINHOOD_PRIVATE_KEY=already-registered\n"
+        assert main(["--env-file", str(env), "keygen", "--force"]) == 0
+        assert read_dotenv(env)["ROBINHOOD_PRIVATE_KEY"] != "already-registered"
+
+    def test_empty_values_in_env_count_as_unset(self, tmp_path):
+        env = tmp_path / ".env"
+        env.write_text("# c\nROBINHOOD_API_KEY=\nexport TYPESAFE_API_KEY=\"abc\"\n")
+        assert read_dotenv(env) == {"TYPESAFE_API_KEY": "abc"}

@@ -9,16 +9,56 @@ client has no order method. It runs on this PC, in a terminal you leave open.
 
 ### 1. Keys (you create these; nothing else can)
 
-| Variable | Where | Needed for |
-|---|---|---|
-| `ROBINHOOD_API_KEY`, `ROBINHOOD_PRIVATE_KEY` | Robinhood's crypto API settings; the private key is the base64 32-byte Ed25519 seed | **Required** — quotes, pairs, holdings |
-| `TYPESAFE_API_KEY` | console.typesafe.ai (Jev is early access) | News labels |
-| `ANTHROPIC_API_KEY` | console.anthropic.com | System 2 |
+Open a regular PowerShell window in the repo folder, and open `.env` in Notepad.
+If `.env` doesn't exist yet, `copy .env.example .env` first.
 
-Copy `.env.example` to `.env` in the repo root and fill it in. `.env` is
-gitignored, and variables already set in your environment win over it. If the
-Robinhood key setup offers read-only permissions, choose them: the shadow run
-never needs more.
+```powershell
+cd C:\Projects\robinhood-crypto-agent\robinhood-crypto-agent
+notepad .env
+```
+
+Put one `NAME=value` per line, with no quotes and no spaces around the `=`.
+`.env` is gitignored, and a variable already set in your environment wins over
+it.
+
+**Robinhood (required): quotes, pairs, holdings**
+
+1. `.venv\Scripts\rhca keygen` makes the key pair. It writes
+   `ROBINHOOD_PRIVATE_KEY` into `.env` without showing it, and prints the
+   **public** key.
+2. On a computer, sign in to Robinhood's web classic site and open
+   <https://robinhood.com/account/crypto>.
+3. Select **Add key**, and paste the public key from step 1.
+4. Under API actions, enable only the **read-only** ones: accounts, holdings,
+   products, quotes, and orders if listed as read. Leave both "place crypto
+   orders" options **off**. The shadow run never needs them, and a key without
+   them cannot trade even if it leaks.
+5. Save. Copy the API key Robinhood shows into `.env` as
+   `ROBINHOOD_API_KEY=...`.
+
+**Anthropic (System 2): Claude Sonnet 5**
+
+1. Sign in at <https://platform.claude.com> (console.anthropic.com redirects
+   there). API billing is separate from a Claude.ai subscription.
+2. Under **Billing**, add prepaid credit. System 2 is capped at 24 Sonnet calls
+   a day, which is roughly $3.60/day at worst.
+3. Under **API keys**, choose **Create key**. It is shown once. Put it in
+   `.env` as `ANTHROPIC_API_KEY=...`.
+
+**TypeSafe (Jev): news labels**
+
+1. Sign in at <https://console.typesafe.ai>. Jev is early access, so you may
+   have to request access and wait.
+2. Once in, create a key at <https://console.typesafe.ai/keys>, and put it in
+   `.env` as `TYPESAFE_API_KEY=...`.
+3. Still pending? Skip it. The run works without it: headlines are stored but
+   not scored.
+
+**Check**
+
+`.venv\Scripts\rhca status` lists the key *names* it found under `keys set`,
+never the values. Keep `.env` to yourself: nothing ever needs it pasted
+anywhere.
 
 ### 2. Start
 

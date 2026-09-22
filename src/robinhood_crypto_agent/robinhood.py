@@ -25,7 +25,12 @@ from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+    PublicFormat,
+)
 
 from . import net
 from .errors import ConfigError
@@ -44,6 +49,19 @@ MAX_PAGES = 10
 _SYMBOL = re.compile(r"^[A-Z0-9]+-[A-Z]+$")
 
 Http = Callable[..., Any]
+
+
+def generate_key_pair() -> tuple[str, str]:
+    """A new Ed25519 key pair as ``(private seed, public key)``, both base64.
+
+    The private half is what ``ROBINHOOD_PRIVATE_KEY`` holds and only ever
+    signs requests locally; the public half is what Robinhood's "Add key" form
+    asks for.
+    """
+    key = Ed25519PrivateKey.generate()
+    seed = key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+    public = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return base64.b64encode(seed).decode("ascii"), base64.b64encode(public).decode("ascii")
 
 
 def load_private_key(encoded: str) -> Ed25519PrivateKey:
