@@ -68,24 +68,23 @@ that loop was meant to build.
    confidence measures how sure it is of a *label*, not whether the trade
    wins, so its threshold is only as good as the outcomes behind it.
 
-## Then: dashboard UX
+## Done: dashboard UX (2026-09-23)
 
-Unchanged from before, plus what the shadow run adds:
+Every item on the old list shipped: the pipeline's fields and a stage filter,
+`by_status` accuracy, Accept greyed out past `price_drift_tolerance_pct`,
+relative timestamps, the signal column explained, per-signal rationale,
+single-row accuracy panels collapsed, a hit-rate trend, pagination,
+pair/outcome filters and a mobile card layout. The payload (version 2) also
+gained the kill switch, the loop heartbeat, the last mark per pair, per-rule
+risk verdicts and an execution summary. See [`dashboard/README.md`](../dashboard/README.md).
 
-- **Show the pipeline's fields.** The payload already carries `status`,
-  `trigger_reason`, `system2_decision` and `system2_confidence`, but the page
-  shows none of them yet. Also add a status filter, and render `by_status`
-  from the stats.
-- **Show whether a proposal is still live.** Past `price_drift_tolerance_pct`
-  the gate refuses it; grey out Accept before the click, not after.
-- **Relative timestamps**, **explain the signal column**, **surface the
-  per-signal rationale**, **collapse single-row accuracy panels**, a
-  **hit-rate trend**, **pagination**, **pair/outcome filters**, a **mobile
-  card layout**.
+What stays out, deliberately: System 2's written rationale (Sonnet reads the
+holdings and may quote them), the text of risk messages that quote the account,
+and the loop's last error text. Read those locally with `rhca audit` and
+`rhca status`.
 
-System 2's written rationale deliberately stays out of the payload, because
-Sonnet reads the holdings and may quote them. Show it locally (`rhca audit`),
-not on the dashboard.
+Still open: the loop only syncs when `RHCA_DASHBOARD_URL` and
+`RHCA_DASHBOARD_TOKEN` are set where it runs.
 
 ## Carried over
 

@@ -73,6 +73,12 @@ export async function decide(
         "Overriding a risk block is a deliberate act from the terminal.",
     };
   }
+  if (kind === "accept" && payload?.kill_switch?.engaged) {
+    return {
+      ok: false,
+      error: "the kill switch is engaged, so the agent refuses every execution.",
+    };
+  }
 
   await recordDecision({
     proposal_id: proposalId,

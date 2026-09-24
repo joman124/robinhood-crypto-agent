@@ -208,5 +208,5 @@ pipeline.
 **Next up.** The first shadow run with real keys: confirm the Robinhood REST
 shapes, then let it run long enough to compare hit rates by status. Did what
 System 2 proposed beat what it passed on? Did escalated candidates beat the
-ones held back? Then a round of dashboard UX work. See
-[`docs/roadmap.md`](./docs/roadmap.md).
+ones held back? The dashboard answers the first two directly (accuracy by
+pipeline stage). See [`docs/roadmap.md`](./docs/roadmap.md).

@@ -1,5 +1,7 @@
 """What the dashboard is allowed to see, and what it must never receive."""
 
+import json
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 
@@ -20,6 +22,7 @@ from robinhood_crypto_agent.models import (
     CompositeView,
     Direction,
     ExecutionPlan,
+    ExecutionRecord,
     OrderType,
     Proposal,
     ProposalStatus,
@@ -83,8 +86,60 @@ class TestPayloadPrivacy:
         audit = AuditLog(config.audit_path)
         audit.record_proposal(proposal())
         payload = build_payload(config, audit=audit, store=PriceStore(config.price_store_path))
-        allowed = set(PROPOSAL_FIELDS) | {"proposed_at", "outcome", "actionable"}
-        assert set(payload["proposals"][0]) <= allowed
+        derived = {
+            "proposed_at", "outcome", "actionable", "signals", "notes", "plan",
+            "risk_findings", "drift_pct", "execution",
+        }
+        assert set(payload["proposals"][0]) <= set(PROPOSAL_FIELDS) | derived
+
+    def test_account_describing_risk_messages_are_withheld(self, config):
+        audit = AuditLog(config.audit_path)
+        p = proposal()
+        p = replace(
+            p,
+            risk=RiskDecision(
+                [
+                    RiskFinding("spread", True, "bid/ask spread is 0.1% of mark"),
+                    RiskFinding("concentration", False, "would be 40% of the $512.00 portfolio"),
+                ]
+            ),
+        )
+        audit.record_proposal(p)
+        findings = build_payload(config, audit=audit)["proposals"][0]["risk_findings"]
+        by_rule = {f["rule"]: f for f in findings}
+        assert by_rule["spread"]["message"] == "bid/ask spread is 0.1% of mark"
+        assert by_rule["concentration"] == {"rule": "concentration", "passed": False, "blocking": True}
+        assert "$512" not in json.dumps(findings)
+
+    def test_heartbeat_error_text_is_withheld(self, config):
+        config.data_dir.mkdir(parents=True, exist_ok=True)
+        config.heartbeat_path.write_text(
+            json.dumps(
+                {
+                    "last_cycle_at": utcnow().isoformat(),
+                    "last_error": {"task": "quotes", "message": "401 key=abc", "at": "x"},
+                }
+            )
+        )
+        pipeline = build_payload(config, audit=AuditLog(config.audit_path))["pipeline"]
+        assert pipeline["last_error"] == {"task": "quotes", "at": "x"}
+        assert "abc" not in json.dumps(pipeline)
+
+    def test_executions_are_summarized_without_order_ids(self, config):
+        audit = AuditLog(config.audit_path)
+        audit.record_proposal(proposal())
+        audit.record_execution(
+            ExecutionRecord(
+                proposal_id="abc123def456", symbol="BTC-USD", side=Side.BUY,
+                recorded_at=utcnow(), requested_quantity=Decimal("0.001"),
+                filled_quantity=Decimal("0.001"), notional=Decimal("0.10"),
+                order_id="ORDER-SECRET", state="filled", ref_id="REF-SECRET",
+            )
+        )
+        execution = build_payload(config, audit=audit)["proposals"][0]["execution"]
+        assert execution["tranches"] == 1
+        assert execution["filled_quantity"] == "0.001"
+        assert "SECRET" not in json.dumps(execution)
 
 
 class TestPayloadShape:
@@ -126,6 +181,16 @@ class TestPayloadShape:
         payload = build_payload(config, audit=audit, store=store)
         assert payload["proposals"][0]["outcome"]["verdict"] == "win"
         assert payload["stats"]["overall"]["wins"] == 1
+
+    def test_drift_is_measured_against_the_last_seen_mark(self, config):
+        audit = AuditLog(config.audit_path)
+        store = PriceStore(config.price_store_path)
+        store.import_candles(make_candles([101.0], anchor=utcnow() - timedelta(hours=1)))
+        audit.record_proposal(proposal())  # reference price 100
+        payload = build_payload(config, audit=audit, store=store)
+        assert payload["proposals"][0]["drift_pct"] == "1.000"
+        assert payload["limits"]["price_drift_tolerance_pct"] == "0.5"
+        assert payload["kill_switch"]["engaged"] is False
 
     def test_newest_proposal_comes_first(self, config):
         audit = AuditLog(config.audit_path)
