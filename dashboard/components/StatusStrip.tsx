@@ -6,6 +6,34 @@ import type { Payload } from "@/lib/types";
 
 /** A manual `rhca dashboard-sync` has no schedule to be late for, so give it an hour. */
 const MANUAL_SYNC_STALE_SECONDS = 3600;
+/** `rhca run`'s default push interval, for payloads that predate the field. */
+const DEFAULT_SYNC_INTERVAL_SECONDS = 300;
+
+type Loop = "running" | "stopped" | "unknown" | "never";
+
+/**
+ * The page sees the heartbeat only as of the last sync, and `rhca run` syncs
+ * every few minutes, not every cycle. So the loop is judged *at sync time*
+ * (was its last cycle fresh when it pushed?), and the sync itself is judged
+ * against its own interval plus the same grace. Judging the heartbeat against
+ * the wall clock would read "not running" for most of every sync interval.
+ */
+function health(payload: Payload, now: number): { loop: Loop; syncStale: boolean; interval: number | null } {
+  const beat = payload.pipeline;
+  const grace = beat?.stale_after_seconds ?? 180;
+  const loopSyncs = Boolean(beat?.services?.dashboard);
+  const interval = loopSyncs ? beat?.sync_interval_seconds ?? DEFAULT_SYNC_INTERVAL_SECONDS : null;
+
+  const syncAge = secondsSince(payload.generated_at, now) ?? Infinity;
+  const syncStale = syncAge > (interval !== null ? interval + grace : MANUAL_SYNC_STALE_SECONDS);
+
+  if (!beat) return { loop: "never", syncStale, interval };
+  const beatAtSync = secondsSince(beat.last_cycle_at, Date.parse(payload.generated_at));
+  if (beatAtSync === null || beatAtSync > grace) return { loop: "stopped", syncStale, interval };
+  // It was alive when it last pushed; if it pushes on a schedule and has
+  // missed it, we no longer know.
+  return { loop: loopSyncs && syncStale ? "unknown" : "running", syncStale, interval };
+}
 
 type Tone = "good" | "warn" | "critical" | "neutral";
 
@@ -22,6 +50,13 @@ function Pill({ tone, label, children }: { tone: Tone; label: string; children: 
   );
 }
 
+const LOOP_FACE: Record<Loop, { tone: Tone; text: string }> = {
+  running: { tone: "good", text: "running" },
+  stopped: { tone: "warn", text: "not running" },
+  unknown: { tone: "warn", text: "no word" },
+  never: { tone: "neutral", text: "never run" },
+};
+
 export function StatusStrip({ payload }: { payload: Payload | null }) {
   const { now } = useNow();
 
@@ -35,26 +70,20 @@ export function StatusStrip({ payload }: { payload: Payload | null }) {
     );
   }
 
-  const beat = payload.pipeline;
-  const staleAfter = beat?.stale_after_seconds ?? 180;
-  const loopAge = secondsSince(beat?.last_cycle_at, now);
-  const loopRunning = loopAge !== null && loopAge <= staleAfter;
-
-  const syncStale =
-    (secondsSince(payload.generated_at, now) ?? Infinity) >
-    (beat?.services?.dashboard ? staleAfter : MANUAL_SYNC_STALE_SECONDS);
-
+  const { loop, syncStale } = health(payload, now);
+  const face = LOOP_FACE[loop];
   const kill = payload.kill_switch;
 
   return (
     <div className="strip" aria-label="Agent status">
-      {beat === undefined ? null : beat === null ? (
-        <Pill tone="neutral" label="Shadow loop">
-          never run
-        </Pill>
-      ) : (
-        <Pill tone={loopRunning ? "good" : "warn"} label="Shadow loop">
-          {loopRunning ? "running" : "not running"} · <RelTime iso={beat.last_cycle_at} />
+      {payload.pipeline !== undefined && (
+        <Pill tone={face.tone} label="Shadow loop">
+          {face.text}
+          {payload.pipeline && (
+            <>
+              {" "}· last cycle <RelTime iso={payload.pipeline.last_cycle_at} />
+            </>
+          )}
         </Pill>
       )}
       {kill && (
@@ -77,10 +106,7 @@ export function StatusAlerts({ payload }: { payload: Payload | null }) {
   const { now } = useNow();
   if (!payload) return null;
 
-  const beat = payload.pipeline;
-  const staleAfter = beat?.stale_after_seconds ?? 180;
-  const syncAge = secondsSince(payload.generated_at, now) ?? 0;
-  const syncStale = syncAge > (beat?.services?.dashboard ? staleAfter : MANUAL_SYNC_STALE_SECONDS);
+  const { loop, syncStale, interval } = health(payload, now);
   const kill = payload.kill_switch;
 
   return (
@@ -103,18 +129,24 @@ export function StatusAlerts({ payload }: { payload: Payload | null }) {
         <div className="alert warn">
           <strong>Out of date.</strong> The last sync was <RelTime iso={payload.generated_at} />
           , so proposals, prices and drift below are as of then.{" "}
-          {beat?.services?.dashboard ? (
+          {interval !== null ? (
             <>
-              The shadow loop syncs every cycle, so it has probably stopped: check{" "}
-              <code>rhca status</code>.
+              The shadow loop pushes every {Math.round(interval / 60)} min, so it has probably
+              stopped: check <code>rhca status</code>.
             </>
           ) : (
             <>
               Run <code>rhca dashboard-sync</code>, or set <code>RHCA_DASHBOARD_URL</code> and{" "}
               <code>RHCA_DASHBOARD_TOKEN</code> in the agent&apos;s <code>.env</code> so{" "}
-              <code>rhca run</code> syncs every cycle.
+              <code>rhca run</code> pushes on a schedule.
             </>
           )}
+        </div>
+      )}
+      {!syncStale && loop === "stopped" && (
+        <div className="alert warn">
+          <strong>The shadow loop was not running</strong> at the last sync: its last cycle was{" "}
+          <RelTime iso={payload.pipeline?.last_cycle_at} />. Start it with <code>rhca run</code>.
         </div>
       )}
     </>
