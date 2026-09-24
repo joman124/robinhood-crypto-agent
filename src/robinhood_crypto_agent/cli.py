@@ -240,9 +240,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     print()
 
     load_dotenv(_env_file(args))
-    stale_after = max(180, 3 * config.pipeline.quote_interval_seconds)
     for line in runner_mod.describe_heartbeat(
-        runner_mod.read_json(config.heartbeat_path), stale_after_seconds=stale_after
+        runner_mod.read_json(config.heartbeat_path),
+        stale_after_seconds=runner_mod.stale_after_seconds(config),
     ):
         print(line)
     present = [name for name in CREDENTIAL_ENVS if os.environ.get(name)]

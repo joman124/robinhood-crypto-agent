@@ -24,12 +24,13 @@ from decimal import Decimal
 from typing import Any, Sequence
 
 from . import net
-from .audit import KIND_NOTE, KIND_PROPOSAL, AuditLog
+from .audit import KIND_EXECUTION, KIND_NOTE, KIND_PROPOSAL, AuditLog
 from .config import AgentConfig
 from .decisions import Decision, decision_from_dict
 from .errors import AgentError
+from .execution.kill_switch import KillSwitch
 from .models import ProposalStatus, utcnow
-from .numeric import round_money
+from .numeric import abs_pct_drift, format_decimal, round_money, to_decimal
 from .outcomes import (
     DEFAULT_HORIZON_BARS,
     DEFAULT_HURDLE_PCT,
@@ -39,9 +40,29 @@ from .outcomes import (
     outcome_from_proposal_record,
 )
 from .store import PriceStore
+from .symbols import canonical
 
-PAYLOAD_VERSION = 1
+PAYLOAD_VERSION = 2
 DEFAULT_TIMEOUT_SECONDS = 20
+
+#: Risk rules whose message says nothing about the account. The rest quote the
+#: portfolio value, holdings, today's traded dollars or realized loss, so the
+#: dashboard gets their pass/fail verdict and never their text.
+SHAREABLE_FINDING_MESSAGES = frozenset(
+    {
+        "execution_mode",
+        "kill_switch",
+        "watchlist",
+        "pair_tradable",
+        "order_type_supported",
+        "quote_freshness",
+        "spread",
+        "signal_confidence",
+        "signal_strength",
+    }
+)
+
+MAX_TEXT = 300
 
 #: Proposal fields the dashboard is allowed to see. Everything else in the
 #: audit record -- including anything an account snapshot might carry -- is
@@ -88,6 +109,8 @@ def build_payload(
 
     proposals: list[dict[str, Any]] = []
     outcomes: list[Outcome] = []
+    marks = _latest_marks(store, config.watchlist)
+    executions = _executions_by_proposal(audit)
 
     records = list(audit.events(kind=KIND_PROPOSAL))
     if limit is not None and limit > 0:
@@ -96,6 +119,11 @@ def build_payload(
     for record in records:
         row = {field: record.get(field) for field in PROPOSAL_FIELDS}
         row["proposed_at"] = record.get("recorded_at")
+        row.update(_proposal_detail(record))
+        row["drift_pct"] = _drift(
+            record.get("reference_price"), marks.get(canonical(str(record.get("symbol", ""))))
+        )
+        row["execution"] = executions.get(str(record.get("proposal_id")))
 
         symbol = str(record.get("symbol", ""))
         outcome = outcome_from_proposal_record(
@@ -120,6 +148,7 @@ def build_payload(
     proposals.sort(key=lambda r: str(r.get("proposed_at") or ""), reverse=True)
 
     activity = audit.daily_activity()
+    kill = KillSwitch(config.kill_switch_path).state()
 
     return {
         "version": PAYLOAD_VERSION,
@@ -148,6 +177,135 @@ def build_payload(
             "realized_pnl": str(round_money(activity.realized_pnl)),
             "proposals": activity.proposal_count,
         },
+        "limits": {
+            "price_drift_tolerance_pct": str(config.risk.price_drift_tolerance_pct),
+        },
+        "market": {
+            symbol: {"mark": format_decimal(mark), "observed_at": at}
+            for symbol, (mark, at) in marks.items()
+        },
+        "kill_switch": {
+            "engaged": kill.engaged,
+            "reason": kill.reason,
+            "engaged_at": kill.engaged_at.isoformat() if kill.engaged_at else None,
+        },
+        "pipeline": _pipeline(config),
+    }
+
+
+def _proposal_detail(record: dict[str, Any]) -> dict[str, Any]:
+    """Signals, plan and risk verdicts from the stored proposal, minus anything
+    that describes the account."""
+    stored = record.get("proposal") if isinstance(record.get("proposal"), dict) else {}
+    view = stored.get("view") if isinstance(stored.get("view"), dict) else {}
+    plan = stored.get("plan") if isinstance(stored.get("plan"), dict) else {}
+    risk = stored.get("risk") if isinstance(stored.get("risk"), dict) else {}
+    weights = view.get("weights") if isinstance(view.get("weights"), dict) else {}
+
+    signals = [
+        {
+            "name": str(s.get("name", "")),
+            "score": s.get("score"),
+            "confidence": s.get("confidence"),
+            "direction": s.get("direction"),
+            "weight": weights.get(s.get("name")),
+            "rationale": str(s.get("rationale", ""))[:MAX_TEXT],
+        }
+        for s in view.get("signals") or []
+        if isinstance(s, dict)
+    ]
+    findings = []
+    for f in risk.get("findings") or []:
+        if not isinstance(f, dict):
+            continue
+        rule = str(f.get("rule", ""))
+        finding = {
+            "rule": rule,
+            "passed": bool(f.get("passed")),
+            "blocking": bool(f.get("blocking", True)),
+        }
+        if rule in SHAREABLE_FINDING_MESSAGES:
+            finding["message"] = str(f.get("message", ""))[:MAX_TEXT]
+        findings.append(finding)
+
+    return {
+        "signals": signals,
+        "notes": [str(n)[:MAX_TEXT] for n in view.get("notes") or []],
+        "plan": {
+            "style": plan.get("style"),
+            "tranches": len(plan.get("tranches") or []),
+            "rationale": str(plan.get("rationale", ""))[:MAX_TEXT],
+        }
+        if plan
+        else None,
+        "risk_findings": findings,
+    }
+
+
+def _latest_marks(store: PriceStore, symbols: Sequence[str]) -> dict[str, tuple[Decimal, str]]:
+    marks = {}
+    for symbol in symbols:
+        quote = store.latest_quote(symbol)
+        if quote is not None:
+            marks[canonical(symbol)] = (quote.mark, quote.observed_at.isoformat())
+    return marks
+
+
+def _drift(reference: Any, latest: tuple[Decimal, str] | None) -> str | None:
+    """How far the last seen mark sits from the proposal's reference price --
+    the same measure the approval gate refuses on, as of the last sync."""
+    if latest is None or reference is None:
+        return None
+    try:
+        ref = to_decimal(reference, field="reference_price")
+    except AgentError:
+        return None
+    if ref <= 0:
+        return None
+    return str(round_money(abs_pct_drift(latest[0], ref), 3))
+
+
+def _executions_by_proposal(audit: AuditLog) -> dict[str, dict[str, Any]]:
+    """Per proposal: tranches logged, quantity filled, last state. No order ids."""
+    summary: dict[str, dict[str, Any]] = {}
+    for record in audit.events(kind=KIND_EXECUTION):
+        pid = str(record.get("proposal_id", ""))
+        entry = summary.setdefault(
+            pid, {"tranches": 0, "filled_quantity": Decimal(0), "state": None, "overridden": False}
+        )
+        entry["tranches"] += 1
+        entry["state"] = record.get("state")
+        entry["overridden"] = entry["overridden"] or bool(record.get("overridden"))
+        if str(record.get("state", "")).lower() not in {"rejected", "failed", "voided"}:
+            try:
+                entry["filled_quantity"] += to_decimal(record.get("filled_quantity", 0))
+            except AgentError:
+                pass
+    return {
+        pid: {**entry, "filled_quantity": format_decimal(entry["filled_quantity"])}
+        for pid, entry in summary.items()
+    }
+
+
+def _pipeline(config: AgentConfig) -> dict[str, Any] | None:
+    """The shadow loop's heartbeat. The last error's text is withheld: an API
+    error can echo back whatever the request carried."""
+    from .runner import read_json, stale_after_seconds  # runner imports this module
+
+    beat = read_json(config.heartbeat_path)
+    if beat is None:
+        return None
+    error = beat.get("last_error") if isinstance(beat.get("last_error"), dict) else None
+    return {
+        "mode": beat.get("mode"),
+        "started_at": beat.get("started_at"),
+        "last_cycle_at": beat.get("last_cycle_at"),
+        "cycles": beat.get("cycles"),
+        "counts": beat.get("counts") or {},
+        "escalations_today": beat.get("escalations_today"),
+        "services": beat.get("services") or {},
+        "last_error": {"task": error.get("task"), "at": error.get("at")} if error else None,
+        "stale_after_seconds": stale_after_seconds(config),
     }
 
 

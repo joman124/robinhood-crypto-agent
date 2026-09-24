@@ -425,6 +425,11 @@ def read_json(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def stale_after_seconds(config: AgentConfig) -> int:
+    """How old a heartbeat may be before the loop reads as not running."""
+    return max(180, 3 * config.pipeline.quote_interval_seconds)
+
+
 def describe_heartbeat(heartbeat: dict[str, Any] | None, *, stale_after_seconds: float) -> list[str]:
     """``rhca status`` lines for the pipeline: alive or not, and what it did."""
     if heartbeat is None:

@@ -3,7 +3,28 @@
 A web view of every trade the agent has suggested, whether those suggestions
 turned out to be good, and a place to accept or decline the ones waiting on you.
 
-![The dashboard](./docs-screenshot.png)
+## What is on the page
+
+- **Status strip.** Whether the shadow loop (`rhca run`) is running, the kill
+  switch, the execution mode, and how old the last sync is. Banners explain
+  anything that changes what the numbers mean: an engaged kill switch, a stale
+  sync, read-only mode, in-memory storage.
+- **Headline numbers.** Hit rate, average move, proposal count, and today's
+  proposals, executions, traded dollars and realized P&L.
+- **The proposal log.** "Needs your call" by default, with Decided and All tabs,
+  search, stage/pair/outcome filters, pagination, CSV export, and a card layout
+  on phones. Accept is greyed out, with the reason, whenever the agent's gate
+  would refuse it: risk-blocked, a record rather than a proposal, the kill
+  switch, or price drift past `price_drift_tolerance_pct` as of the last sync.
+- **The detail drawer** (click any row; `#p=<id>` links straight to one). The
+  decision with an optional note and whether the agent has picked it up; the
+  trade, plan and drift; trigger and System 2 verdicts; every signal on a
+  −1…+1 track with its weight and rationale; all 16 risk rules; the outcome;
+  any execution; and the `rhca` commands to copy into the terminal.
+- **Hit rate over time**, the **shadow loop** heartbeat (counts, services, last
+  error task), and **accuracy by** pipeline stage, regime, pair or side.
+
+The page re-fetches every minute while the tab is visible.
 
 ## What it does and does not do
 
@@ -25,7 +46,10 @@ Two consequences worth stating plainly:
 - **The data pushed here is deliberately thin.** No account numbers, no buying
   power, no portfolio value, no order ids. The dashboard needs to know what was
   suggested and how it turned out; it does not need to know how much money sits
-  behind it.
+  behind it. Risk rules whose message would quote the account (sizing, the
+  dollar caps, open positions, concentration, sell coverage) arrive as a
+  pass/fail verdict with no text, System 2's written rationale never arrives,
+  and neither does the text of the loop's last error.
 
 ## Deploying to Vercel
 
@@ -34,6 +58,11 @@ Two consequences worth stating plainly:
 cd dashboard
 npx vercel            # link the project, first deploy
 ```
+
+If the Vercel project is connected to the GitHub repo instead, set **Project →
+Settings → Build and Deployment → Root Directory** to `dashboard`. Left at the
+repository root, Vercel sees `pyproject.toml`, builds a Python app, and fails
+with "No python entrypoint found".
 
 Then set these in **Project → Settings → Environment Variables**:
 

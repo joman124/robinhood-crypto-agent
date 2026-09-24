@@ -1,4 +1,15 @@
+import { STATUS, statusLabel } from "@/lib/format";
 import type { Verdict } from "@/lib/types";
+
+/** Where a candidate stopped in the pipeline. Neutral ink: a stage is not a verdict. */
+export function StatusChip({ status }: { status: string | null | undefined }) {
+  const key = status ?? "proposed";
+  return (
+    <span className={`stage stage-${key}`} title={STATUS[key]?.help}>
+      {statusLabel(key)}
+    </span>
+  );
+}
 
 /**
  * Every status carries a glyph and a word as well as a color, so the meaning
