@@ -826,11 +826,27 @@ def cmd_dashboard_sync(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def cmd_bootstrap_history(args: argparse.Namespace) -> int:
-    config, state, store, audit = _context(args)
+def import_recent_history(
+    config: AgentConfig, store: PriceStore
+) -> tuple[list[tuple[str, int, str]], list[str]]:
+    """Fill in whichever recent bars this store is missing, symbol by symbol.
+
+    Returns ``(imported, failures)``: one ``(symbol, bars, coverage)`` row per
+    symbol that worked, and a message per symbol that did not. A symbol
+    Coinbase will not serve is returned rather than raised, because the two
+    callers want opposite things from it -- ``bootstrap-history`` is asking for
+    the import and should fail loudly, while ``run`` must still start when
+    Coinbase is unreachable.
+    """
+    imported: list[tuple[str, int, str]] = []
+    failures: list[str] = []
     interval = config.strategy.bar_interval_minutes
     for symbol in config.watchlist:
-        candles = fetch_coinbase_candles(symbol, interval_minutes=interval)
+        try:
+            candles = fetch_coinbase_candles(symbol, interval_minutes=interval)
+        except AgentError as exc:
+            failures.append(f"{symbol}: {exc}")
+            continue
         existing = {
             c.start
             for c in store.candles(symbol, interval_minutes=interval, include_partial=True)
@@ -840,7 +856,19 @@ def cmd_bootstrap_history(args: argparse.Namespace) -> int:
         coverage = store.coverage(
             symbol, interval_minutes=interval, required_bars=config.strategy.min_bars
         )
-        print(f"{symbol}: imported {len(missing)} bar(s) from Coinbase. {coverage.describe()}")
+        imported.append((symbol, len(missing), coverage.describe()))
+    return imported, failures
+
+
+def cmd_bootstrap_history(args: argparse.Namespace) -> int:
+    config, state, store, audit = _context(args)
+    imported, failures = import_recent_history(config, store)
+    for symbol, bars, coverage in imported:
+        print(f"{symbol}: imported {bars} bar(s) from Coinbase. {coverage}")
+    for failure in failures:
+        print(f"WARNING {failure}", file=sys.stderr)
+    if failures and not imported:
+        raise AgentError("no symbol could be bootstrapped from Coinbase")
     print(
         "\nImported bars are marked source=import and feed only the indicators; proposals "
         "are always priced off a live Robinhood quote."
@@ -963,6 +991,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     market_data = config.pipeline.market_data_mcp_url if system2 else ""
     print(f"  market data      : {market_data or 'off'} (System 2's MCP connector)")
     print(f"  dashboard sync   : {'on' if services.dashboard else 'off'}")
+    # Bootstrapping here rather than asking for it beforehand: a gap between
+    # the last imported bar and the first polled one reads to the indicators as
+    # one very long bar, and that gap opens every time the loop is restarted.
+    # Coinbase being unreachable is not a reason to refuse to start.
+    if args.no_bootstrap:
+        print("  history          : bootstrap skipped (--no-bootstrap)")
+    else:
+        imported, failures = import_recent_history(config, PriceStore(config.price_store_path))
+        bars = sum(count for _, count, _ in imported)
+        note = f"{bars} bar(s) imported for {len(imported)} symbol(s)"
+        print(f"  history          : {note}{f', {len(failures)} failed' if failures else ''}")
+        for failure in failures:
+            print(f"    ! {failure}", file=sys.stderr)
     if args.keep_awake:
         print(f"  keep awake       : {'on' if _keep_awake() else 'unavailable on this OS'}")
     print("Ctrl+C to stop.\n")
@@ -1000,6 +1041,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--minutes", type=float, default=None, help="stop after this long")
     run.add_argument(
         "--keep-awake", action="store_true", help="stop Windows sleeping while it runs"
+    )
+    run.add_argument(
+        "--no-bootstrap",
+        action="store_true",
+        help="skip the Coinbase history import that otherwise runs at startup",
     )
     run.set_defaults(func=cmd_run)
 

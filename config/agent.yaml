@@ -12,10 +12,24 @@ execution_mode: propose_only
 
 # The allowlist. A symbol not listed here cannot be proposed, whatever the
 # signals say.
+#
+# The four below BTC/ETH/SOL were added by the owner, 2026-09-24, because they
+# are held in the crypto account `rhca run` reads. Listing them prices those
+# holdings, so portfolio value -- and the concentration limit computed from it
+# -- stops silently leaving them out.
+#
+# They are held in the account the API KEY reads, which is not the account
+# orders would go to: the Agentic account holds none of them. A sell proposal
+# on one of these could not be filled there. Until the two accounts agree,
+# treat a sell on ADA/XRP/SHIB/DOGE as shadow-only signal, not an intent.
 watchlist:
   - BTC-USD
   - ETH-USD
   - SOL-USD
+  - ADA-USD
+  - XRP-USD
+  - SHIB-USD
+  - DOGE-USD
 
 # The NUMERIC rhs_account_number from get_accounts -- not the alphanumeric
 # account_number. Leave blank and set RHCA_RHS_ACCOUNT_NUMBER in the
