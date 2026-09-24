@@ -99,6 +99,8 @@ export interface Heartbeat {
   services: Record<string, boolean>;
   last_error: { task: string | null; at: string | null } | null;
   stale_after_seconds: number;
+  /** How often `rhca run` pushes here. Absent from payloads before 2026-09-24. */
+  sync_interval_seconds?: number;
 }
 
 export interface Stats {

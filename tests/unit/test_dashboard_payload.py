@@ -123,6 +123,7 @@ class TestPayloadPrivacy:
         )
         pipeline = build_payload(config, audit=AuditLog(config.audit_path))["pipeline"]
         assert pipeline["last_error"] == {"task": "quotes", "at": "x"}
+        assert pipeline["sync_interval_seconds"] == config.pipeline.sync_interval_seconds
         assert "abc" not in json.dumps(pipeline)
 
     def test_executions_are_summarized_without_order_ids(self, config):

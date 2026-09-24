@@ -306,6 +306,8 @@ def _pipeline(config: AgentConfig) -> dict[str, Any] | None:
         "services": beat.get("services") or {},
         "last_error": {"task": error.get("task"), "at": error.get("at")} if error else None,
         "stale_after_seconds": stale_after_seconds(config),
+        # The dashboard sees the heartbeat only as often as the loop syncs.
+        "sync_interval_seconds": config.pipeline.sync_interval_seconds,
     }
 
 
