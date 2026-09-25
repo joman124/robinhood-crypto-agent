@@ -2,7 +2,7 @@
 
 A crypto trading agent for Robinhood with two layers. System 1 is fast and
 deterministic: indicators, a news signal labeled by
-[Jev](https://typesafe.ai/), and 16 risk rules. It escalates only its confident
+[Jev](https://typesafe.ai/), and 17 risk rules. It escalates only its confident
 ideas to System 2, **Claude Sonnet 5**. Orders go only through
 [Claude Code](https://claude.com/claude-code) and the **RobinHood MCP server**,
 after a human approves.
@@ -42,7 +42,7 @@ hands it a payload after a human has approved a **specific proposal by id**.
 
 ```
 Robinhood quotes ──┐
-RSS ─► Jev ────────┼─► System 1: indicators + news + 16 risk rules
+RSS ─► Jev ────────┼─► System 1: indicators + news + 17 risk rules
                    │        │
                    │   confidence high?  no ─► logged, still scored
                    │        │ yes
@@ -70,7 +70,7 @@ the evidence for whether each stage earns its place. Setup and keys:
   near-opposites, so blending them at fixed weights averages out to noise.
 - **Sizes by conviction and volatility.** Three multiplicative factors, each
   bounded at 1.0, so the result can never exceed the per-trade cap.
-- **Refuses, loudly and specifically.** Sixteen risk rules run on every
+- **Refuses, loudly and specifically.** Seventeen risk rules run on every
   proposal — all of them, so the report names every blocker rather than the
   first. See [`docs/risk-controls.md`](./docs/risk-controls.md).
 - **Validates order payloads offline.** The RobinHood order contract is
@@ -172,7 +172,7 @@ src/robinhood_crypto_agent/
 ├── numeric.py          # Decimal helpers; no price ever becomes a float
 ├── symbols.py          # BTCUSD vs BTC-USD reconciliation
 ├── indicators.py       # SMA/EMA/RSI/MACD/ATR/ADX/Bollinger/Donchian
-├── risk.py             # the 16 risk rules
+├── risk.py             # the 17 risk rules
 ├── sizing.py           # conviction x volatility x caps
 ├── audit.py            # append-only log; the daily caps read from it
 ├── serde.py            # proposal round-trip through the log
@@ -200,7 +200,7 @@ destination, not a dead end — but it is refused until the promotion criteria i
 makes every proposal fail the `execution_mode` risk check.
 
 The good news for Phase 2 is that only *one* step is human-shaped. Sizing, the
-16 risk rules, the kill switch, the price-drift re-check, the
+17 risk rules, the kill switch, the price-drift re-check, the
 remaining-quantity accounting and the audit-log daily caps all already run
 without a human. Phase 2 swaps the authorization source; it does not rework the
 pipeline.

@@ -984,7 +984,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         f"buying power {buying_power} ({pin})"
     )
     print(f"  watchlist        : {', '.join(config.watchlist)}")
-    print("  System 1         : indicators + news signal + 16 risk rules")
+    print("  System 1         : indicators + news signal + 17 risk rules")
     print(f"  Jev news labels  : {'on' if services.jev else f'OFF (set {JEV_KEY_ENV})'}")
     system2_state = config.pipeline.system2_model if system2 else "OFF (set ANTHROPIC_API_KEY)"
     print(f"  System 2         : {system2_state}")

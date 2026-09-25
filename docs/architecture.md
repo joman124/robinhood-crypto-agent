@@ -28,7 +28,7 @@ The decision path is still testable offline. Every network client is injected
 quotes (Robinhood) ─┐
 RSS ─► Jev ─────────┼─► System 1: candles ─► 4 price signals + news ─► composite
                     │                                   │
-                    │               size ─► plan ─► 16 risk rules ─► candidate
+                    │               size ─► plan ─► 17 risk rules ─► candidate
                     │                                   │
                     │             trigger: confidence, |score|, cooldown, cap
                     │                  no ─► logged (not_escalated)
@@ -68,7 +68,7 @@ of five symbols have no data".
 | `indicators.py` | Aligned indicator series, Wilder smoothing where it applies |
 | `strategy/` | Four signal sources, regime detection, confidence-weighted blend |
 | `sizing.py` | Conviction × volatility scaling × caps |
-| `risk.py` | 16 rules, all evaluated, each naming itself |
+| `risk.py` | 17 rules, all evaluated, each naming itself |
 | `execution/orders.py` | Execution plans and validated order payloads |
 | `execution/gate.py` | The approval gate — the one path to an order payload |
 | `execution/kill_switch.py` | File-based, fail-safe stop |

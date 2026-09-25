@@ -38,6 +38,12 @@ def test_tightening_a_limit_is_always_allowed():
     assert limits.max_notional_per_trade_usd == Decimal("25")
 
 
+def test_disable_sell_side_parses_from_yaml_and_defaults_off():
+    assert RiskLimits.from_mapping({}).disable_sell_side is False
+    assert RiskLimits.from_mapping({"disable_sell_side": True}).disable_sell_side is True
+    assert RiskLimits.from_mapping({"disable_sell_side": False}).disable_sell_side is False
+
+
 def test_floors_are_enforced_too():
     with pytest.raises(ConfigError, match="hard floor"):
         RiskLimits.from_mapping({"min_signal_confidence": 0.01})

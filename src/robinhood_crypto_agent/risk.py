@@ -80,6 +80,7 @@ class RiskEngine:
         add(self._check_execution_mode())
         add(self._check_kill_switch(context))
         add(self._check_watchlist(view.symbol))
+        add(self._check_sell_side_disabled(sizing))
         add(self._check_tradable(context))
         add(self._check_order_type(context))
         add(self._check_quote_freshness(context))
@@ -134,6 +135,30 @@ class RiskEngine:
                 if allowed
                 else f"{symbol} is not on the watchlist allowlist "
                 f"({', '.join(self.config.watchlist)})"
+            ),
+        )
+
+    def _check_sell_side_disabled(self, sizing: SizingResult) -> RiskFinding:
+        if sizing.side is not Side.SELL:
+            return RiskFinding(
+                rule="sell_side_disabled",
+                passed=True,
+                message="buy order; the sell-side gate does not apply",
+            )
+        if not self.limits.disable_sell_side:
+            return RiskFinding(
+                rule="sell_side_disabled",
+                passed=True,
+                message="sell proposals are enabled",
+            )
+        return RiskFinding(
+            rule="sell_side_disabled",
+            passed=False,
+            message=(
+                "sell proposals are disabled in risk_limits.yaml: every sell that has "
+                "resolved so far has lost or gone flat (0 wins across decided sells as "
+                "of 2026-09-25). Re-enable by setting disable_sell_side: false once "
+                "there is evidence the sell signal has improved."
             ),
         )
 

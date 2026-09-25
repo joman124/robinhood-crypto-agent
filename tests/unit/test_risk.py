@@ -307,6 +307,34 @@ def test_a_sizing_rejection_does_not_masquerade_as_missing_coverage(config):
     assert not decision.passed
 
 
+def test_sell_side_disabled_blocks_sells_but_not_buys(config):
+    disabled = AgentConfig(
+        watchlist=("BTC-USD",),
+        rhs_account_number="1",
+        risk=RiskLimits(disable_sell_side=True),
+        data_dir=config.data_dir,
+    )
+    context = make_context(disabled, positions={"BTC-USD": Position("BTC-USD", Decimal("1"))})
+    engine = RiskEngine(disabled)
+
+    sell_decision = engine.evaluate(
+        make_view(score=-0.8), make_sizing(side=Side.SELL), context
+    )
+    assert not rule(sell_decision, "sell_side_disabled").passed
+    assert not sell_decision.passed
+
+    buy_decision = engine.evaluate(make_view(), make_sizing(side=Side.BUY), context)
+    assert rule(buy_decision, "sell_side_disabled").passed
+
+
+def test_sell_side_disabled_defaults_to_off(config):
+    """The default stays permissive; the gate is a deliberate config edit, not a code default."""
+    decision = RiskEngine(config).evaluate(
+        make_view(score=-0.8), make_sizing(side=Side.SELL), make_context(config)
+    )
+    assert rule(decision, "sell_side_disabled").passed
+
+
 def test_sell_coverage_still_blocks_a_real_shortfall(config):
     """The rule it replaces must keep working when sizing did produce an order."""
     context = make_context(config, positions={"BTC-USD": Position("BTC-USD", Decimal("0.0001"))})
