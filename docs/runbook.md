@@ -82,14 +82,20 @@ From the repo root. Calling the venv's `rhca` directly works the same in
 PowerShell and cmd, and needs no activation script:
 
 ```powershell
-.venv\Scripts\rhca bootstrap-history   # ~12 days of Coinbase bars, so indicators work at once
 .venv\Scripts\rhca run --once          # one pass of every task, then exit: the smoke test
 .venv\Scripts\rhca run --keep-awake    # the real run; Ctrl+C stops it
 ```
 
-Run `bootstrap-history` right before starting, every time: it only fills bars
-that are missing, and a gap between the last imported bar and the first polled
-one would read to the indicators as a single long bar.
+`run` imports the missing Coinbase bars itself before it starts, so there is
+nothing to remember: the gap between the last imported bar and the first polled
+one would otherwise read to the indicators as a single very long bar, and that
+gap reopens every time the loop is restarted. The banner says how many bars it
+imported. `--no-bootstrap` skips it, and `rhca bootstrap-history` still runs the
+import on its own if you want it without starting the loop.
+
+A symbol Coinbase cannot serve is reported and skipped rather than stopping the
+loop — `run` starts even when Coinbase is unreachable, just with whatever
+history is already on disk.
 
 `--keep-awake` asks Windows not to sleep while `rhca run` is open, and the
 request ends with the process. Without it, sleep pauses the loop, and

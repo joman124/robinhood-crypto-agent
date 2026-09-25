@@ -280,3 +280,38 @@ def test_sizing_rejection_surfaces_as_a_finding(config):
     decision = RiskEngine(config).evaluate(make_view(), rejected, make_context(config))
     assert not rule(decision, "sizing").passed
     assert "BLOCKED by" in summarize(decision)
+
+
+def test_a_sizing_rejection_does_not_masquerade_as_missing_coverage(config):
+    """The blocked rule must be the one that actually blocked.
+
+    A weak signal sizes to zero, and a zero quantity used to fail
+    ``sell_coverage`` too -- reporting a coverage problem on an account holding
+    plenty, and pointing whoever read the audit log at the wrong rule.
+    """
+    rejected = SizingResult(
+        symbol="BTC-USD",
+        side=Side.SELL,
+        quantity=Decimal("0"),
+        notional=Decimal("0"),
+        reference_price=Decimal("80000"),
+        rejected_reason="sized notional $4.38 is below the $5.00 minimum trade size",
+    )
+    context = make_context(config, positions={"BTC-USD": Position("BTC-USD", Decimal("10"))})
+    decision = RiskEngine(config).evaluate(make_view(), rejected, context)
+
+    assert rule(decision, "sell_coverage").passed
+    assert "sizing produced no order" in rule(decision, "sell_coverage").message
+    assert not rule(decision, "sizing").passed
+    # Still blocked -- this changes which rule explains it, never the verdict.
+    assert not decision.passed
+
+
+def test_sell_coverage_still_blocks_a_real_shortfall(config):
+    """The rule it replaces must keep working when sizing did produce an order."""
+    context = make_context(config, positions={"BTC-USD": Position("BTC-USD", Decimal("0.0001"))})
+    decision = RiskEngine(config).evaluate(
+        make_view(), make_sizing(quantity="0.001", side=Side.SELL), context
+    )
+    assert not rule(decision, "sell_coverage").passed
+    assert not decision.passed

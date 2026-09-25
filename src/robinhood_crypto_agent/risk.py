@@ -362,6 +362,17 @@ class RiskEngine:
                 passed=True,
                 message="buy order; no position coverage required",
             )
+        if sizing.rejected_reason:
+            # Sizing already refused, so there is no quantity left to cover.
+            # Reporting a coverage failure here would name coverage as a
+            # blocker on an account holding plenty, and send whoever reads the
+            # audit log after the wrong rule. The `sizing` finding carries the
+            # real reason; this one has nothing to add.
+            return RiskFinding(
+                rule="sell_coverage",
+                passed=True,
+                message=f"not applicable: sizing produced no order ({sizing.rejected_reason})",
+            )
         held = context.position_for(sizing.symbol)
         quantity = held.quantity if held else ZERO
         covered = quantity >= sizing.quantity and sizing.quantity > ZERO
