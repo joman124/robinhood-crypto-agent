@@ -15,3 +15,6 @@ data/*
 !data/.gitkeep
 *.local.yaml
 .env
+
+# backtest-expert evaluation reports (.claude/skills/backtest-expert).
+reports/
