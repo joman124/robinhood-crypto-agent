@@ -62,6 +62,11 @@ class RiskLimits:
     max_quote_age_seconds: int = 90
     min_signal_confidence: Decimal = Decimal("0.35")
     min_abs_score: Decimal = Decimal("0.25")
+    #: Every sell proposal that has resolved so far has lost or gone flat (0/52
+    #: decided as of 2026-09-25). Config can only make the agent more
+    #: conservative, so this is a boolean off-switch rather than a threshold --
+    #: there is no "less strict" version of a rule with a unanimous result.
+    disable_sell_side: bool = False
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any] | None) -> "RiskLimits":
@@ -83,6 +88,8 @@ class RiskLimits:
         for name in ("max_open_positions", "max_quote_age_seconds"):
             if name in data and data[name] is not None:
                 limits = replace(limits, **{name: int(data[name])})
+        if "disable_sell_side" in data and data["disable_sell_side"] is not None:
+            limits = replace(limits, disable_sell_side=bool(data["disable_sell_side"]))
 
         unknown = set(data) - set(vars(limits))
         if unknown:

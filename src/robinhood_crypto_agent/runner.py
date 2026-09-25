@@ -1,7 +1,7 @@
 """``rhca run``: the real-time loop, in shadow mode.
 
     Robinhood quotes --+
-    RSS -> Jev --------+--> System 1: indicators + news signal + 16 risk rules
+    RSS -> Jev --------+--> System 1: indicators + news signal + 17 risk rules
                        |          |
                        |   trigger: is confidence high?
                        |     no  -> logged as not_escalated

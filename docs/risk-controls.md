@@ -34,7 +34,7 @@ ever pass.
 
 ## 2. The risk engine
 
-Sixteen rules run on **every** proposal, and **all of them run**. Nothing
+Seventeen rules run on **every** proposal, and **all of them run**. Nothing
 short-circuits on the first failure, so the report shows every reason a trade
 was blocked — fixing one and rediscovering the next is how a limit gets
 whittled away one edit at a time.
@@ -44,6 +44,7 @@ whittled away one edit at a time.
 | `execution_mode` | mode is not `propose_only` |
 | `kill_switch` | the switch is engaged |
 | `watchlist` | the symbol is not on the allowlist |
+| `sell_side_disabled` | selling, while `disable_sell_side` is set (owner-toggled, 2026-09-25: every sell had lost or gone flat) |
 | `pair_tradable` | untradable, or globally halted (regional halt → warning) |
 | `order_type_supported` | a limit order on a `market_orders_only` pair |
 | `quote_freshness` | the reference quote is older than the cap |

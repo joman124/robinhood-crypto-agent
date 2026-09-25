@@ -19,7 +19,7 @@ turned out to be good, and a place to accept or decline the ones waiting on you.
 - **The detail drawer** (click any row; `#p=<id>` links straight to one). The
   decision with an optional note and whether the agent has picked it up; the
   trade, plan and drift; trigger and System 2 verdicts; every signal on a
-  −1…+1 track with its weight and rationale; all 16 risk rules; the outcome;
+  −1…+1 track with its weight and rationale; all 17 risk rules; the outcome;
   any execution; and the `rhca` commands to copy into the terminal.
 - **Hit rate over time**, the **shadow loop** heartbeat (counts, services, last
   error task), and **accuracy by** pipeline stage, regime, pair or side.

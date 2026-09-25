@@ -26,7 +26,7 @@ already runs unattended:
 | Component | Unattended today? | Why |
 |---|---|---|
 | Strategy, regime, sizing | Yes | Pure functions over bars |
-| The 16 risk rules | Yes | Evaluated from state, not input |
+| The 17 risk rules | Yes | Evaluated from state, not input |
 | Kill switch | **Better than yes** | A file — engageable from cron, survives a crash |
 | Price-drift re-check | Yes | Compares a fresh quote to the proposal |
 | Remaining-quantity accounting | Yes | Derived from the audit log |

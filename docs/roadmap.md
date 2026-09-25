@@ -9,7 +9,7 @@ Where the project stands, and what the next session should pick up.
               |
               v
 [ Jev + System 1 ]                    Jev (TypeSafe AI) labels each headline;
-              |                       indicators + news signal + 16 risk rules
+              |                       indicators + news signal + 17 risk rules
       Is confidence high?             trigger: thresholds, cooldown, daily cap
        |-- no  -> logged as not_escalated (and still scored)
        '-- yes -> [ Claude Sonnet 5 ] System 2: propose or pass, with read-only tools

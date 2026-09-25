@@ -136,7 +136,7 @@ status:
 | `proposed` | Passed risk and the trigger, and System 2 said propose. It gets an Accept button on the dashboard. |
 | `declined_by_system2` | System 2 said pass, or could not answer. |
 | `not_escalated` | Passed risk but not the trigger (threshold, cooldown or daily cap). |
-| `rejected_by_risk` | Blocked by one of the 16 rules. |
+| `rejected_by_risk` | Blocked by one of the 17 rules. |
 
 All four are scored against what the price did next. `rhca accuracy` groups
 them by status, so the run answers two questions. Does System 2 add anything

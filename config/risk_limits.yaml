@@ -35,3 +35,13 @@ limits:
   # Signal quality floors
   min_signal_confidence: 0.35
   min_abs_score: 0.25
+
+  # Sell side, disabled by the owner, 2026-09-25: the dashboard's accuracy
+  # breakdown showed 0 wins across every decided sell proposal (52 decided --
+  # losses and flats only, worst -4.74%), on top of a 0% win rate on both
+  # sides for BTC-USD and ETH-USD specifically. This is a blanket off-switch,
+  # not a threshold change, because there is no "less strict" version of a
+  # rule with a unanimous result. Re-enable only once there is evidence the
+  # sell signal (or the ranging-regime mean-reversion weighting behind most of
+  # it) has actually improved -- not just because it feels overdue.
+  disable_sell_side: true
