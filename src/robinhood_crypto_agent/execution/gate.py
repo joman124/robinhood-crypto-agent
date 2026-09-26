@@ -38,7 +38,14 @@ from ..audit import AuditLog
 from ..config import AgentConfig
 from ..errors import ApprovalError, KillSwitchEngaged
 from ..mcp.contract import CRYPTO_TOOLS
-from ..models import ExecutionMode, OrderRequest, Proposal, ProposalStatus, Quote
+from ..models import (
+    ExecutionMode,
+    OrderRequest,
+    PairConstraints,
+    Proposal,
+    ProposalStatus,
+    Quote,
+)
 from ..numeric import ZERO, abs_pct_drift
 from ..symbols import same_pair
 from .kill_switch import KillSwitch
@@ -94,6 +101,7 @@ class ApprovalGate:
         ref_id: str | None = None,
         tool: str = CRYPTO_TOOLS["place"],
         allow_override: bool = True,
+        constraints: PairConstraints | None = None,
     ) -> ExecutionAuthorization:
         """Authorize one tranche, or raise explaining why not.
 
@@ -145,6 +153,7 @@ class ApprovalGate:
             tranche_index=tranche_index,
             tool=tool,
             ref_id=ref_id,
+            constraints=constraints,
         )
 
         return ExecutionAuthorization(

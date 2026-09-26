@@ -276,6 +276,9 @@ class Account(JsonMixin):
     rhs_account_number: str
     buying_power: Decimal | None = None
     crypto_buying_power: Decimal | None = None
+    #: Whether this agent may trade the account. ``get_accounts`` lists every
+    #: account, and exactly one is tradable by the agent: the Agentic one.
+    agentic_allowed: bool | None = None
 
 
 @dataclass(frozen=True)

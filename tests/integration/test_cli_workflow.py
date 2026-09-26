@@ -439,6 +439,41 @@ def test_the_run_banner_flags_an_agentic_balance_never_ingested(workspace, tmp_p
     assert describe_ingested_balance(state).startswith("crypto buying power $340.00, 0 position(s)")
 
 
+def test_ingest_accounts_caches_the_account_the_agent_can_trade(workspace, capsys, tmp_path):
+    from robinhood_crypto_agent.store import StateCache
+
+    path = tmp_path / "live_accounts.json"
+    path.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "accounts": [
+                        {"account_number": "5AB12345", "rhs_account_number": "111111111",
+                         "is_default": True, "agentic_allowed": False},
+                        {"account_number": "222222222", "rhs_account_number": "222222222",
+                         "nickname": "Agentic", "agentic_allowed": True},
+                    ]
+                }
+            }
+        )
+    )
+    assert workspace.run("ingest", "accounts", "-f", str(path)) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "rhs_account_number (for order tools): 222222222" in out
+    assert "cached the one this agent can trade" in out
+    cached = StateCache(workspace.data_dir / "market_state.json").account()
+    assert cached.rhs_account_number == "222222222"
+
+    # Naming the default account anyway caches it, with a warning.
+    assert (
+        workspace.run(
+            "ingest", "accounts", "--rhs-account-number", "111111111", "-f", str(path)
+        )
+        == EXIT_OK
+    )
+    assert "cannot trade this account" in capsys.readouterr().err
+
+
 def test_status_names_the_account_the_api_key_reads(workspace, capsys, monkeypatch):
     heartbeat = {
         "mode": "shadow",
