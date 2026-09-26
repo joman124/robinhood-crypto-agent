@@ -488,6 +488,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         constraints=state.pairs(),
         positions=state.positions(),
         portfolio_value=state.portfolio_value(),
+        positions_as_of=runner_mod.positions_as_of(state),
     )
     if not market.quotes:
         raise AgentError(

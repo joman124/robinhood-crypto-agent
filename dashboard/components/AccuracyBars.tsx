@@ -102,14 +102,14 @@ export function AccuracyBars({ stats }: { stats: {
 
       <div className="legend">
         <span>
-          <i className="swatch win" aria-hidden="true" /> Win: past the hurdle in the proposal&apos;s
-          favour
+          <i className="swatch win" aria-hidden="true" /> Win: made more than the hurdle after
+          the round trip
         </span>
         <span>
-          <i className="swatch loss" aria-hidden="true" /> Loss: moved against it
+          <i className="swatch loss" aria-hidden="true" /> Loss: lost money after the round trip
         </span>
         <span>
-          <i className="swatch flat" aria-hidden="true" /> Flat: inside the hurdle
+          <i className="swatch flat" aria-hidden="true" /> Flat: made money, under the hurdle
         </span>
       </div>
     </section>

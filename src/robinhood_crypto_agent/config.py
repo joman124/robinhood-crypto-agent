@@ -150,6 +150,10 @@ class StrategyConfig:
     #: How long a headline can move the news signal; its confidence decays
     #: linearly to zero across this window.
     news_window_minutes: int = 120
+    #: The time exit: once a coin the agent bought has been held this many
+    #: bars, propose selling it. Six matches the scoring horizon, so a position
+    #: is held for exactly the window its entry was graded on. 0 turns it off.
+    exit_after_bars: int = 6
     #: ``news`` is optional: it only counts when a recent headline exists (see
     #: strategy.composite), so its weight never dilutes a quiet-news blend.
     weights: dict[str, dict[str, float]] = field(
@@ -209,6 +213,8 @@ class StrategyConfig:
             )
         if self.target_volatility_pct <= ZERO:
             raise ConfigError("target_volatility_pct must be positive")
+        if self.exit_after_bars < 0:
+            raise ConfigError("exit_after_bars must be 0 (off) or a number of bars")
         for name in ("bar_interval_minutes", "min_bars", "rsi_period", "atr_period",
                      "adx_period", "breakout_lookback", "signal_ma", "volatility_lookback",
                      "news_window_minutes"):

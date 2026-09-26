@@ -131,13 +131,17 @@ rhca dashboard-sync --url http://localhost:3000 --token dev-token
 
 ## Reading the numbers
 
-- **Hit rate** is wins as a share of wins + losses. Flat outcomes — moves that
-  stayed inside the hurdle — are excluded, and a proposal still inside its
+- **Hit rate** is wins as a share of wins + losses. Flat outcomes — made money,
+  but no more than the hurdle — are excluded, and a proposal still inside its
   horizon is never counted as a loss. With nothing resolved the rate shows as
   `—`, meaning *unknown*, not zero.
-- An outcome is scored a fixed number of bars after the proposal, and only
-  counts as a win past a hurdle set above a typical round-trip spread. A gain
-  smaller than the spread is not a win in practice, so it is not one here.
+- An outcome is scored a fixed number of bars after the proposal, as the whole
+  round trip: in at the proposal's price (the ask, for a buy), out at the far
+  side of the book (the bid). It is a win only if it made more than the hurdle
+  after that, and a loss if it lost money at all. A move that merely beat the
+  spread on the mark is not a profit in practice, so it is not a win here.
+- A time exit is a rule closing a position, not a prediction, so it is not
+  scored.
 - Outcomes are scored for **every** proposal, including ones you declined. The
   record is of the agent's judgement, not of the subset you happened to like.
 

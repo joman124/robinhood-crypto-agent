@@ -283,6 +283,19 @@ For a `STAGED` plan, repeat `approve` / `place` / `record-execution` per
 tranche, incrementing `--tranche`. An unfilled tranche is expected — do not
 chase it.
 
+### Time exits
+
+Six hours after a buy fills (`exit_after_bars` × `bar_interval_minutes`), the
+loop proposes selling it, once per hourly candle until you act on it. It is a
+`proposed` sell whose trigger reads `time exit: bought …`. On the dashboard it
+has an Accept button like any other proposal. Take it through the same steps:
+`plan-order`, preview, `approve` by its id, place, `record-execution`, and
+record the fill. Then re-ingest positions and portfolio.
+
+The loop decides what is due from the fills you recorded, so an unrecorded buy
+never gets an exit. If it proposes an exit blocked by `sell_coverage`, the
+holdings snapshot predates the buy: re-ingest positions.
+
 ### Close the day
 ```bash
 # call get_realized_pnl

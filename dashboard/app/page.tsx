@@ -144,9 +144,10 @@ export default async function Page() {
             {scoring && (
               <>
                 An outcome is scored {scoring.horizon_bars} bars (
-                {(scoring.horizon_bars * scoring.bar_interval_minutes) / 60}h) after the proposal
-                and counts as a win only past a {scoring.hurdle_pct}% hurdle, roughly the round-trip
-                spread.{" "}
+                {(scoring.horizon_bars * scoring.bar_interval_minutes) / 60}h) after the proposal,
+                as the whole round trip: in at the proposal&apos;s price, out at the far side of the
+                book. It is a win only if it made more than {scoring.hurdle_pct}% after that, and a
+                loss if it lost money at all.{" "}
               </>
             )}
             Hit rate is wins over wins + losses. Flat outcomes are excluded, an unresolved proposal

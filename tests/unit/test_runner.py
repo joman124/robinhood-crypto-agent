@@ -254,3 +254,41 @@ def test_the_heartbeat_names_the_keys_account_masked(config):
     ).cycle(force=True)
     heartbeat = json.loads(config.heartbeat_path.read_text())
     assert heartbeat["robinhood_account"] == "****1977"
+
+
+def test_a_time_exit_is_logged_once_per_bar_and_never_sent_to_system2(config, monkeypatch):
+    """An exit is the owner's rule: no trigger, no Sonnet, no duplicate rows."""
+    from datetime import timedelta
+
+    from robinhood_crypto_agent.models import ExecutionRecord, Side
+
+    AuditLog(config.audit_path).record_execution(
+        ExecutionRecord(
+            proposal_id="entry1",
+            symbol="BTC-USD",
+            side=Side.BUY,
+            recorded_at=utcnow(),
+            requested_quantity=Decimal("0.001"),
+            filled_quantity=Decimal("0.001"),
+            notional=Decimal("80"),
+            order_id="ord-1",
+            state="filled",
+        )
+    )
+    StateCache(config.data_dir / "market_state.json").put_positions(
+        [Position("BTC-USD", Decimal("0.001"))]
+    )
+    later = utcnow() + timedelta(hours=7)
+    monkeypatch.setattr("robinhood_crypto_agent.agent.utcnow", lambda: later)
+
+    system2 = FakeSystem2()
+    runner = make_runner(config, system2=system2)
+    runner.cycle(force=True)
+    runner.cycle(force=True)
+    make_runner(config, system2=system2).cycle(force=True)  # a restart
+
+    [exit_] = [r for r in proposals(config) if r.get("exit")]
+    assert exit_["side"] == "sell" and exit_["status"] == "proposed"
+    assert exit_["escalated"] is False
+    assert exit_["candidate_key"].startswith("exit|")
+    assert all(proposal.side is Side.BUY for proposal, _ in system2.calls)

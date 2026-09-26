@@ -35,7 +35,7 @@ from typing import Any, Callable
 
 from . import dashboard as dashboard_mod
 from . import news as news_mod
-from .agent import Agent, MarketState
+from .agent import Agent, MarketState, exit_annotations
 from .audit import KIND_PROPOSAL, AuditLog
 from .config import AgentConfig
 from .errors import AgentError
@@ -265,6 +265,7 @@ class Runner:
             positions=self.cache.positions(),
             portfolio_value=self.cache.portfolio_value(),
             news=news,
+            positions_as_of=positions_as_of(self.cache),
         )
         result = self.agent.analyze(market, record=False)
         interval = self.config.strategy.bar_interval_minutes
@@ -272,6 +273,36 @@ class Runner:
         for outcome in result.outcomes:
             if outcome.proposal is not None:
                 self._consider(outcome.proposal, closed_bar, market)
+        for proposal in result.exits:
+            self._consider_exit(proposal, closed_bar)
+
+    def _consider_exit(self, proposal: Proposal, closed_bar: datetime) -> None:
+        """Log a time exit once per bar until it is acted on.
+
+        No trigger and no System 2: an exit is a rule the owner set, and a
+        second opinion on whether to honor it would defeat it. A fresh one each
+        bar keeps its price inside the approval gate's drift tolerance.
+        """
+        annotations = exit_annotations(proposal)
+        entries = ",".join(annotations["entry_proposal_ids"])
+        key = f"exit|{closed_bar.isoformat()}|{entries}"
+        slot = exit_slot(proposal.symbol)
+        if self._last_key.get(slot) == key:
+            return
+        self._last_key[slot] = key
+        self.audit.record_proposal(
+            proposal,
+            {"source": "rhca run", "mode": MODE_SHADOW, "candidate_key": key, **annotations},
+        )
+        if proposal.risk.passed:
+            self._counts["proposed"] += 1
+        log.info(
+            "%s time exit proposed (%s): sell %s -- %s",
+            proposal.symbol,
+            proposal.proposal_id,
+            format_decimal(proposal.quantity),
+            "ready to approve" if proposal.risk.passed else "blocked by risk",
+        )
 
     def _consider(self, proposal: Proposal, closed_bar: datetime, market: MarketState) -> None:
         """Log a candidate once per idea, and escalate it if the trigger says so.
@@ -365,7 +396,8 @@ class Runner:
         for record in self.audit.events(kind=KIND_PROPOSAL):
             symbol = str(record.get("symbol", ""))
             if record.get("candidate_key"):
-                self._last_key[symbol] = str(record["candidate_key"])
+                slot = exit_slot(symbol) if record.get("exit") else symbol
+                self._last_key[slot] = str(record["candidate_key"])
             if not record.get("escalated"):
                 continue
             try:
@@ -399,6 +431,16 @@ class Runner:
                 },
             },
         )
+
+
+def exit_slot(symbol: str) -> str:
+    """Exits dedupe apart from a symbol's signal candidates."""
+    return f"exit:{symbol}"
+
+
+def positions_as_of(cache: StateCache) -> datetime | None:
+    """When the holdings snapshot was last ingested."""
+    return next((a.updated_at for a in cache.ages() if a.name == SECTION_POSITIONS), None)
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:

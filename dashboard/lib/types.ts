@@ -21,6 +21,7 @@ export interface Outcome {
   signed_move_pct: string | null;
   horizon_bars: number;
   hurdle_pct: string;
+  exit_cost_pct?: string;
   proposed_at: string;
   resolved_at: string | null;
   regime: string;

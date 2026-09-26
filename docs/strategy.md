@@ -122,6 +122,26 @@ makes an order more aggressive than it was priced to be.
 A `market_orders_only` pair overrides all of this with a single market order,
 since limit orders would simply be rejected.
 
+## Exits
+
+A buy is graded on where the price is `exit_after_bars` bars later (six, at
+60-minute bars), so the time exit makes the real trade match its grade. Once
+a lot the agent bought has been held that long, `rhca run` and `rhca analyze`
+propose selling it: one limit order at the bid, approved by id like any other
+trade. It never goes to System 2, because it is the owner's rule, not a signal
+to second-guess.
+
+What counts as the agent's comes from the audit log: filled buys, less filled
+sells, first in first out. A coin bought outside the agent has no lot, so it is
+never proposed for sale. The sale is capped at what the account holds. If the
+holdings snapshot is older than the buy, the exit is still proposed, and
+`sell_coverage` blocks it until positions are re-ingested. Time exits are not
+scored: they close positions, they don't predict.
+
+A signal sell can close a position sooner, when the view on a held coin turns
+bearish. Signal sells are governed by `disable_sell_side` in
+`config/risk_limits.yaml`; time exits are not.
+
 ## Validating a change
 
 There is no backtest harness pointed at a public historical API — the

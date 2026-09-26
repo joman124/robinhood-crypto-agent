@@ -42,6 +42,19 @@ from .numeric import ZERO, round_money
 from .sizing import SizingResult
 from .symbols import canonical
 
+#: Rules an exit does not answer to, and why. An exit closes a position the
+#: agent opened: it is not a signal, it only lowers exposure, and blocking it
+#: on a cap would leave the position open -- the one outcome the exit exists to
+#: prevent. Every other rule still applies, the kill switch and sell coverage
+#: included.
+EXIT_EXEMPT_RULES: dict[str, str] = {
+    "sell_side_disabled": "the sell-side switch governs signal sells, not closing a position",
+    "signal_confidence": "an exit is a rule, not a signal",
+    "signal_strength": "an exit is a rule, not a signal",
+    "per_trade_notional": "the cap limits new exposure; selling what was bought lowers it",
+    "daily_notional": "the cap limits new exposure; selling what was bought lowers it",
+}
+
 
 @dataclass
 class RiskContext:
@@ -72,8 +85,16 @@ class RiskEngine:
         self.limits = config.risk
 
     def evaluate(
-        self, view: CompositeView, sizing: SizingResult, context: RiskContext
+        self,
+        view: CompositeView,
+        sizing: SizingResult,
+        context: RiskContext,
+        *,
+        exit_reason: str | None = None,
     ) -> RiskDecision:
+        """Every rule's finding. ``exit_reason`` names an exit, which passes the
+        rules in :data:`EXIT_EXEMPT_RULES` -- each saying so, and what it would
+        otherwise have found."""
         findings: list[RiskFinding] = []
         add = findings.append
 
@@ -95,6 +116,8 @@ class RiskEngine:
         add(self._check_concentration(sizing, context))
         add(self._check_sell_coverage(sizing, context))
 
+        if exit_reason:
+            findings = [_exempted(f, exit_reason) for f in findings]
         return RiskDecision(findings=findings)
 
     # -- individual rules -------------------------------------------------
@@ -413,6 +436,17 @@ class RiskEngine:
                 )
             ),
         )
+
+
+def _exempted(finding: RiskFinding, exit_reason: str) -> RiskFinding:
+    why = EXIT_EXEMPT_RULES.get(finding.rule)
+    if why is None or finding.passed:
+        return finding
+    return RiskFinding(
+        rule=finding.rule,
+        passed=True,
+        message=f"not applied to a {exit_reason}: {why} (would have read: {finding.message})",
+    )
 
 
 def direction_to_side(direction: Direction) -> Side | None:
