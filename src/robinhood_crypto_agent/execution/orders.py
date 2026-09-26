@@ -54,6 +54,21 @@ STAGED_OFFSETS: tuple[float, ...] = (0.0, 0.5, 1.0)
 FALLBACK_OFFSET_PCT = 0.004
 
 
+def snap_price(price: Decimal, side: Side, constraints: PairConstraints | None) -> Decimal:
+    """``price`` on the pair's tick, or unchanged when the tick is unknown.
+
+    Robinhood rejects a limit price off the tick ("round your order price to
+    the nearest cent"), and a quote's ask or bid rarely sits on it. A buy limit
+    rounds down and a sell limit up, so snapping never makes the order more
+    aggressive than it was priced to be.
+    """
+    increment = constraints.price_increment if constraints is not None else None
+    if not increment or increment <= ZERO:
+        return price
+    rounding = ROUND_DOWN if side is Side.BUY else ROUND_UP
+    return quantize_to_increment(price, increment, rounding=rounding)
+
+
 def _limit_price(
     reference: float,
     offset: float,
@@ -64,13 +79,7 @@ def _limit_price(
     raw = Decimal(str(reference - offset if side is Side.BUY else reference + offset))
     if raw <= ZERO:
         raw = Decimal(str(reference))
-    increment = constraints.price_increment
-    if increment and increment > ZERO:
-        # Round a buy limit down and a sell limit up, so snapping to the tick
-        # never makes the order more aggressive than it was priced to be.
-        rounding = ROUND_DOWN if side is Side.BUY else ROUND_UP
-        raw = quantize_to_increment(raw, increment, rounding=rounding)
-    return raw
+    return snap_price(raw, side, constraints)
 
 
 def plan_for_view(
@@ -107,7 +116,7 @@ def plan_for_view(
                 Tranche(
                     index=0,
                     quantity=sizing.quantity,
-                    target_price=sizing.reference_price,
+                    target_price=snap_price(sizing.reference_price, sizing.side, constraints),
                     order_type=OrderType.LIMIT,
                 )
             ],
@@ -149,7 +158,7 @@ def plan_for_view(
             Tranche(
                 index=0,
                 quantity=sizing.quantity,
-                target_price=sizing.reference_price,
+                target_price=snap_price(sizing.reference_price, sizing.side, constraints),
                 order_type=OrderType.LIMIT,
             )
         ]
@@ -174,8 +183,13 @@ def build_order_request(
     tool: str = CRYPTO_TOOLS["preview"],
     ref_id: str | None = None,
     rhs_account_number: str | None = None,
+    constraints: PairConstraints | None = None,
 ) -> OrderRequest:
     """Build one validated order payload for a proposal's tranche.
+
+    ``constraints`` snaps the limit price to the pair's tick here as well as in
+    the plan, so a proposal logged before plans were snapped still produces a
+    price Robinhood accepts.
 
     Raises :class:`ContractViolation` if the resulting payload would be invalid,
     so an unusable order is caught here rather than at Robinhood.
@@ -208,7 +222,9 @@ def build_order_request(
     }
 
     if tranche.order_type in {OrderType.LIMIT, OrderType.STOP_LIMIT}:
-        arguments["limit_price"] = format_decimal(tranche.target_price)
+        arguments["limit_price"] = format_decimal(
+            snap_price(tranche.target_price, proposal.side, constraints)
+        )
     if tranche.order_type in {OrderType.STOP_LOSS, OrderType.STOP_LIMIT}:
         arguments["stop_price"] = format_decimal(tranche.target_price)
 
@@ -235,11 +251,16 @@ def build_plan_requests(
     *,
     config: AgentConfig,
     tool: str = CRYPTO_TOOLS["preview"],
+    constraints: PairConstraints | None = None,
 ) -> list[OrderRequest]:
     """Build a validated payload for every tranche in the proposal's plan."""
     return [
         build_order_request(
-            proposal, config=config, tranche_index=tranche.index, tool=tool
+            proposal,
+            config=config,
+            tranche_index=tranche.index,
+            tool=tool,
+            constraints=constraints,
         )
         for tranche in proposal.plan.tranches
     ]

@@ -58,7 +58,7 @@ from .mcp.parse import (
     parse_quotes,
     unwrap_results,
 )
-from .models import Candle, parse_timestamp
+from .models import Candle, PairConstraints, parse_timestamp
 from .numeric import format_decimal, round_money, to_decimal
 from .outcomes import DEFAULT_HORIZON_BARS, DEFAULT_HURDLE_PCT
 from .robinhood import API_KEY_ENV as ROBINHOOD_KEY_ENV
@@ -337,7 +337,12 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         accounts = parse_accounts(payload)
         if not accounts:
             raise AgentError("no accounts in the payload")
-        account = accounts[0]
+        # The one to cache is the one orders go to: the account named by
+        # --rhs-account-number, else the one this agent may trade, else the
+        # first. The first is usually the owner's default account, which the
+        # agent cannot trade.
+        tradable = [a for a in accounts if a.agentic_allowed]
+        account = tradable[0] if tradable else accounts[0]
         if len(accounts) > 1 and args.rhs_account_number:
             matching = [
                 a for a in accounts if a.rhs_account_number == args.rhs_account_number
@@ -347,9 +352,21 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         state.put_account(account)
         print(f"cached account {account.account_number}")
         print(f"  rhs_account_number (for order tools): {account.rhs_account_number}")
-        if len(accounts) > 1:
+        if account.agentic_allowed is False:
             print(
-                f"  note: {len(accounts)} accounts returned; cached the first. "
+                "  warning: this agent cannot trade this account; orders to it will be "
+                "refused. Pass the Agentic account's --rhs-account-number.",
+                file=sys.stderr,
+            )
+        if len(accounts) > 1:
+            if args.rhs_account_number and account.rhs_account_number == args.rhs_account_number:
+                why = "the one named"
+            elif account.agentic_allowed:
+                why = "the one this agent can trade"
+            else:
+                why = "the first"
+            print(
+                f"  note: {len(accounts)} accounts returned; cached {why}. "
                 "Pass --rhs-account-number to pick a specific one."
             )
         return EXIT_OK
@@ -523,6 +540,7 @@ def cmd_plan_order(args: argparse.Namespace) -> int:
         proposal,
         config=config,
         tool=CRYPTO_TOOLS["preview"],
+        constraints=_pair_constraints(state, proposal.symbol),
     )
     print(
         reports.render_requests(
@@ -535,6 +553,22 @@ def cmd_plan_order(args: argparse.Namespace) -> int:
         "the documented default for the order tools."
     )
     return EXIT_OK
+
+
+def _pair_constraints(state: StateCache, symbol: str) -> PairConstraints | None:
+    """The cached pair, whose tick the limit price is snapped to.
+
+    Without it the price goes out as proposed, and Robinhood may reject it as
+    off the tick -- so say how to fix that before it gets that far.
+    """
+    pair = state.pairs().get(symbol)
+    if pair is None or not pair.price_increment:
+        print(
+            f"warning: no price tick cached for {symbol}, so the limit price is not "
+            "rounded to it. Pipe get_currency_pairs into `rhca ingest pairs` first.",
+            file=sys.stderr,
+        )
+    return pair
 
 
 def cmd_approve(args: argparse.Namespace) -> int:
@@ -560,6 +594,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
         tranche_index=args.tranche,
         ref_id=args.ref_id,
         tool=CRYPTO_TOOLS["place"],
+        constraints=_pair_constraints(state, proposal.symbol),
     )
 
     print(authorization.describe())

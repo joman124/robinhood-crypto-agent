@@ -192,6 +192,73 @@ def test_order_response_without_executions_uses_cumulative_quantity():
     assert parse_order_response(payload, proposal_id="p").filled_quantity == Decimal("2")
 
 
+#: preview_crypto_order / place_crypto_order, trimmed from a live preview (ids
+#: changed). The order sits under "order", and names only its asset.
+LIVE_ORDER = {
+    "data": {
+        "order": {
+            "id": "ord-live-1",
+            "ref_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+            "currency_pair_id": "3d961844-d360-45fc-989b-f6fca761d511",
+            "currency_code": "BTC",
+            "side": "buy",
+            "type": "limit",
+            "state": "new",
+            "time_in_force": "gtc",
+            "quantity": "0.00014148",
+            "cumulative_quantity": "0",
+            "price": "85131.55",
+            "rounded_executed_notional": "0",
+            "net_rounded_estimated_notional": "12.04",
+        },
+        "estimated_fee": "0",
+        "crypto_account_number": "311200000000",
+    },
+    "guide": "ignored",
+}
+
+
+def test_the_live_order_shape_is_recorded():
+    record = parse_order_response(LIVE_ORDER, proposal_id="p", tranche_index=0)
+    assert record.symbol == "BTC-USD"
+    assert record.side.value == "buy"
+    assert record.state == "new"
+    assert record.order_id == "ord-live-1"
+    assert record.ref_id == "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+    assert record.requested_quantity == Decimal("0.00014148")
+    assert record.filled_quantity == Decimal("0")
+    assert record.notional == Decimal("0")  # nothing has executed yet
+
+
+def test_a_filled_live_order_records_its_executed_notional():
+    order = {
+        **LIVE_ORDER["data"]["order"],
+        "state": "filled",
+        "cumulative_quantity": "0.00014148",
+        "rounded_executed_notional": "12.04",
+    }
+    record = parse_order_response({"data": {"order": order}}, proposal_id="p")
+    assert record.filled_quantity == Decimal("0.00014148")
+    assert record.notional == Decimal("12.04")
+
+
+def test_live_accounts_are_listed_under_accounts_not_results():
+    payload = {
+        "data": {
+            "accounts": [
+                {"account_number": "5AB12345", "rhs_account_number": "111111111",
+                 "is_default": True, "agentic_allowed": False},
+                {"account_number": "222222222", "rhs_account_number": "222222222",
+                 "nickname": "Agentic", "agentic_allowed": True},
+            ]
+        },
+        "guide": "ignored",
+    }
+    accounts = parse_accounts(payload)
+    assert [a.rhs_account_number for a in accounts] == ["111111111", "222222222"]
+    assert [a.agentic_allowed for a in accounts] == [False, True]
+
+
 def test_order_response_requires_a_recognizable_side():
     with pytest.raises(AgentError, match="unrecognized side"):
         parse_order_response({"results": [{"symbol": "BTC-USD", "side": "hold"}]}, proposal_id="p")

@@ -265,6 +265,20 @@ rhca record-execution <id> --tranche 0 -f response.json
 A fill changes the Agentic account's holdings and buying power, and neither
 `rhca run` nor `analyze` sees that until you ingest them again.
 
+`place_crypto_order` usually answers before the order fills: state `new`, 0
+filled. Record that response anyway. It logs the order and adds nothing to the
+filled quantity. Once it fills, fetch it with `get_crypto_orders`, passing the
+`order_id` it returned, and record that response against the same tranche.
+Until you do, the audit log says nothing filled. The daily cap then
+undercounts, and `rhca approve` would let the same proposal be sent again.
+Record each fill once: two records of one filled order count it twice.
+
+Every limit price is rounded to the pair's tick, from the cached pairs, before
+it goes out: down for a buy, up for a sell. Robinhood refuses a price off the
+tick ("round your order price to the nearest cent"). If `plan-order` warns
+that no tick is cached, pipe `get_currency_pairs` into `rhca ingest pairs`
+first.
+
 For a `STAGED` plan, repeat `approve` / `place` / `record-execution` per
 tranche, incrementing `--tranche`. An unfilled tranche is expected — do not
 chase it.

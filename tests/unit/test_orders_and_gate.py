@@ -99,6 +99,16 @@ class TestPlans:
         assert plan.tranches[0].target_price <= Decimal("80050")
         assert plan.tranches[0].target_price % Decimal("100") == 0
 
+    def test_a_prompt_limit_snaps_to_the_tick_too(self):
+        """Robinhood refused an unrounded ask: "round your order price to the nearest cent"."""
+        ask = "85131.55197496"
+        buy = plan_for_view(sizing(price=ask), regime=Regime.TRENDING, constraints=PAIR)
+        assert buy.tranches[0].target_price == Decimal("85131.55")
+        sell = plan_for_view(
+            sizing(side=Side.SELL, price=ask), regime=Regime.TRENDING, constraints=PAIR
+        )
+        assert sell.tranches[0].target_price == Decimal("85131.56")
+
 
 def make_proposal(*, passed=True, plan=None, quantity="0.003"):
     findings = [RiskFinding("test", passed, "because")]
@@ -161,6 +171,19 @@ class TestOrderRequests:
     def test_unknown_tranche_is_refused(self, config):
         with pytest.raises(ContractViolation, match="no tranche 7"):
             build_order_request(make_proposal(), config=config, tranche_index=7)
+
+    def test_a_proposal_logged_off_the_tick_is_snapped_in_the_payload(self, config):
+        """Proposals already in the audit log carry the raw ask as their price."""
+        plan = ExecutionPlan(
+            STYLE_PROMPT,
+            [Tranche(0, Decimal("0.003"), Decimal("85131.55197496"), OrderType.LIMIT)],
+            "prompt",
+        )
+        request = build_order_request(make_proposal(plan=plan), config=config, constraints=PAIR)
+        assert request.arguments["limit_price"] == "85131.55"
+        # Without the pair's tick there is nothing to snap to: sent as proposed.
+        unsnapped = build_order_request(make_proposal(plan=plan), config=config)
+        assert unsnapped.arguments["limit_price"] == "85131.55197496"
 
     def test_every_tranche_of_a_staged_plan_validates(self, config):
         plan = plan_for_view(sizing(), regime=Regime.RANGING, constraints=PAIR, atr=500.0)

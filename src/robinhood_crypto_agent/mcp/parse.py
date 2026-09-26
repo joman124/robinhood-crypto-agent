@@ -210,9 +210,16 @@ def parse_positions(payload: Any) -> list[Position]:
 
 
 def parse_accounts(payload: Any) -> list[Account]:
-    """Parse ``get_accounts``, keeping both account-number spellings distinct."""
+    """Parse ``get_accounts``, keeping both account-number spellings distinct.
+
+    The live response lists them as ``{"data": {"accounts": [...]}}`` rather
+    than under ``results``.
+    """
+    rows = unwrap_results(payload)
+    if len(rows) == 1 and isinstance(rows[0].get("accounts"), list):
+        rows = [row for row in rows[0]["accounts"] if isinstance(row, dict)]
     accounts: list[Account] = []
-    for row in unwrap_results(payload):
+    for row in rows:
         rhs = row.get("rhs_account_number")
         account_number = row.get("account_number")
         if not rhs and not account_number:
@@ -223,6 +230,9 @@ def parse_accounts(payload: Any) -> list[Account]:
                 rhs_account_number=str(rhs or ""),
                 buying_power=decimal_field(row, "buying_power"),
                 crypto_buying_power=decimal_field(row, "crypto_buying_power"),
+                agentic_allowed=(
+                    bool(row["agentic_allowed"]) if "agentic_allowed" in row else None
+                ),
             )
         )
     return accounts
@@ -251,8 +261,18 @@ def parse_order_response(
     if not rows:
         raise AgentError("order response contained no result object")
     row = rows[0]
+    # preview_crypto_order and place_crypto_order return the order one level
+    # down, beside the fee estimate: {"data": {"order": {...}, "estimated_fee": ...}}.
+    if isinstance(row.get("order"), dict) and "side" not in row:
+        row = row["order"]
 
-    symbol_raw = row.get("symbol") or (row.get("currency_pair") or {}).get("symbol")
+    # The live order names only its asset ("currency_code": "BTC"); canonical()
+    # reads a bare asset as USD-quoted, as the order tools do.
+    symbol_raw = (
+        row.get("symbol")
+        or (row.get("currency_pair") or {}).get("symbol")
+        or row.get("currency_code")
+    )
     if not symbol_raw:
         raise AgentError("order response has no symbol")
 
@@ -263,7 +283,9 @@ def parse_order_response(
     requested = decimal_field(row, "quantity", "asset_quantity") or ZERO
     filled = _filled_quantity(row)
     price = decimal_field(row, "average_price", "executed_price", "price", "limit_price")
-    notional = decimal_field(row, "executed_notional", "total_notional", "dollar_amount")
+    notional = decimal_field(
+        row, "executed_notional", "total_notional", "rounded_executed_notional", "dollar_amount"
+    )
     if isinstance(notional, dict):  # some notional fields arrive as {amount, currency}
         notional = to_decimal(notional.get("amount", 0), field="notional")
     if notional is None:
