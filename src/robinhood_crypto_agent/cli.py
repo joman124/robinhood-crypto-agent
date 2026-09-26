@@ -74,9 +74,11 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_BLOCKED = 2
 
-#: The crypto account ``rhca run`` must read -- the full number or its last 4
-#: digits. A Robinhood API key belongs to one account, and a key made on the
-#: wrong one would otherwise run silently against the wrong money.
+#: The crypto account the Robinhood API key reads -- the full number or its
+#: last 4 digits. A Crypto API key only ever reads the main crypto account of
+#: the login it was made under (the key page has no account picker), so this
+#: pins the main account, and a key from another login is refused at startup.
+#: The Agentic account is reachable only through the MCP server.
 CRYPTO_ACCOUNT_ENV = "RHCA_CRYPTO_ACCOUNT"
 
 
@@ -94,8 +96,11 @@ def check_account(account: Any, expected: str) -> None:
     if len(expected) < 4 or not account.account_number.endswith(expected):
         raise AgentError(
             f"this Robinhood API key reads crypto account {mask(account.account_number)}, "
-            f"but {CRYPTO_ACCOUNT_ENV} pins {mask(expected)}. Create the API key under the "
-            f"pinned account (docs/runbook.md, 'Keys'), or correct {CRYPTO_ACCOUNT_ENV}."
+            f"but {CRYPTO_ACCOUNT_ENV} pins {mask(expected)}. A Crypto API key only reads "
+            f"your main crypto account, so pin that one; the Agentic account is reachable "
+            f"only through the MCP server. If {mask(account.account_number)} is not your "
+            f"main account, the key belongs to another Robinhood login "
+            f"(docs/runbook.md, 'Which account')."
         )
 
 
@@ -351,7 +356,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
     if kind == "portfolio":
         # get_portfolio for the Agentic account, the one orders go to. rhca run
-        # no longer reads a balance: its API key belongs to another account.
+        # reads no balance: its API key can only read the main crypto account.
         rows = unwrap_results(payload)
         if not rows:
             raise AgentError("no portfolio data in the payload")

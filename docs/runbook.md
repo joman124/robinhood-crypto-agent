@@ -40,25 +40,27 @@ it.
 5. Save. Copy the API key Robinhood shows into `.env` as
    `ROBINHOOD_API_KEY=...`.
 
-**Which account.** An API key belongs to the one crypto account it was made
-on, but the loop uses it only for market data: quotes and trading pairs, which
-are not account data. So the key can stay on your main crypto account. The
-account the agent sizes against and orders go to is the **Agentic** one,
-Robinhood's dedicated account for AI agents. Its balance and holdings come
-through Claude Code instead ([step 2](#2-balance-and-holdings)), never from
-this key.
+**Which account.** A Robinhood Crypto API key only ever reads your **main**
+crypto account. The key page has no account picker, and Robinhood's docs
+describe access to the **Agentic** account, the one orders go to, only through
+its MCP server. The loop doesn't need more. It uses the key only for market
+data: quotes and trading pairs, which are the same whichever account reads
+them. The Agentic account's balance and holdings come through Claude Code
+instead ([step 2](#2-balance-and-holdings)).
 
-Pin the key's account in `.env` with its full number or its last 4 digits:
+Pin your main crypto account in `.env`, with its full number or its last 4
+digits:
 
 ```
 RHCA_CRYPTO_ACCOUNT=1234
 ```
 
-With a pin, `rhca run` refuses to start when the key reads any other account,
-so a swapped key is caught at startup. Its banner and `rhca status` show which
-account the key reads, as `****1234`. Replacing a key means making a new pair:
-`rhca keygen --force`, then **Add key**. Delete the old key at Robinhood once
-it's unused.
+With the pin, `rhca run` refuses to start when the key reads any other
+account, which catches a key from another Robinhood login. Don't pin the
+Agentic account: the key can never read it, so the run would only refuse to
+start. The banner and `rhca status` show the account the key reads, as
+`****1234`. Replacing a key means making a new pair: `rhca keygen --force`,
+then **Add key**. Delete the old key at Robinhood once it's unused.
 
 **Anthropic (System 2): Claude Sonnet 5**
 
