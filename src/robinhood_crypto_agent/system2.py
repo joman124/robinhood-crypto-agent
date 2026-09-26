@@ -110,7 +110,11 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "get_holdings",
-        "description": "Current crypto holdings and buying power on the account (read-only).",
+        "description": (
+            "Crypto holdings and crypto buying power of the account orders go to, as the "
+            "owner last recorded them (read-only). Each carries its as-of time; null means "
+            "never recorded."
+        ),
         "input_schema": _NO_INPUT,
     },
     {

@@ -7,7 +7,7 @@ Claude Code ──── MCP ────► Robinhood         the only order pa
      │
      │ JSON in / payloads out
      ▼
-rhca (this package) ── read-only API ──► Robinhood   quotes, pairs, holdings
+rhca (this package) ── read-only API ──► Robinhood   quotes, pairs
                     ── HTTPS ──────────► RSS, Jev, Claude Sonnet 5
                                            (+ Crypto.com market data via MCP)
                     ── order? ─────────►  ✗   (no code path exists)

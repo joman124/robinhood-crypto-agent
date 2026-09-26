@@ -16,10 +16,12 @@ Every command that accepts MCP output takes it as JSON on a path or on stdin,
 so nothing has to be retyped or paraphrased -- paraphrasing a tool response is
 how a fabricated fill ends up in an audit log.
 
-**``rhca run``, in shadow mode.** The real-time loop reads quotes and holdings
-from Robinhood's Crypto API with a read-only client, labels news with Jev and
-escalates strong candidates to Claude Sonnet 5 (see ``runner``). It proposes;
-it cannot order. Its proposals go through the same ``rhca approve`` gate.
+**``rhca run``, in shadow mode.** The real-time loop reads quotes and trading
+pairs from Robinhood's Crypto API with a read-only client, labels news with Jev
+and escalates strong candidates to Claude Sonnet 5 (see ``runner``). Balance and
+holdings are the Agentic account's, as ``rhca ingest`` last cached them. It
+proposes; it cannot order. Its proposals go through the same ``rhca approve``
+gate.
 """
 
 from __future__ import annotations
@@ -64,6 +66,7 @@ from .robinhood import PRIVATE_KEY_ENV as ROBINHOOD_PRIVATE_KEY_ENV
 from .robinhood import RobinhoodClient, generate_key_pair
 from .serde import proposal_from_dict
 from .store import PriceStore, StateCache
+from .store.state import SECTION_CRYPTO_BUYING_POWER
 from .symbols import canonical
 from .system2 import System2
 
@@ -240,8 +243,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     print()
 
     load_dotenv(_env_file(args))
+    heartbeat = runner_mod.read_json(config.heartbeat_path)
     for line in runner_mod.describe_heartbeat(
-        runner_mod.read_json(config.heartbeat_path),
+        heartbeat,
         stale_after_seconds=runner_mod.stale_after_seconds(config),
     ):
         print(line)
@@ -250,16 +254,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  keys set     : {', '.join(present) or 'none'}")
     if missing:
         print(f"  keys missing : {', '.join(missing)}")
-    cached = state.account()
-    if cached is not None:
+    key_account = str((heartbeat or {}).get("robinhood_account") or "")
+    if key_account:
         expected = os.environ.get(CRYPTO_ACCOUNT_ENV, "").strip()
         if not expected:
             verdict = f"not pinned -- set {CRYPTO_ACCOUNT_ENV}"
-        elif cached.account_number.endswith(expected):
+        elif key_account[-4:] == expected[-4:]:
             verdict = "matches the pin"
         else:
             verdict = f"DOES NOT MATCH the pinned {mask(expected)}"
-        print(f"  robinhood    : last read crypto account {mask(cached.account_number)} ({verdict})")
+        print(
+            f"  robinhood    : API key reads crypto account {key_account} ({verdict}), "
+            "for quotes and pairs only"
+        )
     print()
 
     coverages = [
@@ -343,12 +350,15 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     if kind == "portfolio":
+        # get_portfolio for the Agentic account, the one orders go to. rhca run
+        # no longer reads a balance: its API key belongs to another account.
         rows = unwrap_results(payload)
         if not rows:
             raise AgentError("no portfolio data in the payload")
         row = rows[0]
         value = None
         for key in (
+            "total_value",
             "total_market_value",
             "market_value",
             "equity",
@@ -362,13 +372,34 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         if value is None:
             raise AgentError(
                 "could not find a portfolio value in the payload. Expected one of "
-                "total_market_value, market_value, equity, total_equity, portfolio_value."
+                "total_value, total_market_value, market_value, equity, total_equity, "
+                "portfolio_value."
             )
         state.put_portfolio_value(value)
         print(f"cached portfolio value ${round_money(value)}")
+        buying_power = _crypto_buying_power(row)
+        if buying_power is None:
+            # Robinhood omits it when unavailable. The top-level buying_power is
+            # no substitute: crypto is cash-only, and that figure can include margin.
+            print(
+                "  no crypto_buying_power in the payload; the cached one is unchanged",
+                file=sys.stderr,
+            )
+        else:
+            state.put_crypto_buying_power(buying_power)
+            print(f"cached crypto buying power ${round_money(buying_power)}")
         return EXIT_OK
 
     raise AgentError(f"unknown ingest kind: {kind}")
+
+
+def _crypto_buying_power(row: dict[str, Any]) -> Decimal | None:
+    """``crypto_buying_power`` from a ``get_portfolio`` row: ``{"buying_power": ...}``,
+    or a bare amount."""
+    raw = row.get("crypto_buying_power")
+    if isinstance(raw, dict):
+        raw = raw.get("buying_power")
+    return to_decimal(raw, field="crypto_buying_power") if raw is not None else None
 
 
 def cmd_import_history(args: argparse.Namespace) -> int:
@@ -913,6 +944,22 @@ def cmd_keygen(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def describe_ingested_balance(state: StateCache) -> str:
+    """The Agentic account's balance and holdings, as ``rhca ingest`` last cached them."""
+    buying_power = state.crypto_buying_power()
+    if buying_power is None:
+        return (
+            "balance NEVER INGESTED -- pipe its get_portfolio and get_crypto_positions "
+            "into `rhca ingest` (docs/runbook.md, 'Balance and holdings')"
+        )
+    age = next(a for a in state.ages() if a.name == SECTION_CRYPTO_BUYING_POWER)
+    return (
+        f"crypto buying power ${round_money(buying_power)}, "
+        f"{len(state.positions())} position(s), balance ingested "
+        f"{(age.age_seconds or 0.0) / 60:.0f} minutes ago"
+    )
+
+
 def _keep_awake() -> bool:
     """Ask Windows not to sleep while this process runs (reverts when it exits)."""
     if sys.platform != "win32":
@@ -938,12 +985,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     account = robinhood.account()
     expected_account = os.environ.get(CRYPTO_ACCOUNT_ENV, "").strip()
     check_account(account, expected_account)
+    state = StateCache(config.data_dir / "market_state.json")
 
     system2 = None
     if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
         import anthropic  # only the live loop needs the SDK
 
-        fetch_quote, fetch_holdings = runner_mod.system2_tools(robinhood)
+        fetch_quote, fetch_holdings = runner_mod.system2_tools(robinhood, state)
         system2 = System2(
             anthropic.Anthropic(),
             fetch_quote=fetch_quote,
@@ -975,14 +1023,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     print("rhca run -- SHADOW MODE: proposes and records, never places an order")
     if loaded:
         print(f"  loaded from .env : {', '.join(loaded)}")
-    buying_power = (
-        f"${round_money(account.buying_power)}" if account.buying_power is not None else "unknown"
-    )
     pin = "pinned" if expected_account else f"NOT pinned -- set {CRYPTO_ACCOUNT_ENV}"
     print(
-        f"  robinhood account: crypto {mask(account.account_number)}, "
-        f"buying power {buying_power} ({pin})"
+        f"  robinhood API key: crypto {mask(account.account_number)} ({pin}), "
+        "for quotes and pairs only"
     )
+    print(f"  agentic account  : {describe_ingested_balance(state)}")
     print(f"  watchlist        : {', '.join(config.watchlist)}")
     print("  System 1         : indicators + news signal + 17 risk rules")
     print(f"  Jev news labels  : {'on' if services.jev else f'OFF (set {JEV_KEY_ENV})'}")
@@ -1008,7 +1054,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"  keep awake       : {'on' if _keep_awake() else 'unavailable on this OS'}")
     print("Ctrl+C to stop.\n")
 
-    runner = runner_mod.Runner(config, services)
+    runner = runner_mod.Runner(
+        config, services, robinhood_account=mask(account.account_number)
+    )
     try:
         runner.run(once=args.once, max_seconds=args.minutes * 60 if args.minutes else None)
     except KeyboardInterrupt:
