@@ -42,10 +42,11 @@ from .errors import AgentError
 from .jev import JevClient
 from .models import NewsItem, Proposal, ProposalStatus, Quote, parse_timestamp, utcnow
 from .net import HttpError
-from .numeric import ZERO, format_decimal
+from .numeric import format_decimal
 from .robinhood import RobinhoodClient
 from .store import PriceStore, StateCache
 from .store.prices import floor_to_interval
+from .store.state import SECTION_CRYPTO_BUYING_POWER, SECTION_POSITIONS
 from .system2 import System2, not_configured
 from .trigger import EscalationTrigger
 
@@ -66,26 +67,38 @@ class Services:
 
 
 def system2_tools(
-    robinhood: RobinhoodClient,
+    robinhood: RobinhoodClient, cache: StateCache
 ) -> tuple[Callable[[str], Quote | None], Callable[[], dict[str, Any]]]:
-    """System 2's two read-only tools, bound to the Robinhood client."""
+    """System 2's two read-only tools: a live quote, and the ingested holdings.
+
+    Holdings and buying power come from the cache, not the API key: the key
+    reads the owner's main crypto account, and orders go to the Agentic one.
+    """
 
     def fetch_quote(symbol: str) -> Quote | None:
         quotes = robinhood.best_bid_ask([symbol])
         return quotes[0] if quotes else None
 
     def fetch_holdings() -> dict[str, Any]:
-        account = robinhood.account()
-        buying_power = account.buying_power if account else None
+        ages = {age.name: age.updated_at for age in cache.ages()}
+        buying_power = cache.crypto_buying_power()
         return {
             "positions": [
                 {"symbol": p.symbol, "quantity": format_decimal(p.quantity)}
-                for p in robinhood.holdings()
+                for p in cache.positions().values()
             ],
-            "buying_power": format_decimal(buying_power) if buying_power is not None else None,
+            "positions_as_of": _iso(ages.get(SECTION_POSITIONS)),
+            "crypto_buying_power": (
+                format_decimal(buying_power) if buying_power is not None else None
+            ),
+            "crypto_buying_power_as_of": _iso(ages.get(SECTION_CRYPTO_BUYING_POWER)),
         }
 
     return fetch_quote, fetch_holdings
+
+
+def _iso(at: datetime | None) -> str | None:
+    return at.isoformat() if at is not None else None
 
 
 class Runner:
@@ -98,9 +111,12 @@ class Runner:
         *,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        robinhood_account: str | None = None,
     ) -> None:
         self.config = config
         self.services = services
+        #: The crypto account the API key reads, already masked to its last 4.
+        self.robinhood_account = robinhood_account
         self.store = PriceStore(config.price_store_path)
         self.audit = AuditLog(config.audit_path)
         self.cache = StateCache(config.data_dir / "market_state.json")
@@ -114,7 +130,7 @@ class Runner:
         pipeline = config.pipeline
         self._tasks: list[tuple[str, int, Callable[[], None]]] = [
             ("quotes", pipeline.quote_interval_seconds, self._poll_quotes),
-            ("account", pipeline.account_interval_seconds, self._poll_account),
+            ("pairs", pipeline.account_interval_seconds, self._poll_pairs),
             ("news", pipeline.news_interval_seconds, self._poll_news),
             ("evaluate", pipeline.quote_interval_seconds, self._evaluate),
             ("sync", pipeline.sync_interval_seconds, self._sync),
@@ -177,37 +193,18 @@ class Runner:
         self.cache.put_quotes(quotes)
         self._counts["quotes"] += len(quotes)
 
-    def _poll_account(self) -> None:
-        robinhood = self.services.robinhood
-        pairs = robinhood.trading_pairs(self.config.watchlist)
+    def _poll_pairs(self) -> None:
+        # Only market data comes from the API key. Its account is the owner's
+        # main crypto account, not the Agentic one orders go to, so its
+        # holdings and buying power stay out of the cache: `rhca ingest
+        # positions` and `rhca ingest portfolio` supply the Agentic account's,
+        # and a cycle here must not overwrite them.
+        pairs = self.services.robinhood.trading_pairs(self.config.watchlist)
         for pair in pairs:
             if not pair.tradable or pair.halted:
                 # Every proposal for it will fail pair_tradable; say why up front.
                 log.warning("%s is reported untradable or halted by Robinhood", pair.symbol)
         self.cache.put_pairs(pairs)
-        positions = robinhood.holdings()
-        self.cache.put_positions(positions)
-        account = robinhood.account()
-        if account is None:
-            return
-        self.cache.put_account(account)
-        if account.buying_power is None:
-            return
-        marks = {symbol: quote.mark for symbol, quote in self.cache.quotes().items()}
-        # Holdings off the watchlist count toward the portfolio too. Leaving
-        # them out inflated every watched position's share of it: on the first
-        # live run, SOL at 17.5% of the account read as 100%.
-        unpriced = [p.symbol for p in positions if p.symbol not in marks]
-        if unpriced:
-            try:
-                marks.update({q.symbol: q.mark for q in robinhood.best_bid_ask(unpriced)})
-            except AgentError as exc:
-                log.warning("could not price held %s: %s", ", ".join(unpriced), exc)
-        missing = [symbol for symbol in unpriced if symbol not in marks]
-        if missing:
-            log.warning("portfolio value leaves out unpriced holdings: %s", ", ".join(missing))
-        held = sum((p.quantity * marks[p.symbol] for p in positions if p.symbol in marks), ZERO)
-        self.cache.put_portfolio_value(account.buying_power + held)
 
     def _poll_news(self) -> None:
         cutoff = utcnow() - self._window
@@ -392,6 +389,7 @@ class Runner:
                 "counts": dict(self._counts),
                 "escalations_today": self._escalations_today,
                 "last_error": self._last_error,
+                "robinhood_account": self.robinhood_account,
                 "services": {
                     "robinhood": True,
                     "jev": services.jev is not None,

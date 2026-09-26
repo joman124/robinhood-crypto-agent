@@ -27,31 +27,36 @@ from robinhood_crypto_agent.models import (
 )
 from robinhood_crypto_agent.net import HttpError
 from robinhood_crypto_agent.news import NewsStore
-from robinhood_crypto_agent.runner import Runner, Services
+from robinhood_crypto_agent.runner import Runner, Services, system2_tools
 from robinhood_crypto_agent.store import PriceStore, StateCache
-from robinhood_crypto_agent.symbols import canonical
 from robinhood_crypto_agent.system2 import System2Decision
 from tests.conftest import make_candles, uptrend
 
 
 class FakeRobinhood:
+    """The API key's account is the owner's main one, so the loop must not
+    read its balance or holdings: those two methods count their calls."""
+
     def __init__(self):
-        self.fail_holdings = False
+        self.fail_pairs = False
+        self.account_reads = 0
 
     def best_bid_ask(self, symbols):
         mark = Decimal("80000")
         return [Quote("BTC-USD", mark * Decimal("0.999"), mark * Decimal("1.001"), mark, utcnow())]
 
     def trading_pairs(self, symbols):
+        if self.fail_pairs:
+            raise AgentError("trading pairs endpoint is down")
         return [PairConstraints("BTC-USD", Decimal("0.00000001"), min_order_size=Decimal("0.000001"))]
 
     def holdings(self):
-        if self.fail_holdings:
-            raise AgentError("holdings endpoint is down")
-        return []
+        self.account_reads += 1
+        return [Position("XRP-USD", Decimal("1000"))]
 
     def account(self):
-        return Account("RH123", "", buying_power=Decimal("5000"))
+        self.account_reads += 1
+        return Account("311130671977", "", buying_power=Decimal("5000"))
 
 
 class FakeSystem2:
@@ -184,29 +189,68 @@ def test_a_jev_outage_leaves_headlines_for_the_next_poll(config):
 
 def test_one_failing_task_does_not_stop_the_others(config):
     robinhood = FakeRobinhood()
-    robinhood.fail_holdings = True
+    robinhood.fail_pairs = True
     make_runner(config, system2=FakeSystem2(), robinhood=robinhood).cycle(force=True)
     heartbeat = json.loads(config.heartbeat_path.read_text())
-    assert heartbeat["last_error"]["task"] == "account"
+    assert heartbeat["last_error"]["task"] == "pairs"
     assert heartbeat["counts"]["quotes"] == 1
     assert len(proposals(config)) == 1
 
 
-def test_holdings_off_the_watchlist_count_toward_the_portfolio(config):
-    """First live run: SOL at 17.5% of the account read as 100% without the others."""
+def agentic_snapshot(config):
+    """What `rhca ingest positions` and `rhca ingest portfolio` cache."""
+    cache = StateCache(config.data_dir / "market_state.json")
+    cache.put_positions([Position("BTC-USD", Decimal("0.002"))])
+    cache.put_portfolio_value(Decimal("500"))
+    cache.put_crypto_buying_power(Decimal("340"))
+    return cache
 
-    class Holder(FakeRobinhood):
-        def holdings(self):
-            return [Position("BTC-USD", Decimal("0.001")), Position("XRP-USD", Decimal("1000"))]
 
-        def best_bid_ask(self, symbols):
-            wanted = {canonical(s) for s in symbols}
-            quotes = super().best_bid_ask(symbols) if "BTC-USD" in wanted else []
-            if "XRP-USD" in wanted:
-                mark = Decimal("1.50")
-                quotes.append(Quote("XRP-USD", mark - Decimal("0.01"), mark + Decimal("0.01"), mark, utcnow()))
-            return quotes
+def test_the_loop_leaves_the_ingested_agentic_snapshot_alone(config):
+    """The key reads the owner's main account; orders go to the Agentic one."""
+    cache = agentic_snapshot(config)
+    robinhood = FakeRobinhood()
+    runner = make_runner(config, robinhood=robinhood)
+    runner.cycle(force=True)
+    runner.cycle(force=True)
 
-    make_runner(config, robinhood=Holder()).cycle(force=True)
-    value = StateCache(config.data_dir / "market_state.json").portfolio_value()
-    assert value == Decimal("5000") + Decimal("80") + Decimal("1500")  # cash + BTC + XRP
+    assert robinhood.account_reads == 0
+    assert list(cache.positions()) == ["BTC-USD"]
+    assert cache.portfolio_value() == Decimal("500")
+    assert cache.crypto_buying_power() == Decimal("340")
+    assert cache.account() is None
+    assert "BTC-USD" in cache.pairs()  # market data still comes from the key
+
+
+def test_system2_sees_the_ingested_holdings_not_the_keys_account(config):
+    cache = agentic_snapshot(config)
+    robinhood = FakeRobinhood()
+    fetch_quote, fetch_holdings = system2_tools(robinhood, cache)
+
+    holdings = fetch_holdings()
+    assert holdings["positions"] == [{"symbol": "BTC-USD", "quantity": "0.002"}]
+    assert holdings["crypto_buying_power"] == "340"
+    assert holdings["positions_as_of"] and holdings["crypto_buying_power_as_of"]
+    assert robinhood.account_reads == 0
+    assert fetch_quote("BTC-USD").symbol == "BTC-USD"  # quotes are still live
+
+
+def test_system2_is_told_when_nothing_was_ingested(config):
+    cache = StateCache(config.data_dir / "market_state.json")
+    _, fetch_holdings = system2_tools(FakeRobinhood(), cache)
+    assert fetch_holdings() == {
+        "positions": [],
+        "positions_as_of": None,
+        "crypto_buying_power": None,
+        "crypto_buying_power_as_of": None,
+    }
+
+
+def test_the_heartbeat_names_the_keys_account_masked(config):
+    Runner(
+        config,
+        Services(robinhood=FakeRobinhood(), fetch_feed=lambda url: []),
+        robinhood_account="****1977",
+    ).cycle(force=True)
+    heartbeat = json.loads(config.heartbeat_path.read_text())
+    assert heartbeat["robinhood_account"] == "****1977"

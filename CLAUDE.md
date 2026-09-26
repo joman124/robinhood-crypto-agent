@@ -17,8 +17,9 @@ You are the only component that can **place an order**:
 - **The CLI** (`rhca`) holds the strategy, the risk limits, and the audit log.
   It gives you proposals and validated payloads.
 - **`rhca run`** is a shadow-mode loop that runs on its own. It *reads* from
-  Robinhood's Crypto API with a read-only client (quotes, pairs, holdings,
-  buying power). It labels news with Jev (TypeSafe AI), and asks Claude Sonnet 5
+  Robinhood's Crypto API with a read-only client (quotes and pairs only; the
+  Agentic account's balance and holdings come from `rhca ingest`). It labels
+  news with Jev (TypeSafe AI), and asks Claude Sonnet 5
   (System 2) to propose or pass on strong candidates. It logs proposals; it
   never orders.
 - **A human** approves a specific proposal by its id. Nothing else is approval

@@ -53,7 +53,9 @@ RSS ─► Jev ────────┼─► System 1: indicators + news + 1
 ```
 
 `rhca run` polls Robinhood's Crypto Trading API with a **read-only** client (no
-order method exists). Jev labels every headline, and Sonnet judges only what
+order method exists), for quotes and trading pairs only. The balance and
+holdings it sizes against are the Agentic account's, which Claude Code feeds in
+with `rhca ingest`. Jev labels every headline, and Sonnet judges only what
 already passed every risk rule and the trigger. Every candidate is logged and
 scored against what the price did next, including the ones held back. That is
 the evidence for whether each stage earns its place. Setup and keys:
@@ -120,7 +122,7 @@ rhca run --keep-awake           # shadow mode until Ctrl+C
 # 1. Ingest what Claude fetched
 rhca ingest accounts  -f accounts.json     # resolves rhs_account_number
 rhca ingest pairs     -f pairs.json        # increments, halts, market-only flags
-rhca ingest portfolio -f portfolio.json    # enables the concentration limit
+rhca ingest portfolio -f portfolio.json    # Agentic value + crypto buying power
 rhca ingest quotes    -f quotes.json       # also appends to the price history
 
 # 2. Build history: either poll quotes over time, or bootstrap from OHLC bars

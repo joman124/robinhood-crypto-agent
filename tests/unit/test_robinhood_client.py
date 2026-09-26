@@ -244,26 +244,29 @@ class TestKeygen:
 
 
 class TestAccountPin:
-    """RHCA_CRYPTO_ACCOUNT: the loop must never run silently against the wrong money."""
+    """RHCA_CRYPTO_ACCOUNT pins the main crypto account, the only one a key reads."""
 
-    def account(self, number="311267873958"):
+    def account(self, number="311130671977"):
         return Account(account_number=number, rhs_account_number="", buying_power=Decimal("500"))
 
     def test_the_pinned_account_passes_by_full_number_or_last_four(self):
-        check_account(self.account(), "311267873958")
-        check_account(self.account(), "3958")
+        check_account(self.account(), "311130671977")
+        check_account(self.account(), "1977")
         check_account(self.account(), "")  # unpinned: allowed, and the banner says so
 
     def test_any_other_account_is_refused(self):
         with pytest.raises(AgentError) as excinfo:
-            check_account(self.account("311130671977"), "3958")
-        assert "****1977" in str(excinfo.value) and "****3958" in str(excinfo.value)
+            check_account(self.account("311999990000"), "1977")
+        assert "****0000" in str(excinfo.value) and "****1977" in str(excinfo.value)
+        assert "another Robinhood login" in str(excinfo.value)
 
     def test_a_pin_shorter_than_four_digits_is_refused(self):
         with pytest.raises(AgentError):
             check_account(self.account(), "58")
 
-    def test_run_refuses_to_start_on_the_wrong_account(self, tmp_path, monkeypatch, capsys):
+    def test_pinning_the_agentic_account_only_stops_the_run(self, tmp_path, monkeypatch, capsys):
+        """The key can never read Agentic, so that pin refuses, and says why."""
+
         class MainAccountKey:
             def account(self):
                 return Account("311130671977", "", buying_power=Decimal("0"))
@@ -277,5 +280,6 @@ class TestAccountPin:
             ["--env-file", str(tmp_path / ".env"), "--data-dir", str(data), "run", "--once"]
         )
         assert code == 1
-        assert "****1977" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "****1977" in err and "only reads your main crypto account" in err
         assert not data.exists()  # refused before the loop touched anything

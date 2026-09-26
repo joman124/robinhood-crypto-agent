@@ -386,3 +386,75 @@ def test_malformed_json_input_is_reported(workspace, capsys, tmp_path):
 def test_missing_input_file_is_reported(workspace, capsys):
     assert workspace.run("ingest", "quotes", "-f", "/nope/absent.json") == EXIT_ERROR
     assert "does not exist" in capsys.readouterr().err
+
+
+#: get_portfolio for the Agentic account, trimmed from a live response
+#: (values changed). No "results" list: the data object is the portfolio.
+LIVE_PORTFOLIO = {
+    "data": {
+        "total_value": "512.40",
+        "crypto_value": "172.40",
+        "cash": "340.00",
+        "currency": "USD",
+        "buying_power": {"buying_power": "680.0000", "display_currency": "USD"},
+        "crypto_buying_power": {"buying_power": "340.0000"},
+    },
+    "guide": "ignored",
+}
+
+
+def test_ingest_portfolio_reads_the_live_shape_and_crypto_buying_power(
+    workspace, capsys, tmp_path
+):
+    from robinhood_crypto_agent.store import StateCache
+
+    path = tmp_path / "live_portfolio.json"
+    path.write_text(json.dumps(LIVE_PORTFOLIO))
+    assert workspace.run("ingest", "portfolio", "-f", str(path)) == EXIT_OK
+    assert "crypto buying power $340.00" in capsys.readouterr().out
+
+    state = StateCache(workspace.data_dir / "market_state.json")
+    assert state.portfolio_value() == Decimal("512.40")
+    # Not the top-level figure: crypto is cash-only, and that one can include margin.
+    assert state.crypto_buying_power() == Decimal("340.0000")
+
+    # Robinhood omits crypto_buying_power when unavailable: keep the last one.
+    data = {k: v for k, v in LIVE_PORTFOLIO["data"].items() if k != "crypto_buying_power"}
+    path.write_text(json.dumps({"data": data}))
+    assert workspace.run("ingest", "portfolio", "-f", str(path)) == EXIT_OK
+    assert "cached one is unchanged" in capsys.readouterr().err
+    assert state.crypto_buying_power() == Decimal("340.0000")
+
+
+def test_the_run_banner_flags_an_agentic_balance_never_ingested(workspace, tmp_path):
+    from robinhood_crypto_agent.cli import describe_ingested_balance
+    from robinhood_crypto_agent.store import StateCache
+
+    state = StateCache(workspace.data_dir / "market_state.json")
+    assert "NEVER INGESTED" in describe_ingested_balance(state)
+
+    path = tmp_path / "live_portfolio.json"
+    path.write_text(json.dumps(LIVE_PORTFOLIO))
+    workspace.run("ingest", "portfolio", "-f", str(path))
+    assert describe_ingested_balance(state).startswith("crypto buying power $340.00, 0 position(s)")
+
+
+def test_status_names_the_account_the_api_key_reads(workspace, capsys, monkeypatch):
+    heartbeat = {
+        "mode": "shadow",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "last_cycle_at": datetime.now(timezone.utc).isoformat(),
+        "robinhood_account": "****1977",
+    }
+    workspace.data_dir.mkdir(parents=True, exist_ok=True)
+    (workspace.data_dir / "heartbeat.json").write_text(json.dumps(heartbeat))
+
+    monkeypatch.setenv("RHCA_CRYPTO_ACCOUNT", "1977")
+    assert workspace.run("status") == EXIT_OK
+    out = capsys.readouterr().out
+    assert "API key reads crypto account ****1977 (matches the pin)" in out
+    assert "crypto_buying_power: never ingested" in out
+
+    monkeypatch.setenv("RHCA_CRYPTO_ACCOUNT", "3958")
+    workspace.run("status")
+    assert "DOES NOT MATCH the pinned ****3958" in capsys.readouterr().out

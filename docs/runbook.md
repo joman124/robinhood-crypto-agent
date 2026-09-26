@@ -7,6 +7,10 @@ System 1 scores every symbol, strong candidates go to Claude Sonnet 5, and
 everything is logged and scored. **It cannot place an order** — the Robinhood
 client has no order method. It runs on this PC, in a terminal you leave open.
 
+It reads only market data from Robinhood. The balance and holdings it sizes
+and checks against are the Agentic account's, and you feed those in through
+Claude Code (step 2).
+
 ### 1. Keys (you create these; nothing else can)
 
 Open a regular PowerShell window in the repo folder, and open `.env` in Notepad.
@@ -21,7 +25,7 @@ Put one `NAME=value` per line, with no quotes and no spaces around the `=`.
 `.env` is gitignored, and a variable already set in your environment wins over
 it.
 
-**Robinhood (required): quotes, pairs, holdings**
+**Robinhood (required): quotes and pairs**
 
 1. `.venv\Scripts\rhca keygen` makes the key pair. It writes
    `ROBINHOOD_PRIVATE_KEY` into `.env` without showing it, and prints the
@@ -36,21 +40,27 @@ it.
 5. Save. Copy the API key Robinhood shows into `.env` as
    `ROBINHOOD_API_KEY=...`.
 
-**Which account.** An API key belongs to the one crypto account it was made
-on, and the agent reads (and, later, trades) that account. If you have an
-**Agentic** account, which is Robinhood's dedicated account for AI agents,
-make the key on its crypto account. Then pin it in `.env` with the full number
-or its last 4 digits:
+**Which account.** A Robinhood Crypto API key only ever reads your **main**
+crypto account. The key page has no account picker, and Robinhood's docs
+describe access to the **Agentic** account, the one orders go to, only through
+its MCP server. The loop doesn't need more. It uses the key only for market
+data: quotes and trading pairs, which are the same whichever account reads
+them. The Agentic account's balance and holdings come through Claude Code
+instead ([step 2](#2-balance-and-holdings)).
+
+Pin your main crypto account in `.env`, with its full number or its last 4
+digits:
 
 ```
 RHCA_CRYPTO_ACCOUNT=1234
 ```
 
-With a pin, `rhca run` refuses to start when the key reads any other account.
-Its banner and `rhca status` show which account it read, as `****1234`.
-Switching a key to another account means making a new pair:
-`rhca keygen --force`, then **Add key** on the new account. Delete the old key
-at Robinhood once it's unused.
+With the pin, `rhca run` refuses to start when the key reads any other
+account, which catches a key from another Robinhood login. Don't pin the
+Agentic account: the key can never read it, so the run would only refuse to
+start. The banner and `rhca status` show the account the key reads, as
+`****1234`. Replacing a key means making a new pair: `rhca keygen --force`,
+then **Add key**. Delete the old key at Robinhood once it's unused.
 
 **Anthropic (System 2): Claude Sonnet 5**
 
@@ -76,7 +86,39 @@ at Robinhood once it's unused.
 never the values. Keep `.env` to yourself: nothing ever needs it pasted
 anywhere.
 
-### 2. Start
+### 2. Balance and holdings
+
+The loop never reads a balance. Buying power, holdings and portfolio value are
+the Agentic account's, as you last ingested them. They drive sizing, the
+concentration limit, sell coverage, the open-position cap, and what System 2
+sees when it asks for holdings. In Claude Code, with the `RobinHood` MCP server
+connected:
+
+1. `get_accounts`: the Agentic account is the one the agent can trade. Note its
+   `account_number` and its numeric `rhs_account_number`.
+2. `get_portfolio` with that `account_number`, into
+   `rhca ingest portfolio -f portfolio.json`. It caches the account's value and
+   its crypto buying power.
+3. `get_crypto_positions` with that `rhs_account_number`, into
+   `rhca ingest positions -f positions.json`.
+
+Do it at the start of each session, and again after every fill or deposit.
+Holdings and buying power change only then, and only quotes are checked for
+age, so the snapshot stays right in between. The account's total value still
+drifts with prices, which moves the concentration limit a little between
+ingests.
+
+The `rhca run` banner shows the snapshot:
+`agentic account : crypto buying power $…, N position(s), balance ingested M minutes ago`.
+Until the first `ingest portfolio`, it reads `balance NEVER INGESTED`.
+`rhca status` lists each section's age.
+
+**Once, after updating to this version:** `data/market_state.json` still holds
+your main account's holdings and portfolio value from earlier runs. Ingest
+both before trusting a proposal: `ingest positions` replaces the old holdings
+wholesale, and `ingest portfolio` the old value.
+
+### 3. Start
 
 From the repo root. Calling the venv's `rhca` directly works the same in
 PowerShell and cmd, and needs no activation script:
@@ -101,12 +143,12 @@ history is already on disk.
 request ends with the process. Without it, sleep pauses the loop, and
 `rhca status` shows the heartbeat going stale.
 
-### 3. Check the first `--once` output
+### 4. Check the first `--once` output
 
 The Robinhood REST response shapes were written from Robinhood's docs and have
 not yet been confirmed against a live account. The first run is that check:
 
-- [ ] No `quotes:` or `account:` warnings. `data/market_state.json` shows
+- [ ] No `quotes:` or `pairs:` warnings. `data/market_state.json` shows
       sensible bids and asks, with the ask above the bid.
 - [ ] No `... is reported untradable or halted` warning. If every pair gets
       one, the pair's `status` field came back spelled differently from the
@@ -119,7 +161,7 @@ not yet been confirmed against a live account. The first run is that check:
 Once it has run, replace the invented REST payloads in
 `tests/unit/test_robinhood_client.py` with trimmed live captures.
 
-### 4. Watch it
+### 5. Watch it
 
 ```powershell
 .venv\Scripts\rhca status                 # pipeline RUNNING/NOT RUNNING, counts, last error, keys
@@ -171,9 +213,11 @@ rhca status                              # should say: no history, switch releas
 Then, in Claude Code with the `RobinHood` MCP server connected:
 
 1. **Resolve the account.** Call `get_accounts`, pipe into
-   `rhca ingest accounts`. Confirm the printed `rhs_account_number` is the
-   **numeric** one, and export it:
-   `export RHCA_RHS_ACCOUNT_NUMBER=<that value>`.
+   `rhca ingest accounts --rhs-account-number <the Agentic account's>`.
+   Without the flag it caches the first account listed, which is your
+   default account, not the one orders go to. Confirm the printed
+   `rhs_account_number` is the Agentic account's **numeric** one, and export
+   it: `export RHCA_RHS_ACCOUNT_NUMBER=<that value>`.
 2. **Confirm the switch works.** `rhca kill-switch on`, then try
    `rhca approve` on anything — it must refuse. `rhca kill-switch off`.
 3. **Check the contract guard.** Feed `rhca validate-order` a payload with the
@@ -185,9 +229,11 @@ Then, in Claude Code with the `RobinHood` MCP server connected:
 ```bash
 # get_currency_pairs  -> increments, halts, market-only flags
 rhca ingest pairs     -f pairs.json
-# get_portfolio       -> enables the concentration limit
+# get_portfolio (Agentic account_number)
+#                     -> account value (concentration limit) + crypto buying power
 rhca ingest portfolio -f portfolio.json
-# get_crypto_positions-> enables sell coverage and the open-position cap
+# get_crypto_positions (Agentic rhs_account_number)
+#                     -> enables sell coverage and the open-position cap
 rhca ingest positions -f positions.json
 # get_crypto_quotes   -> also appends to the price history
 rhca ingest quotes    -f quotes.json
@@ -213,7 +259,11 @@ rhca plan-order <id>                     # preview payloads
 rhca approve <id> --approval "<the user's exact words>" --quote fresh.json
 # call place_crypto_order with the printed payload, verbatim
 rhca record-execution <id> --tranche 0 -f response.json
+# re-fetch get_crypto_positions and get_portfolio -> rhca ingest positions / portfolio
 ```
+
+A fill changes the Agentic account's holdings and buying power, and neither
+`rhca run` nor `analyze` sees that until you ingest them again.
 
 For a `STAGED` plan, repeat `approve` / `place` / `record-execution` per
 tranche, incrementing `--tranche`. An unfilled tranche is expected — do not

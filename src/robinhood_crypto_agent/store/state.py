@@ -44,6 +44,7 @@ SECTION_PAIRS = "pairs"
 SECTION_POSITIONS = "positions"
 SECTION_PORTFOLIO = "portfolio"
 SECTION_ACCOUNT = "account"
+SECTION_CRYPTO_BUYING_POWER = "crypto_buying_power"
 
 
 @dataclass(frozen=True)
@@ -177,6 +178,14 @@ class StateCache:
     def put_portfolio_value(self, value: Decimal) -> None:
         self._update_section(SECTION_PORTFOLIO, format_decimal(value))
 
+    def put_crypto_buying_power(self, value: Decimal) -> None:
+        """What the account orders go to can spend on crypto, from ``get_portfolio``.
+
+        Its own section, not a field of ``account``: ``get_accounts`` carries no
+        reliable buying power, so ``ingest accounts`` must not overwrite it.
+        """
+        self._update_section(SECTION_CRYPTO_BUYING_POWER, format_decimal(value))
+
     def put_account(self, account: Account) -> None:
         self._update_section(
             SECTION_ACCOUNT,
@@ -266,6 +275,10 @@ class StateCache:
         value, _ = self._section(SECTION_PORTFOLIO)
         return _opt_decimal(value)
 
+    def crypto_buying_power(self) -> Decimal | None:
+        value, _ = self._section(SECTION_CRYPTO_BUYING_POWER)
+        return _opt_decimal(value)
+
     def account(self) -> Account | None:
         value, _ = self._section(SECTION_ACCOUNT)
         if not isinstance(value, dict):
@@ -287,6 +300,7 @@ class StateCache:
                 SECTION_PAIRS,
                 SECTION_POSITIONS,
                 SECTION_PORTFOLIO,
+                SECTION_CRYPTO_BUYING_POWER,
             )
         ]
 
