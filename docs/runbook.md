@@ -303,6 +303,41 @@ rhca record-pnl -f realized_pnl.json
 rhca status
 ```
 
+## Backtesting
+
+Before a strategy trades real money, replay it over history. Run this on the
+PC; the cloud sandbox cannot reach Coinbase:
+
+```powershell
+.venv\Scripts\rhca backtest --days 180                 # the whole watchlist
+.venv\Scripts\rhca backtest --symbols BTC-USD --days 365
+.venv\Scripts\rhca backtest --ladder 5:5,10:10,20:20,40:40   # extend the ladder
+```
+
+It compares, on the same bars:
+
+- **ladder (lot)**: buy $5, $10 and $20 at 5%, 10% and 20% under the recent
+  high; each lot sells when it is up its own step from where it was bought.
+- **ladder (anchor)**: the same buys, but the sells are measured from the
+  one anchor price. $5 goes at +5%, $10 at +10%, everything left at +20%.
+- **signal**: this agent's System 1 with the six-hour exit, under the live
+  caps. It has no System 2 and no news, since neither can be replayed.
+- **hold**: $100 bought on the first bar.
+
+Every trade pays the 1.9% round trip, and `stressed` re-runs at 2.85%. Bars
+are cached for 6 hours under `data/backtest/`; `--refresh` refetches.
+
+**Read it in this order:** total P&L, worst drawdown, then `win +open`.
+`win closed` counts only trades that were sold. A ladder sells only into
+strength, so in a falling market it closes almost nothing and its closed win
+rate stays perfect while `open P&L` holds the loss. A strategy is worth
+trading when its total beats `hold` in both the normal and the stressed run,
+on more than one coin and more than one window. A single good number is not
+enough.
+
+A backtest authorizes nothing. It doesn't change a limit or the approval
+gate, and it says nothing about the next trade.
+
 ## Reconciling against Robinhood
 
 The audit log records what the agent was told. To check it against what

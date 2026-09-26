@@ -144,12 +144,15 @@ bearish. Signal sells are governed by `disable_sell_side` in
 
 ## Validating a change
 
-There is no backtest harness pointed at a public historical API — the
-environment blocks those, and the MCP server has no crypto historicals tool.
-What the repo offers instead:
+The MCP server has no crypto historicals tool, and a cloud sandbox usually
+blocks public market-data APIs, so the evidence is built where Coinbase is
+reachable:
 
-1. `rhca import-history` to load bars from a source you trust.
-2. `rhca analyze --no-record` to evaluate without writing to the audit log.
+1. `rhca backtest` replays System 1 (with the time exit), the dip/rip ladder
+   and buy-and-hold over months of Coinbase bars, under the real round trip.
+   See the runbook, "Backtesting".
+2. `rhca import-history` to load bars from a source you trust, then
+   `rhca analyze --no-record` to evaluate without writing to the audit log.
 3. The test suite, where regime classification, blending, and sizing are
    asserted against synthetic trending, ranging, and thin-data series.
 

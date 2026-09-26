@@ -21,8 +21,15 @@ decided by the checklist in `docs/autonomy.md`. And a good backtest says
 nothing about a specific live trade -- every order still goes through
 `rhca approve` (`docs/strategy.md`, "Validating a change").
 
-**Where the evidence comes from.** There is no backtest harness pointed at a
-public historical API (the environment blocks those). Use:
+**Where the evidence comes from.** Cloud sandboxes usually block public
+market-data APIs, so run these where Coinbase is reachable (the owner's PC):
+
+- `rhca backtest --days 180` -- the signal strategy (System 1 with the time
+  exit, no System 2 or news), the dip/rip ladder in both modes, and
+  buy-and-hold, over Coinbase bars, at the measured 1.9% round trip and again
+  at 1.5x. It reports total P&L, worst drawdown, capital tied up, and a win
+  rate that counts still-open positions; `--json` has average win/loss for
+  the evaluator.
 
 - `rhca accuracy` -- the shadow run's own proposals scored against what the
   price did next, grouped by regime, symbol and status. Score the subset you

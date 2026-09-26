@@ -139,6 +139,9 @@ rhca record-execution <proposal-id> --tranche 0 -f response.json
 # How good have the suggestions been?
 rhca accuracy
 
+# Would a different rule have done better? Replays months of Coinbase bars
+rhca backtest --days 180
+
 # Push proposals + outcomes to the dashboard, pull back your accept/decline
 rhca dashboard-sync --url https://your-project.vercel.app --token "$TOKEN"
 
