@@ -493,3 +493,22 @@ def test_status_names_the_account_the_api_key_reads(workspace, capsys, monkeypat
     monkeypatch.setenv("RHCA_CRYPTO_ACCOUNT", "3958")
     workspace.run("status")
     assert "DOES NOT MATCH the pinned ****3958" in capsys.readouterr().out
+
+
+def test_the_account_number_in_dotenv_reaches_every_command(workspace, capsys, monkeypatch):
+    """plan-order, approve and status need RHCA_RHS_ACCOUNT_NUMBER as much as
+    run does. It lives in .env, which only run used to load in time."""
+    monkeypatch.delenv("RHCA_RHS_ACCOUNT_NUMBER")  # restored at teardown
+    (workspace.root / ".env").write_text("RHCA_RHS_ACCOUNT_NUMBER=986352052\n")
+    workspace.bootstrap()
+    proposal_id = workspace.first_proposal_id(capsys)
+
+    monkeypatch.delenv("RHCA_RHS_ACCOUNT_NUMBER", raising=False)  # each command loads it
+    assert workspace.run("plan-order", proposal_id) == EXIT_OK
+    assert '"rhs_account_number": "986352052"' in capsys.readouterr().out
+
+    monkeypatch.delenv("RHCA_RHS_ACCOUNT_NUMBER", raising=False)
+    assert workspace.run("status") == EXIT_OK
+    out = capsys.readouterr().out
+    assert "rhs_account_number 986352052" in out
+    assert "NOT CONFIGURED" not in out

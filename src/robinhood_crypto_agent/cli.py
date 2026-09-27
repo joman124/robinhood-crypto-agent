@@ -248,7 +248,6 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"  {age.describe()}")
     print()
 
-    load_dotenv(_env_file(args))
     heartbeat = runner_mod.read_json(config.heartbeat_path)
     for line in runner_mod.describe_heartbeat(
         heartbeat,
@@ -1157,7 +1156,7 @@ def _keep_awake() -> bool:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    loaded = load_dotenv(_env_file(args))
+    loaded = getattr(args, "dotenv_loaded", [])
     config = load_config(args.config_dir, data_dir=args.data_dir)
 
     robinhood = RobinhoodClient.from_env()
@@ -1425,6 +1424,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Load .env before any command reads the config: RHCA_RHS_ACCOUNT_NUMBER
+    # lives there, and plan-order and approve need it as much as run does.
+    # keygen is the exception -- it writes .env, and reading its old key back
+    # into the environment would make it warn that the key is set twice.
+    args.dotenv_loaded = [] if args.func is cmd_keygen else load_dotenv(_env_file(args))
     try:
         return int(args.func(args))
     except AgentError as exc:

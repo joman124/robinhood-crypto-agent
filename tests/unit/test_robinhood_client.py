@@ -6,6 +6,7 @@ nanoseconds). The values are illustrative, not anyone's account.
 """
 
 import base64
+import os
 from decimal import Decimal
 
 import pytest
@@ -236,6 +237,15 @@ class TestKeygen:
         assert env.read_text() == "ROBINHOOD_PRIVATE_KEY=already-registered\n"
         assert main(["--env-file", str(env), "keygen", "--force"]) == 0
         assert read_dotenv(env)["ROBINHOOD_PRIVATE_KEY"] != "already-registered"
+
+    def test_keygen_never_loads_the_key_it_is_replacing(self, tmp_path, monkeypatch, capsys):
+        """Every other command loads .env first; keygen writes it instead."""
+        monkeypatch.delenv("ROBINHOOD_PRIVATE_KEY", raising=False)
+        env = tmp_path / ".env"
+        env.write_text("ROBINHOOD_PRIVATE_KEY=already-registered\n")
+        assert main(["--env-file", str(env), "keygen", "--force"]) == 0
+        assert "ROBINHOOD_PRIVATE_KEY" not in os.environ
+        assert "also set in your environment" not in capsys.readouterr().out
 
     def test_empty_values_in_env_count_as_unset(self, tmp_path):
         env = tmp_path / ".env"
