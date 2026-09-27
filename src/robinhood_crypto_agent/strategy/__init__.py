@@ -1,26 +1,39 @@
-"""Signal generation: indicators in, a bounded opinion out."""
+"""The trading rule: the trend ladder (``strategy.ladder``)."""
 
-from .base import SignalContext, SignalSource
-from .composite import CompositeStrategy
-from .regime import detect_regime
-from .signals import (
-    BreakoutSignal,
-    MeanReversionSignal,
-    MomentumSignal,
-    NewsSignal,
-    TrendSignal,
-    default_signal_sources,
+from .ladder import (
+    DEFAULT_STEPS,
+    MODE_ANCHOR,
+    MODE_LOT,
+    MODES,
+    REASON_DIP,
+    REASON_TAKE_PROFIT,
+    REASON_TREND_EXIT,
+    HeldLot,
+    Ladder,
+    Order,
+    above_trend,
+    describe_steps,
+    flat_anchor,
+    parse_steps,
+    trend_average,
+    trend_bars,
 )
 
 __all__ = [
-    "SignalContext",
-    "SignalSource",
-    "CompositeStrategy",
-    "detect_regime",
-    "BreakoutSignal",
-    "MeanReversionSignal",
-    "MomentumSignal",
-    "NewsSignal",
-    "TrendSignal",
-    "default_signal_sources",
+    "DEFAULT_STEPS",
+    "MODE_ANCHOR",
+    "MODE_LOT",
+    "MODES",
+    "REASON_DIP",
+    "REASON_TAKE_PROFIT",
+    "REASON_TREND_EXIT",
+    "HeldLot",
+    "Ladder",
+    "Order",
+    "above_trend",
+    "describe_steps",
+    "flat_anchor",
+    "parse_steps",
+    "trend_average",
+    "trend_bars",
 ]

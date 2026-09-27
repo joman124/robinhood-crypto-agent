@@ -1,7 +1,12 @@
 """Scoring proposals against what the price actually did next.
 
-This is the evidence layer. The agent logs every proposal it makes; this module
-answers the only question that matters about them: *were they any good?*
+This is the evidence layer for the retired System 1, whose proposals were
+predictions over a fixed horizon: it answers *were they any good?*
+
+The trend ladder's proposals are not scored here. A dip buy waits days or weeks
+for its sell, so a six-hour hit rate would grade it on a question it never
+asked. Its measure is P&L: ``rhca backtest`` before it trades, and the
+ledger's realized P&L (``rhca status``) once it does.
 
 What is measured, and what is not
 ---------------------------------
@@ -341,10 +346,11 @@ def outcome_from_proposal_record(
 ) -> Outcome | None:
     """Score a proposal straight from its audit-log record.
 
-    ``None`` for a record that cannot be scored, and for a time exit: an exit
-    is a rule closing a position, not a prediction, so it has no hit rate.
+    ``None`` for a record that cannot be scored; for a time exit, which closed
+    a position rather than predicting; and for the ladder's proposals, whose
+    measure is P&L rather than a hit rate.
     """
-    if record.get("exit"):
+    if record.get("exit") or record.get("strategy") == "ladder":
         return None
     try:
         proposal_id = str(record["proposal_id"])

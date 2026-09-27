@@ -1,13 +1,13 @@
 """Bootstrapping price history from Coinbase's public candles.
 
-Robinhood's crypto API has no historical bars (docs/data-constraints.md), so a
-fresh checkout would need 30 hours of polling before the indicators could say
-anything. Coinbase publishes free candles for the same pairs; one request per
-symbol returns up to 300 bars (12.5 days at 60 minutes).
+Robinhood's crypto API has no historical bars (docs/data-constraints.md), and
+the trend ladder's average needs weeks of them: 50 days is 1,200 hourly bars.
+Coinbase publishes free candles for the same pairs, up to 300 bars a request,
+so ``fetch_coinbase_history`` pages back as far as the average needs.
 
-Imported bars are marked ``source=import``, and only the indicators read them.
-Proposals are always priced off a live Robinhood quote -- whose spread these
-prices do not include -- and outcomes are scored on bars recorded afterwards.
+Imported bars are marked ``source=import``. They set the trend average and the
+anchor; proposals are always priced off a live Robinhood quote, whose spread
+these prices do not include.
 """
 
 from __future__ import annotations

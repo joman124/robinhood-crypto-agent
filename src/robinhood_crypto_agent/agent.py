@@ -2,12 +2,18 @@
 
 One pass per watchlist symbol:
 
-    candles -> composite view -> reference price -> size -> plan -> risk -> proposal
+    closed bars + the ladder's ledger -> Ladder.decide -> size -> plan -> risk -> proposals
+
+The rule is the trend ladder (``strategy.ladder``), the same one ``rhca
+backtest`` replays. It decides on the last *closed* bar, as the backtest does,
+and each order it wants becomes one proposal, priced off the live quote: the
+ask for a buy, the bid for a sell.
 
 Every stage can decline, and a decline is reported rather than swallowed. A
-symbol with thin history, a flat signal, or a failing risk rule produces a
-:class:`SymbolOutcome` explaining itself -- so "why is there no proposal for
-ETH?" always has an answer on the report, instead of an empty list.
+symbol with no history, no quote, or nothing to do this bar produces a
+:class:`SymbolOutcome` explaining itself -- including where the next buy and
+sell would trigger -- so "why is there no proposal for ETH?" always has an
+answer on the report.
 
 Risk-rejected proposals are still constructed and logged. The record of what
 the agent wanted to do and was stopped from doing is the evidence that the
@@ -17,39 +23,40 @@ risk controls work.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Sequence
 
 from .audit import AuditLog, DailyActivity, proposal_status_for
 from .config import AgentConfig
 from .execution.kill_switch import KillSwitch
-from .execution.orders import STYLE_PROMPT, plan_for_view, snap_price
-from .exits import EXIT_TIME, due_lots, open_lots
-from .indicators import latest
+from .execution.orders import single_order_plan
+from .ledger import STRATEGY_LADDER, LadderPosition, ladder_positions
 from .models import (
-    CompositeView,
-    Direction,
-    ExecutionPlan,
-    NewsItem,
     OrderType,
     PairConstraints,
     Position,
     Proposal,
     Quote,
-    Regime,
-    RiskDecision,
     Side,
-    Tranche,
     utcnow,
 )
-from .numeric import ZERO, quantize_to_increment, round_money
+from .numeric import ZERO, format_decimal
 from .risk import RiskContext, RiskEngine
-from .sizing import SizingResult, size_position
+from .sizing import SizingResult, size_buy, size_sell
 from .store import PriceStore
-from .strategy import CompositeStrategy
-from .strategy.base import SignalContext
+from .strategy.ladder import (
+    REASON_DIP,
+    REASON_TAKE_PROFIT,
+    REASON_TREND_EXIT,
+    Order,
+    flat_anchor,
+    trend_average,
+)
 from .symbols import canonical
+
+#: How each sell reads in a risk finding that exempts it.
+EXIT_REASONS = {REASON_TAKE_PROFIT: "take-profit", REASON_TREND_EXIT: "trend exit"}
 
 
 @dataclass
@@ -65,17 +72,12 @@ class MarketState:
     constraints: dict[str, PairConstraints] = field(default_factory=dict)
     positions: dict[str, Position] = field(default_factory=dict)
     portfolio_value: Decimal | None = None
-    #: Recent Jev-labeled news; each symbol sees only the items about it.
-    news: list[NewsItem] = field(default_factory=list)
-    #: When ``positions`` was last ingested. A snapshot newer than a lot's fill
-    #: that holds none of the coin means it was sold outside the agent.
+    #: When ``positions`` was last ingested. A snapshot newer than the ladder's
+    #: last fill that holds none of the coin means it was sold outside the agent.
     positions_as_of: datetime | None = None
 
     def quote_for(self, symbol: str) -> Quote | None:
         return self.quotes.get(canonical(symbol))
-
-    def news_for(self, symbol: str) -> list[NewsItem]:
-        return [item for item in self.news if item.applies_to(canonical(symbol))]
 
     def constraints_for(self, symbol: str) -> PairConstraints:
         return self.constraints.get(canonical(symbol)) or PairConstraints.permissive(
@@ -83,19 +85,44 @@ class MarketState:
         )
 
 
+@dataclass(frozen=True)
+class LadderSnapshot:
+    """What the rule saw on the bar it decided on."""
+
+    symbol: str
+    bar_start: datetime
+    close: Decimal
+    anchor: Decimal
+    held: Decimal
+    in_cycle: bool
+    bought: frozenset[int]
+    sold: frozenset[int]
+    trend_days: int
+    #: ``None`` with the filter off, or before the average exists.
+    trend_average: Decimal | None
+    #: Bars the average needs, and bars on hand.
+    trend_bars: int
+    bars: int
+
+    @property
+    def above(self) -> bool | None:
+        return None if self.trend_average is None else self.close > self.trend_average
+
+
 @dataclass
 class SymbolOutcome:
     """What the pipeline concluded for one symbol."""
 
     symbol: str
-    view: CompositeView | None
-    proposal: Proposal | None
+    proposals: list[Proposal]
     bars: int
+    snapshot: LadderSnapshot | None = None
+    #: Why there is no proposal: a missing input, or the ladder's state.
     skipped_reason: str | None = None
 
     @property
     def produced_proposal(self) -> bool:
-        return self.proposal is not None
+        return bool(self.proposals)
 
 
 @dataclass
@@ -105,12 +132,10 @@ class AnalysisResult:
     outcomes: list[SymbolOutcome]
     activity: DailyActivity
     generated_at: object = field(default_factory=utcnow)
-    #: Time exits: sells of lots the agent bought and has held the horizon.
-    exits: list[Proposal] = field(default_factory=list)
 
     @property
     def proposals(self) -> list[Proposal]:
-        return [o.proposal for o in self.outcomes if o.proposal is not None] + self.exits
+        return [p for o in self.outcomes for p in o.proposals]
 
     @property
     def executable(self) -> list[Proposal]:
@@ -122,7 +147,7 @@ class AnalysisResult:
 
 
 class Agent:
-    """Runs the analysis pipeline for a configured watchlist."""
+    """Runs the ladder over a configured watchlist."""
 
     def __init__(
         self,
@@ -136,7 +161,7 @@ class Agent:
         self.store = store or PriceStore(config.price_store_path)
         self.audit = audit or AuditLog(config.audit_path)
         self.kill_switch = kill_switch or KillSwitch(config.kill_switch_path)
-        self.strategy = CompositeStrategy(config.strategy)
+        self.ladder = config.strategy.ladder()
         self.risk_engine = RiskEngine(config)
 
     def analyze(
@@ -150,240 +175,178 @@ class Agent:
         targets = [canonical(s) for s in (symbols or self.config.watchlist)]
         activity = self.audit.daily_activity()
         kill_state = self.kill_switch.state()
+        positions = ladder_positions(self.audit)
 
         outcomes: list[SymbolOutcome] = []
         for symbol in targets:
-            outcome = self._analyze_symbol(symbol, state, activity, kill_state)
+            position = positions.get(symbol) or LadderPosition(symbol)
+            outcome = self._analyze_symbol(symbol, state, position, activity, kill_state)
             outcomes.append(outcome)
-            if record and outcome.proposal is not None:
-                self.audit.record_proposal(outcome.proposal)
+            if record:
+                for proposal in outcome.proposals:
+                    self.audit.record_proposal(proposal, ladder_annotations(proposal))
 
-        exits = [
-            p
-            for p in self.exit_proposals(state, activity=activity, kill_state=kill_state)
-            if p.symbol in targets
-        ]
-        if record:
-            for proposal in exits:
-                self.audit.record_proposal(proposal, exit_annotations(proposal))
-
-        return AnalysisResult(outcomes=outcomes, activity=activity, exits=exits)
-
-    def exit_proposals(
-        self,
-        state: MarketState,
-        *,
-        activity: DailyActivity | None = None,
-        kill_state=None,
-        now: datetime | None = None,
-    ) -> list[Proposal]:
-        """A sell for each symbol with agent lots held ``exit_after_bars`` or longer.
-
-        It sells the lots that are due, capped at what the account holds. When
-        the holdings snapshot is older than the lots, a sell is still proposed,
-        and ``sell_coverage`` blocks it and says what it saw: re-ingesting
-        positions is the fix, and silence would hide the exit.
-        """
-        bars = self.config.strategy.exit_after_bars
-        if bars <= 0:
-            return []
-        now = now or utcnow()
-        hold = timedelta(minutes=bars * self.config.strategy.bar_interval_minutes)
-        lots = open_lots(self.audit)
-        due = due_lots(lots, now=now, hold=hold)
-        if not due:
-            return []
-        activity = activity or self.audit.daily_activity()
-        kill_state = kill_state or self.kill_switch.state()
-
-        proposals = []
-        for symbol, ready in sorted(due.items()):
-            quote = state.quote_for(symbol)
-            if quote is None:
-                continue  # the next analysis with a quote proposes it
-            held = state.positions.get(symbol)
-            held_quantity = held.quantity if held else ZERO
-            last_fill = max(lot.filled_at for lot in lots[symbol])
-            if held_quantity <= ZERO and state.positions_as_of and state.positions_as_of > last_fill:
-                continue  # a snapshot taken after the buy holds none: sold elsewhere
-            constraints = state.constraints_for(symbol)
-            due_quantity = sum((lot.quantity for lot in ready), ZERO)
-            quantity = min(due_quantity, held_quantity) if held_quantity > ZERO else due_quantity
-            quantity = quantize_to_increment(quantity, constraints.quantity_increment)
-            if quantity <= ZERO:
-                continue
-            proposals.append(
-                self._exit_proposal(
-                    symbol, quantity, ready, quote, constraints, state, activity, kill_state,
-                    hours=hold.total_seconds() / 3600,
-                )
-            )
-        return proposals
-
-    def _exit_proposal(
-        self,
-        symbol: str,
-        quantity: Decimal,
-        lots: list[Any],
-        quote: Quote,
-        constraints: PairConstraints,
-        state: MarketState,
-        activity: DailyActivity,
-        kill_state,
-        *,
-        hours: float,
-    ) -> Proposal:
-        reference_price = quote.bid if quote.bid > ZERO else quote.mark
-        since = min(lot.filled_at for lot in lots)
-        reason = f"time exit: bought {since:%Y-%m-%d %H:%M} UTC, held past {hours:g}h"
-        sizing = SizingResult(
-            symbol=symbol,
-            side=Side.SELL,
-            quantity=quantity,
-            notional=round_money(quantity * reference_price),
-            reference_price=reference_price,
-            detail={
-                "exit": EXIT_TIME,
-                "entry_proposal_ids": list(dict.fromkeys(lot.proposal_id for lot in lots)),
-                "held_since": since.isoformat(),
-            },
-        )
-        view = CompositeView(
-            symbol=symbol,
-            regime=Regime.UNKNOWN,
-            score=0.0,
-            confidence=0.0,
-            direction=Direction.SHORT,
-            signals=[],
-            weights={},
-            notes=[reason],
-        )
-        order_type = OrderType.MARKET if constraints.market_orders_only else OrderType.LIMIT
-        plan = ExecutionPlan(
-            style=STYLE_PROMPT,
-            tranches=[
-                Tranche(
-                    index=0,
-                    quantity=quantity,
-                    target_price=snap_price(reference_price, Side.SELL, constraints),
-                    order_type=order_type,
-                )
-            ],
-            rationale=f"{reason}: sell promptly at the bid, one order",
-        )
-        context = RiskContext(
-            config=self.config,
-            quote=quote,
-            constraints=constraints,
-            activity=activity,
-            kill_switch=kill_state,
-            positions=state.positions,
-            portfolio_value=state.portfolio_value,
-            order_type=order_type,
-        )
-        decision = self.risk_engine.evaluate(view, sizing, context, exit_reason="time exit")
-        created_at = utcnow()
-        return Proposal(
-            proposal_id=Proposal.make_id(symbol, Side.SELL, quantity, created_at),
-            symbol=symbol,
-            side=Side.SELL,
-            quantity=quantity,
-            reference_price=reference_price,
-            notional=sizing.notional,
-            created_at=created_at,
-            view=view,
-            plan=plan,
-            risk=decision,
-            status=proposal_status_for(decision.passed),
-            sizing_detail=sizing.detail,
-            spread_pct=quote.spread_pct,
-        )
+        return AnalysisResult(outcomes=outcomes, activity=activity)
 
     def _analyze_symbol(
         self,
         symbol: str,
         state: MarketState,
+        position: LadderPosition,
         activity: DailyActivity,
         kill_state,
     ) -> SymbolOutcome:
-        candles = self.store.candles(
-            symbol,
-            interval_minutes=self.config.strategy.bar_interval_minutes,
-            limit=max(self.config.strategy.min_bars * 4, 200),
-        )
+        settings = self.config.strategy
+        candles = self.store.candles(symbol, interval_minutes=settings.bar_interval_minutes)
+
+        def skip(reason: str, snapshot: LadderSnapshot | None = None) -> SymbolOutcome:
+            return SymbolOutcome(symbol, [], len(candles), snapshot, reason)
 
         if not self.config.allows(symbol):
-            return SymbolOutcome(
-                symbol=symbol,
-                view=None,
-                proposal=None,
-                bars=len(candles),
-                skipped_reason=f"{symbol} is not on the watchlist allowlist",
-            )
-
+            return skip(f"{symbol} is not on the watchlist allowlist")
         quote = state.quote_for(symbol)
         if quote is None:
-            return SymbolOutcome(
-                symbol=symbol,
-                view=None,
-                proposal=None,
-                bars=len(candles),
-                skipped_reason=(
-                    f"no live quote for {symbol}; fetch get_crypto_quotes and ingest it "
-                    "before analyzing"
-                ),
+            return skip(
+                f"no live quote for {symbol}; fetch get_crypto_quotes and ingest it "
+                "before analyzing"
             )
-
         if not candles:
-            return SymbolOutcome(
-                symbol=symbol,
-                view=None,
-                proposal=None,
-                bars=0,
-                skipped_reason=(
-                    f"no price history for {symbol}. The MCP server exposes no crypto "
-                    "historicals tool, so history is built by ingesting quotes over "
-                    "time (rhca ingest-quotes) or importing bars (rhca import-history)."
-                ),
+            return skip(
+                f"no price history for {symbol}. The MCP server has no crypto historicals "
+                "tool: `rhca bootstrap-history` imports Coinbase bars, and `rhca run` "
+                "records quotes as it goes."
             )
 
-        view = self.strategy.evaluate(symbol, candles, news=state.news_for(symbol))
+        last = candles[-1]
+        average = trend_average(candles, settings.trend_bars) if settings.trend_bars else None
+        if position.in_cycle:
+            anchor = position.anchor
+        else:
+            since = _latest(position.flat_since, settings.anchor_since)
+            anchor = flat_anchor(candles, since=since)
+            if anchor is None:
+                return skip(
+                    f"no closed bar since {since:%Y-%m-%d %H:%M} UTC, where the anchor "
+                    "starts; the first one sets it"
+                    if since
+                    else "no closed bar yet"
+                )
+        assert anchor is not None
+        snapshot = LadderSnapshot(
+            symbol=symbol,
+            bar_start=last.start,
+            close=last.close,
+            anchor=anchor,
+            held=position.held,
+            in_cycle=position.in_cycle,
+            bought=position.bought,
+            sold=position.sold,
+            trend_days=settings.trend_days,
+            trend_average=average,
+            trend_bars=settings.trend_bars,
+            bars=len(candles),
+        )
 
-        if view.direction is Direction.FLAT:
-            return SymbolOutcome(
-                symbol=symbol,
-                view=view,
-                proposal=None,
-                bars=len(candles),
-                skipped_reason=(
-                    f"composite score {view.score:+.3f} is inside the neutral band; "
-                    "no directional trade"
-                ),
+        orders = self.ladder.decide(
+            anchor=anchor,
+            close=last.close,
+            above=snapshot.above,
+            held=position.held,
+            bought=position.bought,
+            sold=position.sold,
+        )
+        proposals: list[Proposal] = []
+        notes: list[str] = []
+        for order in orders:
+            if order.side is Side.SELL and position.open_sell:
+                notes.append(
+                    "a ladder sell order is still open; record its fill or its cancellation "
+                    "before another sell is proposed"
+                )
+                continue
+            proposal, note = self._proposal(
+                order, snapshot, position, quote, state, activity, kill_state
             )
+            if proposal is not None:
+                proposals.append(proposal)
+            if note:
+                notes.append(note)
 
+        if proposals:
+            return SymbolOutcome(symbol, proposals, len(candles), snapshot)
+        return skip("; ".join([*dict.fromkeys(notes), describe_snapshot(snapshot, self)]), snapshot)
+
+    def _proposal(
+        self,
+        order: Order,
+        snapshot: LadderSnapshot,
+        position: LadderPosition,
+        quote: Quote,
+        state: MarketState,
+        activity: DailyActivity,
+        kill_state,
+    ) -> tuple[Proposal | None, str | None]:
+        symbol = snapshot.symbol
         constraints = state.constraints_for(symbol)
-        reference_price = self._reference_price(quote, view.direction)
+        exit_reason = None
+        if order.side is Side.BUY:
+            assert order.dollars is not None
+            reference = quote.ask if quote.ask > ZERO else quote.mark
+            sizing = size_buy(
+                symbol,
+                dollars=order.dollars,
+                reference_price=reference,
+                constraints=constraints,
+                limits=self.config.risk,
+            )
+        else:
+            reference = quote.bid if quote.bid > ZERO else quote.mark
+            account = state.positions.get(symbol)
+            account_quantity = account.quantity if account else ZERO
+            if (
+                account_quantity <= ZERO
+                and state.positions_as_of is not None
+                and position.last_fill_at is not None
+                and state.positions_as_of > position.last_fill_at
+            ):
+                return None, (
+                    f"the ladder's {format_decimal(position.held)} {symbol} is not in a "
+                    "holdings snapshot taken after its last fill: it was sold outside the agent"
+                )
+            wanted = position.held
+            if not order.everything and order.dollars is not None and reference > ZERO:
+                wanted = min(wanted, order.dollars / reference)
+            # Capped at the account's holding. When the snapshot predates the
+            # fill it holds none, and sell_coverage blocks the proposal and
+            # says so: re-ingesting positions is the fix.
+            quantity = min(wanted, account_quantity) if account_quantity > ZERO else wanted
+            sizing = size_sell(
+                symbol, quantity=quantity, reference_price=reference, constraints=constraints
+            )
+            exit_reason = EXIT_REASONS[order.reason]
 
-        sizing = size_position(
-            view,
-            reference_price=reference_price,
-            candles=candles,
-            limits=self.config.risk,
-            strategy=self.config.strategy,
+        reason = describe_order(order, snapshot, self)
+        detail = {
+            **sizing.detail,
+            STRATEGY_LADDER: ladder_detail(order, snapshot, position, self),
+        }
+        sizing = SizingResult(
+            symbol=sizing.symbol,
+            side=sizing.side,
+            quantity=sizing.quantity,
+            notional=sizing.notional,
+            reference_price=sizing.reference_price,
+            detail=detail,
+            rejected_reason=sizing.rejected_reason,
+        )
+        plan = single_order_plan(
+            sizing,
             constraints=constraints,
-            portfolio_value=state.portfolio_value,
-            position=state.positions.get(canonical(symbol)),
+            rationale=(
+                f"{order.reason.replace('_', ' ')}: one order at the "
+                f"{'ask' if order.side is Side.BUY else 'bid'}, as the backtest fills it"
+            ),
         )
-
-        atr_value = latest(
-            SignalContext(
-                symbol=symbol, candles=candles, config=self.config.strategy
-            ).atr
-        )
-        plan = plan_for_view(
-            sizing, regime=view.regime, constraints=constraints, atr=atr_value
-        )
-
         context = RiskContext(
             config=self.config,
             quote=quote,
@@ -394,55 +357,155 @@ class Agent:
             portfolio_value=state.portfolio_value,
             order_type=plan.tranches[0].order_type if plan.tranches else OrderType.LIMIT,
         )
-        decision: RiskDecision = self.risk_engine.evaluate(view, sizing, context)
-
+        decision = self.risk_engine.evaluate(symbol, sizing, context, exit_reason=exit_reason)
         created_at = utcnow()
         proposal = Proposal(
             proposal_id=Proposal.make_id(symbol, sizing.side, sizing.quantity, created_at),
             symbol=symbol,
             side=sizing.side,
             quantity=sizing.quantity,
-            reference_price=reference_price,
+            reference_price=sizing.reference_price,
             notional=sizing.notional,
             created_at=created_at,
-            view=view,
+            reason=reason,
             plan=plan,
             risk=decision,
             status=proposal_status_for(decision.passed),
             sizing_detail=sizing.detail,
             spread_pct=quote.spread_pct,
         )
+        return proposal, None
 
-        return SymbolOutcome(
-            symbol=symbol, view=view, proposal=proposal, bars=len(candles)
+
+def _latest(*moments: datetime | None) -> datetime | None:
+    present = [m for m in moments if m is not None]
+    return max(present) if present else None
+
+
+def _price(value: Decimal) -> str:
+    return f"{value:,.2f}" if abs(value) >= 1 else format_decimal(value)
+
+
+def _pct_from(value: Decimal, anchor: Decimal) -> Decimal:
+    return (value / anchor - Decimal(1)) * Decimal(100)
+
+
+def _trend_phrase(snapshot: LadderSnapshot) -> str:
+    if not snapshot.trend_days:
+        return "no trend filter"
+    if snapshot.trend_average is None:
+        return (
+            f"its {snapshot.trend_days}-day average needs {snapshot.trend_bars} bars and "
+            f"{snapshot.bars} are on hand, so nothing is bought yet (rhca bootstrap-history)"
         )
-
-    def _reference_price(self, quote: Quote, direction: Direction) -> Decimal:
-        """Price a proposal against the side it would actually cross.
-
-        A buy is referenced to the ask and a sell to the bid, not to the mark.
-        Sizing off the mark quietly understates the cost of a wide spread --
-        which, on market-maker-routed crypto quotes, is routinely over 1%.
-        """
-        if direction is Direction.LONG and quote.ask > ZERO:
-            return quote.ask
-        if direction is Direction.SHORT and quote.bid > ZERO:
-            return quote.bid
-        return quote.mark
+    side = "above" if snapshot.above else "at or under"
+    return f"{side} its {snapshot.trend_days}-day average {_price(snapshot.trend_average)}"
 
 
-def exit_annotations(proposal: Proposal) -> dict[str, Any]:
-    """The audit-log fields that mark a proposal as a time exit.
+def describe_order(order: Order, snapshot: LadderSnapshot, agent: Agent) -> str:
+    """One line: which rule fired, on what numbers."""
+    ladder = agent.ladder
+    close, anchor = snapshot.close, snapshot.anchor
+    if order.reason == REASON_TREND_EXIT:
+        return (
+            f"trend exit: closed {_price(close)}, {_trend_phrase(snapshot)}; "
+            f"sell everything the ladder holds"
+        )
+    assert order.step is not None
+    pct, dollars = ladder.steps[order.step]
+    if order.reason == REASON_DIP:
+        return (
+            f"dip: closed {_price(close)}, {-_pct_from(close, anchor):.1f}% under the anchor "
+            f"{_price(anchor)}; step {order.step + 1} buys ${format_decimal(dollars)} at -{pct}%"
+            f" ({_trend_phrase(snapshot)})"
+        )
+    what = (
+        "sells everything left"
+        if order.everything
+        else f"sells ${format_decimal(dollars)} worth"
+    )
+    return (
+        f"take profit: closed {_price(close)}, {_pct_from(close, anchor):.1f}% over the "
+        f"anchor {_price(anchor)}; step {order.step + 1} {what} at +{pct}%"
+    )
 
-    ``exit`` keeps it out of the hit rate, and ``trigger_reason`` is what the
-    dashboard shows as the reason for it.
-    """
-    detail = proposal.sizing_detail
+
+def describe_snapshot(snapshot: LadderSnapshot, agent: Agent) -> str:
+    """Nothing to do this bar: where the ladder stands, and what would move it."""
+    ladder = agent.ladder
+    close, anchor = snapshot.close, snapshot.anchor
+    parts = [
+        f"closed {_price(close)} ({_pct_from(close, anchor):+.1f}% from the anchor "
+        f"{_price(anchor)})"
+    ]
+    if snapshot.held > ZERO:
+        steps = ", ".join(str(s + 1) for s in sorted(snapshot.bought)) or "none"
+        parts.append(f"holding {format_decimal(snapshot.held)} (steps bought: {steps})")
+    else:
+        parts.append("holding none")
+    next_buy = next(
+        (i for i in range(len(ladder.steps)) if i not in snapshot.bought), None
+    )
+    if next_buy is not None:
+        parts.append(
+            f"step {next_buy + 1} buys at {_price(ladder.buy_level(anchor, next_buy))}"
+        )
+    if snapshot.held > ZERO:
+        next_sell = next(
+            (i for i in range(len(ladder.steps)) if i not in snapshot.sold), None
+        )
+        if next_sell is not None:
+            parts.append(
+                f"step {next_sell + 1} sells at {_price(ladder.sell_level(anchor, next_sell))}"
+            )
+    parts.append(_trend_phrase(snapshot))
+    return "no order this bar: " + "; ".join(parts)
+
+
+def ladder_detail(
+    order: Order, snapshot: LadderSnapshot, position: LadderPosition, agent: Agent
+) -> dict[str, Any]:
+    """The rule's state, stored on the proposal. The ledger reads ``step`` and
+    ``anchor`` back to rebuild the cycle once the order fills."""
+    ladder = agent.ladder
+    level = None
+    if order.step is not None:
+        level = (
+            ladder.buy_level(snapshot.anchor, order.step)
+            if order.side is Side.BUY
+            else ladder.sell_level(snapshot.anchor, order.step)
+        )
     return {
-        "exit": detail.get("exit", EXIT_TIME),
-        "entry_proposal_ids": detail.get("entry_proposal_ids", []),
-        "trigger_reason": proposal.view.notes[0] if proposal.view.notes else "time exit",
-        "escalated": False,
+        "rule": order.reason,
+        "step": order.step,
+        "anchor": format_decimal(snapshot.anchor),
+        "close": format_decimal(snapshot.close),
+        "bar": snapshot.bar_start.isoformat(),
+        "level": format_decimal(level) if level is not None else None,
+        "dollars": format_decimal(order.dollars) if order.dollars is not None else None,
+        "everything": order.everything,
+        "trend_days": snapshot.trend_days,
+        "trend_average": (
+            format_decimal(snapshot.trend_average) if snapshot.trend_average is not None else None
+        ),
+        "held": format_decimal(position.held),
+        "entry_proposal_ids": position.entry_proposal_ids if order.side is Side.SELL else [],
+    }
+
+
+def ladder_annotations(proposal: Proposal) -> dict[str, Any]:
+    """The audit-log fields that mark a proposal as the ladder's.
+
+    ``strategy`` is what the ledger keys on, ``rule`` and ``step`` make the
+    log greppable, and ``trigger_reason`` is what the dashboard shows as the
+    reason for it.
+    """
+    detail = proposal.sizing_detail.get(STRATEGY_LADDER) or {}
+    return {
+        "strategy": STRATEGY_LADDER,
+        "rule": detail.get("rule"),
+        "step": detail.get("step"),
+        "trigger_reason": proposal.reason,
     }
 
 
@@ -458,7 +521,3 @@ def constraints_by_symbol(
     constraints: Sequence[PairConstraints],
 ) -> dict[str, PairConstraints]:
     return {canonical(c.symbol): c for c in constraints}
-
-
-def side_for(direction: Direction) -> Side:
-    return Side.BUY if direction is Direction.LONG else Side.SELL

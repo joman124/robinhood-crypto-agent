@@ -2,71 +2,58 @@
 
 Where the project stands, and what the next session should pick up.
 
-## The architecture (decided 2026-09-21)
+## The architecture (decided 2026-09-27)
 
 ```
-[ Real-time crypto data / news ]      Robinhood quotes, RSS; Crypto.com market data for System 2
+[ Robinhood quotes ] -> hourly bars (Coinbase fills in history)
               |
               v
-[ Jev + System 1 ]                    Jev (TypeSafe AI) labels each headline;
-              |                       indicators + news signal + 17 risk rules
-      Is confidence high?             trigger: thresholds, cooldown, daily cap
-       |-- no  -> logged as not_escalated (and still scored)
-       '-- yes -> [ Claude Sonnet 5 ] System 2: propose or pass, with read-only tools
-                          |
-                          v
-              [ Robinhood Crypto API ]  shadow mode: a logged proposal, not an order
+[ The trend ladder ]   BTC and ETH: buy dips in dollar steps above the 50-day
+              |        average, sell into strength, sell everything under it
+              v
+[ 14 risk rules ] -> proposal -> a human approves by id -> Claude places it via MCP
 ```
 
-This replaced the previous Goal 1, an hourly scheduled ingest-analyze-sync
-loop. `rhca run` does the same job continuously, and it builds the track record
-that loop was meant to build.
+This replaced the System 1 / System 2 pipeline (indicators and Jev news labels,
+an escalation trigger, Claude Sonnet 5 as a second opinion) at the owner's
+request. The evidence that led here is in [`strategy.md`](./strategy.md#history).
+In short: at Robinhood's ~1.9% round trip, a six-hour hold has to move more
+than a typical six-hour move just to break even, and System 1's record matched
+that. The dip ladder, filtered by the 50-day average, was the only variant
+that beat holding per dollar on BTC and ETH across the 180, 365 and 730-day
+windows.
 
 ## Where things stand
 
-- **Built:** `rhca run`, in shadow mode. It polls Robinhood's Crypto Trading API
-  with a read-only, Ed25519-signed client (`robinhood.py`), which has no order
-  method. It fetches five free RSS feeds. (X was dropped on 2026-09-21: it
-  bills per post read.) Jev labels each headline with asset, direction and impact. The
-  labels feed a fifth, *optional* signal (`NewsSignal`), which drops out of the
-  blend entirely when there is no recent news. Candidates that pass every risk
-  rule and the trigger go to Claude Sonnet 5 (`system2.py`), which answers
-  propose or pass. Sonnet can also read a second venue's market data (ticker,
-  order book, candles, trades) from Crypto.com's free public MCP server, through
-  the Anthropic API's MCP connector. That toolset is an allowlist of its
-  read-only tools. Every candidate is logged with its status and scored.
-  `rhca accuracy` groups hit rates by status.
-- **Also built:** `rhca bootstrap-history` imports free Coinbase bars, so the
-  indicators work from the first minute instead of after 30 hours. The price
-  store reads incrementally. Dashboard sync no longer re-notes the same
-  decision on every sync.
-- **Not yet exercised with real keys.** No key has been used yet. The Robinhood
-  REST response shapes come from the docs and have not been confirmed against
-  a live account. The first `rhca run --once` is that check; see the runbook.
-- **Still no live order path anywhere in the package.** Orders still go only
-  through Claude Code's MCP tools, behind a human approval by proposal id.
+- **Built:** the trend ladder (`strategy/ladder.py`), live in `rhca run` and
+  `rhca analyze` and replayed by `rhca backtest`, with a test holding the two
+  to the same trades. Its state comes from recorded fills (`ledger.py`).
+  `rhca status` shows each coin's position and realized P&L.
+- **Backtest:** the trend exit, a `trend +50d` baseline, and rolling windows
+  (`--roll-window`).
+- **Not yet evidenced:** the trend exit. It was specified before any result,
+  and the synthetic test shows it can churn when the price hovers near the
+  average.
 
-## Next: the shadow run
+## Next
 
-1. **Keys.** Robinhood Crypto API, TypeSafe (Jev), and Anthropic. The Crypto.com connector needs none.
-   The owner creates them. `.env.example` lists them, and
-   `docs/runbook.md` covers setup.
-2. **First `rhca run --once`.** Confirm quotes, pairs, holdings and buying
-   power parse. Then replace the invented REST fixtures in
-   `tests/unit/test_robinhood_client.py` with trimmed live captures.
-3. **Let it run for days, not hours.** Outcomes resolve six bars after each
-   candidate. The questions only have answers once there are dozens of
-   resolved rows per status:
-   - Does System 2 add value? Compare hit rate for `proposed` against
-     `declined_by_system2`.
-   - Is the trigger in the right place? Compare escalated candidates against
-     `not_escalated`.
-   - Does news help? Compare candidates with a `news` signal against those
-     without. Not grouped yet; this is the next small report worth adding.
-4. **Tune from evidence, not feel.** The trigger thresholds and news weight
-   live in `config/pipeline.yaml` and `config/strategy.yaml`. Jev's
-   confidence measures how sure it is of a *label*, not whether the trade
-   wins, so its threshold is only as good as the outcomes behind it.
+1. **Run the backtest on real bars** (runbook, "Backtesting"):
+   `rhca backtest --days 180`, `--days 365` and `--days 730 --roll-window 90`.
+   Hold `ladder (anchor) +50d exit` to the bar in
+   [`strategy.md`](./strategy.md#validating-it). If the exit churns, compare
+   it with `+50d`, and decide on `trend_exit` from that.
+2. **Only then approve the first live proposal**, at the current caps: $5 to
+   $20 steps, $35 at most per coin.
+3. **Record every fill and cancellation.** The ladder's state is only as good
+   as the audit log. Reconcile against `get_crypto_orders` weekly
+   (runbook, "Reconciling against Robinhood").
+4. **Measure it live on P&L**, from `rhca status`, over a month or more. The
+   ladder trades a few times a month per coin, so the live evidence comes
+   slowly; the backtest is the fast evidence.
+5. **The dashboard's frontend** still shows System 1's panels (signals,
+   System 2 verdicts, hit rates by stage). The payload now carries the
+   ladder's `rule`, `step` and reason; the UI should show those, and the
+   ladder's P&L, instead.
 
 ## Done: dashboard UX (2026-09-23)
 
@@ -78,9 +65,8 @@ pair/outcome filters and a mobile card layout. The payload (version 2) also
 gained the kill switch, the loop heartbeat, the last mark per pair, per-rule
 risk verdicts and an execution summary. See [`dashboard/README.md`](../dashboard/README.md).
 
-What stays out, deliberately: System 2's written rationale (Sonnet reads the
-holdings and may quote them), the text of risk messages that quote the account,
-and the loop's last error text. Read those locally with `rhca audit` and
+What stays out, deliberately: the text of risk messages that quote the
+account, and the loop's last error text. Read those locally with `rhca audit` and
 `rhca status`.
 
 Still open: the loop only syncs when `RHCA_DASHBOARD_URL` and
@@ -101,17 +87,11 @@ Still open: the loop only syncs when `RHCA_DASHBOARD_URL` and
 1. **The dashboard never places orders and holds no Robinhood credentials.**
    Accepting records a decision; the agent replays it through the full gate.
 2. **`OVERRIDE RISK CHECK` stays typed-only.**
-3. **Config can only tighten.** Raising a ceiling is a code change. The
-   pipeline's spend settings have ceilings too.
-4. **An unknown hit rate reads "unknown", never 0%**, and an unresolved
-   proposal is never scored as a loss.
-5. **Every candidate is scored, whatever its status**, so the record is not
-   flattered by counting only what a stage let through.
-6. **The Robinhood client stays read-only until Phase 2.** System 2's tools
-   stay read-only too. Its only write is `submit_decision`, and that writes
-   a log row.
-7. **A failure is never an approval.** An API error, a refusal, a timeout, a
-   malformed answer or running out of turns all record as not approved.
-8. **Only a pre-approved candidate reaches System 2.** A candidate the risk
-   engine blocked is never escalated, so no headline can talk Sonnet into a
-   trade the rules would refuse.
+3. **Config can only tighten.** Raising a ceiling is a code change.
+4. **The rule the agent trades is the rule the backtest replays.** One
+   function, and a test that holds the two to the same trades. A live-only
+   tweak would make every backtest evidence about something else.
+5. **The ladder's state comes from recorded fills**, never from memory, so it
+   survives a restart and never sells a coin it did not buy.
+6. **The Robinhood client stays read-only until Phase 2.**
+7. **A failure is never an approval.**

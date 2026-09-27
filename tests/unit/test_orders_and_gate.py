@@ -12,15 +12,12 @@ from robinhood_crypto_agent.execution.gate import OVERRIDE_PHRASE, ApprovalGate
 from robinhood_crypto_agent.execution.kill_switch import KillSwitch
 from robinhood_crypto_agent.execution.orders import (
     STYLE_PROMPT,
-    STYLE_STAGED,
     build_order_request,
     build_plan_requests,
-    plan_for_view,
+    single_order_plan,
 )
 from robinhood_crypto_agent.mcp.contract import CRYPTO_TOOLS, validate_crypto_order_args
 from robinhood_crypto_agent.models import (
-    CompositeView,
-    Direction,
     ExecutionMode,
     ExecutionPlan,
     ExecutionRecord,
@@ -29,7 +26,6 @@ from robinhood_crypto_agent.models import (
     Proposal,
     ProposalStatus,
     Quote,
-    Regime,
     RiskDecision,
     RiskFinding,
     Side,
@@ -56,57 +52,30 @@ def sizing(quantity="0.003", side=Side.BUY, price="80000"):
     )
 
 
+def plan(sizing_result, constraints=PAIR):
+    return single_order_plan(sizing_result, constraints=constraints, rationale="dip")
+
+
 class TestPlans:
-    def test_trending_regime_fills_promptly(self):
-        plan = plan_for_view(sizing(), regime=Regime.TRENDING, constraints=PAIR)
-        assert plan.style == STYLE_PROMPT
-        assert len(plan.tranches) == 1
-
-    def test_ranging_regime_ladders_limits(self):
-        plan = plan_for_view(sizing(), regime=Regime.RANGING, constraints=PAIR, atr=500.0)
-        assert plan.style == STYLE_STAGED
-        assert len(plan.tranches) == 3
-        prices = [t.target_price for t in plan.tranches]
-        assert prices == sorted(prices, reverse=True)  # a buy ladders downward
-
-    def test_a_sell_ladder_goes_the_other_way(self):
-        plan = plan_for_view(
-            sizing(side=Side.SELL), regime=Regime.RANGING, constraints=PAIR, atr=500.0
-        )
-        prices = [t.target_price for t in plan.tranches]
-        assert prices == sorted(prices)
-
-    def test_tranches_sum_to_exactly_the_approved_quantity(self):
-        """Rounding must never let the plan exceed what risk approved."""
-        for quantity in ("0.003", "0.00000007", "1.23456789"):
-            plan = plan_for_view(
-                sizing(quantity=quantity), regime=Regime.RANGING, constraints=PAIR, atr=100.0
-            )
-            assert plan.total_quantity == Decimal(quantity)
+    def test_one_limit_order_for_the_whole_quantity(self):
+        result = plan(sizing())
+        assert result.style == STYLE_PROMPT
+        [tranche] = result.tranches
+        assert tranche.quantity == Decimal("0.003")
+        assert tranche.order_type is OrderType.LIMIT
 
     def test_market_only_pair_forces_a_single_market_order(self):
         constraints = PairConstraints("X-USD", Decimal("0.1"), market_orders_only=True)
-        plan = plan_for_view(sizing(), regime=Regime.RANGING, constraints=constraints)
-        assert plan.style == STYLE_PROMPT
-        assert plan.tranches[0].order_type is OrderType.MARKET
+        result = plan(sizing(), constraints)
+        assert result.style == STYLE_PROMPT
+        assert result.tranches[0].order_type is OrderType.MARKET
+        assert "market orders only" in result.rationale
 
-    def test_limit_prices_snap_conservatively_to_the_tick(self):
-        """A buy limit rounds down, so snapping never makes it more aggressive."""
-        coarse = PairConstraints("BTC-USD", Decimal("0.00000001"), price_increment=Decimal("100"))
-        plan = plan_for_view(
-            sizing(price="80050"), regime=Regime.RANGING, constraints=coarse, atr=10.0
-        )
-        assert plan.tranches[0].target_price <= Decimal("80050")
-        assert plan.tranches[0].target_price % Decimal("100") == 0
-
-    def test_a_prompt_limit_snaps_to_the_tick_too(self):
+    def test_a_limit_snaps_to_the_tick_and_never_more_aggressively(self):
         """Robinhood refused an unrounded ask: "round your order price to the nearest cent"."""
         ask = "85131.55197496"
-        buy = plan_for_view(sizing(price=ask), regime=Regime.TRENDING, constraints=PAIR)
-        assert buy.tranches[0].target_price == Decimal("85131.55")
-        sell = plan_for_view(
-            sizing(side=Side.SELL, price=ask), regime=Regime.TRENDING, constraints=PAIR
-        )
+        assert plan(sizing(price=ask)).tranches[0].target_price == Decimal("85131.55")
+        sell = plan(sizing(side=Side.SELL, price=ask))
         assert sell.tranches[0].target_price == Decimal("85131.56")
 
 
@@ -120,7 +89,7 @@ def make_proposal(*, passed=True, plan=None, quantity="0.003"):
         reference_price=Decimal("80000"),
         notional=Decimal("240"),
         created_at=utcnow(),
-        view=CompositeView("BTC-USD", Regime.TRENDING, 0.6, 0.8, Direction.LONG, [], {}),
+        reason="dip: a test",
         plan=plan
         or ExecutionPlan(
             STYLE_PROMPT,
@@ -185,9 +154,18 @@ class TestOrderRequests:
         unsnapped = build_order_request(make_proposal(plan=plan), config=config)
         assert unsnapped.arguments["limit_price"] == "85131.55197496"
 
-    def test_every_tranche_of_a_staged_plan_validates(self, config):
-        plan = plan_for_view(sizing(), regime=Regime.RANGING, constraints=PAIR, atr=500.0)
-        requests = build_plan_requests(make_proposal(plan=plan), config=config)
+    def test_every_tranche_of_a_system_1_staged_plan_still_validates(self, config):
+        """Its STAGED proposals are still in the audit log."""
+        staged = ExecutionPlan(
+            "STAGED",
+            [
+                Tranche(0, Decimal("0.001"), Decimal("80000"), OrderType.LIMIT),
+                Tranche(1, Decimal("0.001"), Decimal("79750"), OrderType.LIMIT),
+                Tranche(2, Decimal("0.001"), Decimal("79500"), OrderType.LIMIT),
+            ],
+            "ranging",
+        )
+        requests = build_plan_requests(make_proposal(plan=staged), config=config)
         assert len(requests) == 3
         for request in requests:
             assert validate_crypto_order_args(request.arguments)

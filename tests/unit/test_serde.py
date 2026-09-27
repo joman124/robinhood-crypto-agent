@@ -7,17 +7,13 @@ import pytest
 from robinhood_crypto_agent.audit import AuditLog
 from robinhood_crypto_agent.errors import AuditError
 from robinhood_crypto_agent.models import (
-    CompositeView,
-    Direction,
     ExecutionPlan,
     OrderType,
     Proposal,
     ProposalStatus,
-    Regime,
     RiskDecision,
     RiskFinding,
     Side,
-    Signal,
     Tranche,
     utcnow,
 )
@@ -33,16 +29,7 @@ def proposal():
         reference_price=Decimal("80123.45"),
         notional=Decimal("0.10"),
         created_at=utcnow(),
-        view=CompositeView(
-            symbol="BTC-USD",
-            regime=Regime.RANGING,
-            score=-0.42,
-            confidence=0.77,
-            direction=Direction.LONG,
-            signals=[Signal("trend", "BTC-USD", 0.3, 0.9, Direction.LONG, "because")],
-            weights={"trend": 0.5},
-            notes=["a note"],
-        ),
+        reason="dip: closed 76,000.00, 5.0% under the anchor 80,000.00",
         plan=ExecutionPlan(
             "STAGED",
             [
@@ -53,7 +40,7 @@ def proposal():
         ),
         risk=RiskDecision([RiskFinding("spread", False, "too wide", blocking=False)]),
         status=ProposalStatus.PROPOSED,
-        sizing_detail={"conviction": 0.5},
+        sizing_detail={"ladder": {"rule": "dip", "step": 0, "anchor": "80000"}},
     )
 
 
@@ -87,3 +74,23 @@ def test_non_blocking_findings_keep_their_flag():
 def test_corrupt_payload_is_reported_clearly():
     with pytest.raises(AuditError, match="could not rehydrate"):
         proposal_from_dict({"proposal_id": "x"})
+
+
+def test_a_system_1_proposal_still_reads():
+    """Its records in the audit log carry a composite view, not a reason."""
+    legacy = proposal().to_dict()
+    del legacy["reason"]
+    legacy["view"] = {
+        "symbol": "BTC-USD",
+        "regime": "trending",
+        "score": 0.42,
+        "confidence": 0.77,
+        "direction": "long",
+        "signals": [],
+        "weights": {},
+        "notes": ["a note"],
+    }
+    restored = proposal_from_dict(legacy)
+    assert restored.reason == (
+        "System 1: long, score +0.420, confidence 0.770, regime trending; a note"
+    )

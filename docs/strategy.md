@@ -1,161 +1,132 @@
-# Strategy
+# Strategy: the trend ladder
 
-## Regime first
+The agent trades one rule on BTC-USD and ETH-USD. The code is in
+`src/robinhood_crypto_agent/strategy/ladder.py`, and the settings are in
+`config/strategy.yaml`. `rhca backtest` replays the same function the live
+pipeline calls, so its `ladder (anchor) +50d exit` row is the evidence for
+exactly what the agent proposes. A test
+(`test_live_trades_exactly_what_the_backtest_trades`) feeds both paths the
+same bars and requires the same trades.
 
-Trend following and mean reversion are close to opposites. Blending them at
-fixed weights averages out to noise: in a strong uptrend the mean-reversion
-source is maximally bearish *and correct about the statistic it measures* —
-price really is extended — while being exactly wrong about the trade.
+It replaced System 1 on 2026-09-27: indicators, news labels, an escalation
+trigger and Claude Sonnet as a second opinion. Why is below, under
+[History](#history).
 
-So the first question is not "which way?" but "is there a trend?", and ADX
-answers it without reference to direction:
+## The rule, on each closed hourly bar
 
-| ADX | Regime | Reading |
+**The anchor.** While the agent holds none of a coin, the anchor is its
+highest close since the agent last sold out of it, or since `anchor_since`,
+whichever is later. A dip is measured from it. Once a step is bought the
+anchor stays fixed until the position is empty again. That span is one
+*cycle*.
+
+**Buys.** Each step is `percent:dollars`. With the default `5:5,10:10,20:20`:
+
+| Close vs the anchor | Buys | Sells (anchor mode) |
 |---|---|---|
-| ≥ `adx_trend_threshold` (22) | `trending` | A directional move is in progress |
-| < threshold | `ranging` | No dominant trend |
-| not warmed up | `unknown` | Not enough bars to have an answer |
+| 5% under | $5 | — |
+| 10% under | $10 | — |
+| 20% under | $20 | — |
+| 5% over | — | $5 worth |
+| 10% over | — | $10 worth |
+| 20% over | — | everything left |
 
-`unknown` is not a synonym for `ranging`. It means the question has no answer
-yet, and the blend falls back to equal weights rather than committing to
-either playbook.
+Each step buys once and sells once per cycle, so at most $35 is in a coin at
+a time.
 
-## The four signals
+**The trend filter.** A buy also needs the bar to close *above* the average
+of the last 50 days of hourly closes (1,200 bars). At or under it, or before
+the average exists, nothing is bought.
 
-Each returns a score in `[-1, 1]` and a confidence in `[0, 1]`, or **`None`**
-when history is too thin. `None` is the honest answer: a source must never
-return a neutral score to paper over missing data, because the composite
-distinguishes "no opinion" from "an opinion of zero".
+**The trend exit.** A close at or under that average sells everything the
+ladder holds. The filter alone only stops buying in a downtrend, so a coin
+bought just before the turn rode the whole decline down. The exit closes it
+instead. It is also the one rule here added without a backtest: see
+[Validating it](#validating-it).
 
-### trend
-MACD histogram divided by ATR, plus fast/slow SMA alignment. Dividing by ATR
-puts the reading in units of "typical bar range", which is comparable across
-symbols — a $300 histogram means something very different on BTC than on DOGE,
-and an un-normalized score would rank symbols by price level.
+## What it holds and remembers
 
-### momentum
-Z-score of the close against its own recent window, capped at ±2σ before
-scaling. Beyond 2σ a move is more likely a data artifact or a liquidation
-cascade than a tradable trend.
+The rule itself is stateless. What it needs is rebuilt from the audit log on
+every analysis (`ledger.py`):
 
-### mean_reversion
-RSI plus position within the Bollinger bands. Contrarian by construction: a low
-RSI at the lower band is a *long*. Heavily down-weighted in a trending regime,
-because "oversold" in a downtrend is a description, not an entry.
+- **Holdings** are the ladder's own recorded fills, first in first out. A
+  coin bought outside the agent, or by the retired System 1, is not the
+  ladder's, and is never proposed for sale.
+- **The cycle's anchor** is the one recorded on its first buy.
+- **Steps taken** are those with an order that filled any amount, or that is
+  still open. So a step is never proposed twice while its order is working.
+  Record a canceled order's final state to free its step.
 
-### breakout
-Close beyond the prior N-bar Donchian channel, normalized by ATR. The channel
-excludes the current bar — a channel that includes the current bar's own high
-can never be exceeded by it, so the signal would never fire. Inside the channel
-is a real "no breakout" reading, reported with halved confidence so it does not
-dilute the blend as if it were a measurement.
+## How it turns into orders
 
-## The blend
+Each thing the rule wants becomes one proposal: one limit order at the ask
+for a buy, or at the bid for a sell, which is how the backtest fills.
+Proposals go through the 14 risk rules and the approve-by-id gate like
+anything else. A sell closes a position the ladder opened, so it is exempt
+from the two caps on *new* exposure (`per_trade_notional` and
+`daily_notional`), and says so. The kill switch and `sell_coverage` still
+apply.
 
-```
-score      = Σ(wᵢ · cᵢ · sᵢ) / Σ(wᵢ · cᵢ)
-confidence = Σ(wᵢ · cᵢ) / Σ(wᵢ over ALL configured sources)
-```
+`rhca run` re-runs the rule every minute on the last closed bar, and logs
+each proposal once per bar for as long as the rule still wants it. A fresh
+proposal each bar keeps its price inside the approval gate's 0.5% drift
+tolerance.
 
-The denominators differ deliberately. The **score** averages over the sources
-that actually reported, so an unavailable signal does not drag the score toward
-zero. The **confidence** divides by the total configured weight *including*
-sources that reported nothing — so if three of four sources have no history,
-the composite says so with a low confidence instead of presenting one source's
-reading as the settled view.
+When there is nothing to do, `rhca analyze` says where the ladder stands:
+the close against the anchor, what is held, the price at which the next step
+buys or sells, and which side of the average the close is on.
 
-A source with no configured weight is inert, not implicitly equal-weighted:
-adding a signal source cannot change the blend until someone gives it a weight
-on purpose.
+## Validating it
 
-## Default weights
+`rhca backtest` compares the ladder against two baselines:
 
-| Signal | trending | ranging | unknown |
-|---|---|---|---|
-| trend | 0.50 | 0.15 | 0.25 |
-| momentum | 0.25 | 0.15 | 0.25 |
-| breakout | 0.15 | 0.20 | 0.25 |
-| mean_reversion | 0.10 | 0.50 | 0.25 |
+- **`trend +50d`**: $100 held while the close is above the average, nothing
+  at or under it. It asks whether the ladder adds anything to the average
+  alone.
+- **`hold`**: $100 bought on the first bar and held.
 
-Weights are L1-normalized on load, so they read as relative importance and do
-not have to sum to 1 by hand. Configuring one regime merges over the defaults
-rather than replacing them.
+The ladder runs in both sell modes, and as `+50d` (filter only) and
+`+50d exit` (filter and exit). `--roll-window` re-runs everything over many
+windows, each starting flat, so the result is not one lucky start date.
 
-## Sizing
+**The bar it has to clear.** This was set before any result with the exit
+was seen:
 
-Three factors, each bounded at 1.0, so the product can never exceed the
-per-trade cap:
+1. It beats `hold` on capital in every window run: 180, 365 and 730 days,
+   in both the normal and the stressed run.
+2. It does so on BTC and ETH separately, not just pooled.
+3. In the worst year, it loses no more than half of what `hold` lost.
+4. In the rolling windows, it beats `hold` in most windows, not just the
+   median one.
 
-```
-notional = max_notional_per_trade
-         × conviction            (|score| × confidence)
-         × volatility_scalar     (min(1, target_vol / realized_vol))
-         ↓ then clamped by the concentration cap and the pair's limits
-quantity = notional / reference_price, snapped DOWN to the pair's increment
-```
+**Watch the trades column.** The exit compares each *hourly* close against
+the average. When price hovers near it, the close can cross it many times.
+Each crossing that sells and later rebuys costs the ~1.9% round trip. On a
+synthetic random walk, the `+50d exit` ladders traded about six times as
+often as without the exit, and `trend +50d` traded hundreds of times a year.
+Real prices trend more than a random walk, but if the real `+50d exit` rows
+trade far more than the `+50d` rows and lose to them, the exit is churning.
+Set `trend_exit: false` in `config/strategy.yaml`, or ask for a band (exit
+only a set percentage under the average), which is a new rule to test, not a
+tweak.
 
-Snapping down matters: it can only make an order smaller, so rounding never
-pushes a position past a limit that was checked against the unrounded size.
+A backtest that passes still authorizes nothing. It does not change a limit
+or the approval gate, and it says nothing about the next trade.
 
-Volatility scaling means a fixed dollar budget does not become a much larger
-*risk* budget when the market gets twice as violent. Realized volatility is the
-stdev of recent log returns, per bar — the same time scale as the bars, so no
-annualization constant has to be guessed.
+## History
 
-## Execution plans
+The backtests that led here, all at the 1.9% round trip:
 
-Regime decides *how* to fill, which is a separate question from whether to
-trade:
-
-- **`PROMPT`** — one marketable limit at the reference price. Trend signals are
-  time-sensitive; waiting for a better entry in a trending market usually means
-  not getting filled.
-- **`STAGED`** — three limit orders laddered away from the mark, spaced by ATR.
-  In a ranging market price is expected to come back, so paying the spread for
-  immediacy is waste. An unfilled tranche is an acceptable outcome.
-
-Tranche quantities sum to exactly the approved quantity — the last one absorbs
-the rounding remainder, so a plan can never total more than risk approved. Buy
-limits round *down* to the tick and sell limits round *up*, so snapping never
-makes an order more aggressive than it was priced to be.
-
-A `market_orders_only` pair overrides all of this with a single market order,
-since limit orders would simply be rejected.
-
-## Exits
-
-A buy is graded on where the price is `exit_after_bars` bars later (six, at
-60-minute bars), so the time exit makes the real trade match its grade. Once
-a lot the agent bought has been held that long, `rhca run` and `rhca analyze`
-propose selling it: one limit order at the bid, approved by id like any other
-trade. It never goes to System 2, because it is the owner's rule, not a signal
-to second-guess.
-
-What counts as the agent's comes from the audit log: filled buys, less filled
-sells, first in first out. A coin bought outside the agent has no lot, so it is
-never proposed for sale. The sale is capped at what the account holds. If the
-holdings snapshot is older than the buy, the exit is still proposed, and
-`sell_coverage` blocks it until positions are re-ingested. Time exits are not
-scored: they close positions, they don't predict.
-
-A signal sell can close a position sooner, when the view on a held coin turns
-bearish. Signal sells are governed by `disable_sell_side` in
-`config/risk_limits.yaml`; time exits are not.
-
-## Validating a change
-
-The MCP server has no crypto historicals tool, and a cloud sandbox usually
-blocks public market-data APIs, so the evidence is built where Coinbase is
-reachable:
-
-1. `rhca backtest` replays System 1 (with the time exit), the dip/rip ladder
-   and buy-and-hold over months of Coinbase bars, under the real round trip.
-   See the runbook, "Backtesting".
-2. `rhca import-history` to load bars from a source you trust, then
-   `rhca analyze --no-record` to evaluate without writing to the audit log.
-3. The test suite, where regime classification, blending, and sizing are
-   asserted against synthetic trending, ranging, and thin-data series.
-
-A positive result from any of these is **not** authorization to loosen a risk
-limit or skip the approval gate. They validate a signal against history; they
-say nothing about a specific live trade.
+- **System 1**: hourly indicators, six-hour holds. A trade has to move more
+  than 1.9% in six hours to break even, which is about a typical six-hour
+  BTC move. Its live record matched: 0 wins in 52 decided sells, and 0% on
+  both sides for BTC and ETH.
+- **The unfiltered ladder** lost about as much per dollar as holding over the
+  year to 2026-09-27 (−43% vs −47%). It bought its steps in the first dip and
+  held them as the market kept falling.
+- **The 50-day filter** cut that year's loss to about −27%. On BTC and ETH
+  alone, `ladder (anchor) +50d` beat `hold` per dollar in the 180, 365 and
+  730-day windows. It still lost 18% on capital in the bad year, because
+  nothing sold what it had bought. The trend exit is the fix to that.
+- **SOL, SHIB and DOGE** lost under every ladder variant over two years, so
+  the watchlist is BTC and ETH.

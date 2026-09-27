@@ -27,7 +27,7 @@ def render_analysis(result: AnalysisResult, *, verbose: bool = False) -> str:
 
     executable = result.executable
     blocked = result.blocked
-    skipped = [o for o in result.outcomes if o.proposal is None]
+    skipped = [o for o in result.outcomes if not o.proposals]
 
     lines.append(
         f"{len(executable)} executable proposal(s), {len(blocked)} blocked by risk, "
@@ -71,7 +71,6 @@ def render_skip(outcome: SymbolOutcome) -> str:
 
 def render_proposal(proposal: Proposal, *, verbose: bool = False) -> list[str]:
     """Render one proposal, risk verdict first."""
-    view = proposal.view
     lines = [
         THIN,
         f"[{proposal.proposal_id}] {proposal.side.value.upper()} "
@@ -79,9 +78,7 @@ def render_proposal(proposal: Proposal, *, verbose: bool = False) -> list[str]:
         f"  risk          : {summarize(proposal.risk)}",
         f"  notional      : ${round_money(proposal.notional)} "
         f"@ reference {format_decimal(proposal.reference_price)}",
-        f"  regime        : {view.regime.value}",
-        f"  composite     : score {view.score:+.3f}, confidence {view.confidence:.3f}, "
-        f"direction {view.direction.value}",
+        f"  why           : {proposal.reason}",
         f"  plan          : {proposal.plan.style} -- {proposal.plan.rationale}",
     ]
 
@@ -91,24 +88,16 @@ def render_proposal(proposal: Proposal, *, verbose: bool = False) -> list[str]:
             f"@ {format_decimal(tranche.target_price)} ({tranche.order_type.value})"
         )
 
-    lines.append("  signals       :")
-    for signal in view.signals:
-        weight = view.weights.get(signal.name, 0.0)
-        lines.append(
-            f"    {signal.name:15} score {signal.score:+.3f}  conf {signal.confidence:.2f}  "
-            f"weight {weight:.2f}  | {signal.rationale}"
-        )
-
     lines.extend(render_risk(proposal.risk, indent="  "))
 
     if verbose:
-        lines.append("  sizing        :")
+        lines.append("  detail        :")
         for key, value in proposal.sizing_detail.items():
-            lines.append(f"    {key:24} {value}")
-        if view.notes:
-            lines.append("  notes         :")
-            for note in view.notes:
-                lines.append(f"    - {note}")
+            if isinstance(value, dict):
+                for inner, inner_value in value.items():
+                    lines.append(f"    {key}.{inner:20} {inner_value}")
+            else:
+                lines.append(f"    {key:24} {value}")
     return lines
 
 

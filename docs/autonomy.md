@@ -25,8 +25,8 @@ already runs unattended:
 
 | Component | Unattended today? | Why |
 |---|---|---|
-| Strategy, regime, sizing | Yes | Pure functions over bars |
-| The 17 risk rules | Yes | Evaluated from state, not input |
+| The trend ladder, sizing | Yes | A pure rule over bars and recorded fills |
+| The 14 risk rules | Yes | Evaluated from state, not input |
 | Kill switch | **Better than yes** | A file — engageable from cron, survives a crash |
 | Price-drift re-check | Yes | Compares a fresh quote to the proposal |
 | Remaining-quantity accounting | Yes | Derived from the audit log |
@@ -44,7 +44,7 @@ not rework the pipeline, and it must not weaken anything above.
 An `AutoPolicy` standing in for the human, requiring *all* of:
 
 - `risk.passed` is true — **with no override path**, see the invariants below
-- composite confidence and `|score|` above thresholds *stricter* than manual
+- the ladder's rule on an `auto_rules` list (say, sells before buys)
 - notional within a separate, much smaller `auto_max_notional_per_trade`
 - symbol on a separate `auto_watchlist` (a subset of the manual one)
 - today's auto-executed trade count below an auto-specific cap
@@ -67,9 +67,9 @@ there are two options, and they are not equivalent:
   its own. Not recommended, and it would invalidate most of the safety
   argument in `docs/architecture.md`.
 
-**Decision, 2026-09-21.** The owner chose the second shape. A direct client
-feeds a real-time System 1, and Claude Sonnet 5 is System 2 over the API; see
-[`roadmap.md`](./roadmap.md). It is built *read-only* first: `robinhood.py`
+**Decision, 2026-09-21.** The owner chose the second shape: a direct client
+feeds the real-time loop (now the trend ladder; see
+[`roadmap.md`](./roadmap.md)). It is built *read-only* first: `robinhood.py`
 holds credentials but has no order or cancel method. So today the blast radius
 of a bug is still a bad proposal, and `rhca run` is the shadow-mode evidence
 phase this document asks for. The order call is the Phase 2 change. It belongs
@@ -78,8 +78,8 @@ behind `ApprovalGate` with the `AutoPolicy` above, not added to the client.
 ### 3. A dead-man's switch
 
 In propose-only, a loop that silently stops is harmless — you just get no
-proposals. Unattended, a stopped loop can leave a staged plan half-filled with
-nothing supervising it. Phase 2 needs a heartbeat: if the loop misses N
+proposals. Unattended, a stopped loop can leave a position open past its trend
+exit with nothing supervising it. Phase 2 needs a heartbeat: if the loop misses N
 consecutive cycles, engage the kill switch and notify.
 
 ### 4. Automatic reconciliation
@@ -90,29 +90,19 @@ divergence between what the log says and what Robinhood holds must engage the
 kill switch rather than be reported and passed over. An agent that has lost
 track of its own position must not place the next order.
 
-## The missing evidence, and how to get it
+## The evidence, and how to get it
 
-Today there is **no measurement of whether the proposals are any good.** The
-agent records them; nothing scores them. Promoting on an unmeasured strategy
-would be automating an unknown.
+Promoting on an unmeasured strategy would be automating an unknown. For the
+trend ladder there are two measures, and both are P&L rather than a hit rate,
+because a dip buy waits days or weeks for its sell:
 
-The good news is the raw material already exists: every proposal, including
-risk-blocked ones, is in the audit log with its score, confidence, regime and
-reference price. What is missing is a report that joins them to what the price
-subsequently did.
-
-**This is the single most valuable thing to build next**, before any Phase 2
-machinery:
-
-```
-rhca shadow-report --since 2026-08-01
-  # for every logged proposal: what the policy WOULD have done,
-  # and what the price did over the following N bars
-  # -> hit rate, average move captured, worst case, by regime and by symbol
-```
-
-It is useful in Phase 1 on its own — it tells you whether to trust the
-proposals you are signing off — and it is the evidence that earns Phase 2.
+- **Before it trades:** `rhca backtest`, over whole windows and rolling ones,
+  held to the bar in [`strategy.md`](./strategy.md#validating-it). It replays
+  the same code the live loop runs.
+- **Once it trades:** the ledger's realized P&L per coin (`rhca status`), from
+  the fills recorded in the audit log. The live record should look like the
+  backtest over the same weeks; a gap between them is the thing to explain
+  before promoting.
 
 ## Promotion criteria
 
@@ -120,10 +110,9 @@ Checkable, so the decision is not a mood:
 
 - [ ] **Volume**: at least 30 days and 50 logged proposals of propose-only
       operation.
-- [ ] **Measured edge**: `shadow-report` shows the auto-eligible subset would
-      have been net positive *after fees and the real spread*, over a window
-      containing at least one drawdown. A backtest of a rising market proves
-      nothing.
+- [ ] **Measured edge**: the backtest clears its bar, and the live ledger is
+      net positive *after fees and the real spread* over a window containing
+      at least one drawdown. A rising market proves nothing.
 - [ ] **Clean books**: 30 days of reconciliation with zero unexplained
       divergences between the audit log and Robinhood.
 - [ ] **An affordable worst case**: auto caps set so that the worst plausible
@@ -132,7 +121,7 @@ Checkable, so the decision is not a mood:
 - [ ] **Machinery shipped and tested**: heartbeat, auto-reconciliation, and
       the policy's decline paths all covered by tests.
 - [ ] **A tested rollback**: flipping back to `propose_only` mid-flight, with
-      open staged orders outstanding, without orphaning them.
+      open orders outstanding, without orphaning them.
 
 ## Invariants that do not change in Phase 2
 
@@ -160,8 +149,9 @@ These hold in autonomous mode exactly as they do now:
   watchlist to deep pairs.
 - **Silent degradation.** A strategy that stops working produces no error — it
   produces worse trades. The heartbeat catches a *stopped* loop, not a
-  *deteriorating* one. Re-run `shadow-report` on a schedule and treat a
-  regime change as a reason to demote to propose-only.
+  *deteriorating* one. Re-run the backtest on a schedule, compare the
+  live ledger with it, and treat a widening gap as a reason to demote to
+  propose-only.
 - **The spread.** Robinhood's market-maker-routed crypto quotes were observed
   at ~1.87% on BTC. That is the cost of a round trip before the strategy makes
   a cent. Any measured edge has to clear it.

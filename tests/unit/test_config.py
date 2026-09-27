@@ -38,15 +38,16 @@ def test_tightening_a_limit_is_always_allowed():
     assert limits.max_notional_per_trade_usd == Decimal("25")
 
 
-def test_disable_sell_side_parses_from_yaml_and_defaults_off():
-    assert RiskLimits.from_mapping({}).disable_sell_side is False
-    assert RiskLimits.from_mapping({"disable_sell_side": True}).disable_sell_side is True
-    assert RiskLimits.from_mapping({"disable_sell_side": False}).disable_sell_side is False
-
-
 def test_floors_are_enforced_too():
-    with pytest.raises(ConfigError, match="hard floor"):
-        RiskLimits.from_mapping({"min_signal_confidence": 0.01})
+    with pytest.raises(ConfigError, match="floor"):
+        RiskLimits.from_mapping({"min_notional_per_trade_usd": 0.5})
+
+
+def test_system_1s_limits_are_gone_not_ignored():
+    """A config still naming them fails loudly rather than silently dropping them."""
+    for name in ("min_signal_confidence", "min_abs_score", "disable_sell_side"):
+        with pytest.raises(ConfigError, match="unknown risk limit"):
+            RiskLimits.from_mapping({name: 1})
 
 
 def test_non_positive_limits_are_rejected():
@@ -76,43 +77,52 @@ def test_unknown_strategy_settings_are_rejected():
         StrategyConfig.from_mapping({"rsi_perid": 14})
 
 
-def test_fast_ma_must_be_shorter_than_slow():
-    with pytest.raises(ConfigError, match="must be shorter"):
-        StrategyConfig.from_mapping({"fast_ma": 30, "slow_ma": 20})
+class TestStrategyConfig:
+    def test_the_defaults_are_the_backtested_rule(self):
+        config = StrategyConfig()
+        ladder = config.ladder()
+        assert ladder.mode == "anchor" and ladder.trend_filter and ladder.trend_exit
+        assert ladder.steps == ((5, 5), (10, 10), (20, 20))
+        assert config.trend_bars == 1200 and config.required_bars == 1200
+        assert config.history_days == 52
 
-
-def test_weights_are_normalized_to_sum_to_one():
-    config = StrategyConfig.from_mapping(
-        {
-            "weights": {
-                "trending": {"trend": 3, "momentum": 1, "breakout": 0, "mean_reversion": 0}
-            }
-        }
-    )
-    weights = config.weights_for("trending")
-    assert sum(weights.values()) == pytest.approx(1.0)
-    assert weights["trend"] == pytest.approx(0.75)
-
-
-def test_incomplete_weights_are_rejected():
-    with pytest.raises(ConfigError, match="is missing"):
-        StrategyConfig.from_mapping({"weights": {"trending": {"trend": 1}}})
-
-
-def test_negative_weights_are_rejected():
-    with pytest.raises(ConfigError, match="must not be negative"):
-        StrategyConfig.from_mapping(
-            {"weights": {"trending": {"trend": -1, "momentum": 1, "breakout": 1, "mean_reversion": 1}}}
+    def test_steps_read_as_a_string_or_a_list(self):
+        assert StrategyConfig.from_mapping({"steps": "10:10,5:5"}).steps == ((5, 5), (10, 10))
+        assert StrategyConfig.from_mapping({"steps": ["5:5", "10:20"]}).steps == (
+            (5, 5),
+            (10, 20),
         )
+        with pytest.raises(ConfigError, match="steps"):
+            StrategyConfig.from_mapping({"steps": "5:0"})
+
+    def test_no_trend_window_means_no_filter_and_no_exit(self):
+        config = StrategyConfig.from_mapping({"trend_days": 0})
+        assert not config.ladder().trend_filter and not config.ladder().trend_exit
+        assert config.required_bars == 1
+
+    def test_trend_exit_must_be_a_boolean(self):
+        assert StrategyConfig.from_mapping({"trend_exit": False}).ladder().trend_exit is False
+        with pytest.raises(ConfigError):
+            StrategyConfig.from_mapping({"trend_exit": "no"})
+
+    def test_anchor_since_reads_a_date(self, tmp_path):
+        write(tmp_path, strategy={"strategy": {"anchor_since": "2026-09-27"}})
+        since = load_config(tmp_path).strategy.anchor_since
+        assert since.isoformat() == "2026-09-27T00:00:00+00:00"
+
+    def test_negative_days_are_refused(self):
+        with pytest.raises(ConfigError):
+            StrategyConfig.from_mapping({"trend_days": -1})
 
 
 def test_shipped_config_loads_and_is_within_ceilings():
     """The configuration committed to this repo must actually be valid."""
     config = load_config("config")
     assert config.execution_mode is ExecutionMode.PROPOSE_ONLY
-    assert config.watchlist
+    assert config.watchlist == ("BTC-USD", "ETH-USD")
     config.risk.validate()
     config.strategy.validate()
+    assert config.strategy.trend_days == 50 and config.strategy.trend_exit
 
 
 def test_missing_config_directory_falls_back_to_defaults(tmp_path):
@@ -159,21 +169,18 @@ def test_allows_matches_across_symbol_spellings(tmp_path):
 
 
 class TestPipelineConfig:
-    """The pipeline's knobs bound spend and politeness, so they get ceilings too."""
+    """The pipeline's cadences have floors, so a typo cannot hammer an API."""
 
     def test_the_shipped_pipeline_file_loads(self):
         pipeline = load_config("config").pipeline
-        assert pipeline.system2_model == "claude-sonnet-5"
-        assert pipeline.rss_feeds and all(u.startswith("https://") for u in pipeline.rss_feeds)
+        assert pipeline.quote_interval_seconds == 60
 
     @pytest.mark.parametrize(
         "setting",
         [
-            {"max_escalations_per_day": 201},
             {"quote_interval_seconds": 1},
-            {"trigger_min_confidence": 1.5},
-            {"rss_feeds": ["http://insecure.example/rss"]},
-            {"market_data_mcp_url": "http://insecure.example/mcp"},
+            {"sync_interval_seconds": 5},
+            {"max_escalations_per_day": 24},  # System 2's, retired
             {"no_such_setting": 1},
         ],
     )

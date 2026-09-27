@@ -7,6 +7,7 @@ on real prices. That is what ``rhca backtest`` on real history is for.
 
 import json
 import math
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -16,6 +17,7 @@ from robinhood_crypto_agent import backtest
 from robinhood_crypto_agent.bootstrap import fetch_coinbase_history
 from robinhood_crypto_agent.cli import EXIT_ERROR, EXIT_OK, backtest_history, main
 from robinhood_crypto_agent.config import AgentConfig
+from robinhood_crypto_agent.models import Side
 from tests.conftest import make_candles
 
 T0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
@@ -51,13 +53,6 @@ class TestBook:
         book.sell(T0, Decimal("30"), Decimal("1.5"))
         assert [t.entry for t in book.closed] == [Decimal("10"), Decimal("20")]
         assert book.held == Decimal("0.5")
-
-    def test_the_time_exit_sells_only_lots_old_enough(self):
-        book = backtest.Book(Decimal("0"))
-        book.buy(T0, 0, Decimal("10"), Decimal("10"))
-        book.buy(T0, 5, Decimal("10"), Decimal("10"))
-        book.sell_lots_opened_by(T0, Decimal("10"), 3)
-        assert book.held == Decimal("1") and len(book.closed) == 1
 
 
 class TestLadder:
@@ -96,37 +91,11 @@ class TestLadder:
         with pytest.raises(ValueError):
             backtest.parse_ladder("5:-5")
 
-
-@pytest.fixture(scope="module")
-def signal_run():
-    """One signal run shared by the tests below; the views are the slow part."""
-    config = AgentConfig(watchlist=("BTC-USD",))
-    candles = make_candles(oscillating(300))
-    views = backtest.signal_views(candles, config)
-    return config, candles, views, backtest.run_signal(candles, config, views=views)
-
-
-class TestSignal:
-    def test_a_position_never_exceeds_the_concentration_cap(self, signal_run):
-        config, _, _, result = signal_run
-        cap = backtest.DEFAULT_PORTFOLIO * config.risk.max_position_pct_of_portfolio / 100
-        assert result.buys > 0
-        assert result.max_capital <= cap * Decimal("1.05")  # valued at cost, capped at the mark
-
-    def test_every_lot_is_closed_by_the_time_exit(self, signal_run):
-        config, _, _, result = signal_run
-        held_bars = [
-            (t.closed_at - t.opened_at) / timedelta(hours=1) for t in result.closed
-        ]
-        assert held_bars and max(held_bars) <= config.strategy.exit_after_bars
-
-    def test_shared_views_change_nothing(self, signal_run):
-        config, candles, views, result = signal_run
-        costlier = backtest.run_signal(
-            candles, config, views=views, round_trip_pct=Decimal("2.85")
-        )
-        assert costlier.buys == result.buys  # same decisions: views ignore the spread
-        assert costlier.total < result.total  # only the cost changed
+    def test_every_fill_is_logged(self):
+        prices = [100, 94, 89, 79, 90, 106, 111, 121, 121]
+        result = backtest.run_ladder(make_candles(prices), mode="anchor")
+        assert [f.side for f in result.fills] == [Side.BUY] * 3 + [Side.SELL] * 3
+        assert len(result.fills) == result.buys + result.sells
 
 
 def test_hold_is_the_baseline(config):
@@ -137,14 +106,26 @@ def test_hold_is_the_baseline(config):
 
 def test_the_report_leads_with_what_a_win_rate_hides(config):
     candles = make_candles(declining(120))
-    base = {"BTC-USD": backtest.run_all(candles, config)}
-    stressed = {"BTC-USD": backtest.run_all(candles, config, round_trip_pct=Decimal("2.85"))}
+    trend = backtest.above_trend(candles, 24)
+    runs = {
+        cost: {"BTC-USD": backtest.run_all(candles, round_trip_pct=cost, trend=trend, trend_days=1)}
+        for cost in (Decimal("1.9"), Decimal("2.85"))
+    }
     report = backtest.render_report(
-        base, stressed, steps=backtest.DEFAULT_LADDER, round_trip_pct=Decimal("1.9"), config=config
+        runs[Decimal("1.9")],
+        runs[Decimal("2.85")],
+        steps=backtest.DEFAULT_LADDER,
+        round_trip_pct=Decimal("1.9"),
+        config=config,
+        trend_days=1,
     )
-    assert "ladder (lot)" in report and "ladder (anchor)" in report and "hold" in report
+    assert "ladder (lot)" in report and "ladder (anchor) +1d exit" in report
+    assert "trend +1d" in report and "hold" in report
     assert "Read total P&L, worst drawdown and 'win +open' first" in report
     assert "authorizes nothing" in report
+    # The config's own window is 50 days, so this run does not hold its row.
+    assert "The agent trades 'ladder (anchor) +50d exit'" in report
+    assert "which this run does not include" in report
 
 
 class TestHistory:
@@ -221,9 +202,14 @@ def test_the_cli_replays_a_bars_file(tmp_path, capsys):
     assert {r["strategy"] for r in payload["BTC-USD"]} == {
         "ladder (lot)",
         "ladder (anchor)",
-        "signal",
+        "ladder (lot) +50d",
+        "ladder (anchor) +50d",
+        "ladder (lot) +50d exit",
+        "ladder (anchor) +50d exit",
+        "trend +50d",
         "hold",
     }
+    assert main([*args, "--symbols", "BTC-USD", "--strategies", "signal"]) == EXIT_ERROR
 
 
 class TestTrendFilter:
@@ -257,8 +243,6 @@ class TestTrendFilter:
         candles = make_candles(oscillating(120))
         results = backtest.run_all(
             candles,
-            config,
-            strategies=("ladder", "hold"),
             trend=backtest.above_trend(candles, 24),
             trend_days=1,
         )
@@ -267,8 +251,91 @@ class TestTrendFilter:
             "ladder (anchor)",
             "ladder (lot) +1d",
             "ladder (anchor) +1d",
+            "ladder (lot) +1d exit",
+            "ladder (anchor) +1d exit",
+            "trend +1d",
             "hold",
         ]
+
+    def test_without_a_trend_there_are_no_trend_rows(self, config):
+        results = backtest.run_all(make_candles(oscillating(60)))
+        assert [r.strategy for r in results] == ["ladder (lot)", "ladder (anchor)", "hold"]
+
+
+class TestTrendExit:
+    def test_a_close_under_the_average_sells_everything(self):
+        """The filter's bag: a lot bought above the average, then a slide under it."""
+        prices = [100 + i for i in range(30)] + [123, 120, 110, 100, 95, 90, 85]
+        candles = make_candles(prices)
+        trend = backtest.above_trend(candles, 24)
+        held = backtest.run_ladder(candles, mode="anchor", trend=trend)
+        exited = backtest.run_ladder(candles, mode="anchor", trend=trend, trend_exit=True)
+        assert held.buys == exited.buys >= 1
+        assert held.open_lots and held.sells == 0  # the filter alone rides it down
+        assert not exited.open_lots and exited.sells == 1
+        assert exited.total > held.total
+
+    def test_the_exit_needs_the_filter(self):
+        with pytest.raises(ValueError):
+            backtest.run_ladder(make_candles([100, 101]), mode="anchor", trend_exit=True)
+
+
+class TestTrendBaseline:
+    def test_it_holds_above_the_average_and_nothing_below(self):
+        prices = [100] * 24 + [110, 120, 130, 100, 90, 95, 120]
+        candles = make_candles(prices)
+        trend = backtest.above_trend(candles, 24)
+        result = backtest.run_trend(candles, trend=trend, name="trend +1d")
+        assert [f.side for f in result.fills] == [Side.BUY, Side.SELL, Side.BUY]
+        assert result.max_capital == backtest.HOLD_DOLLARS
+        assert result.strategy == "trend +1d"
+
+
+class TestRolling:
+    def series(self, days=40):
+        return {"BTC-USD": make_candles(oscillating(24 * days))}
+
+    def test_windows_end_on_the_last_bar_and_fit_the_history(self):
+        series = self.series()
+        starts = backtest.window_starts(
+            series, window=timedelta(days=10), step=timedelta(days=7)
+        )
+        bars = series["BTC-USD"]
+        assert starts[-1] + timedelta(days=10) == bars[-1].end
+        assert starts[0] >= bars[0].start
+        assert len(starts) == 5  # 30 days of room, a start every 7
+
+    def test_every_strategy_runs_in_every_window_from_flat(self):
+        series = self.series()
+        trends = {"BTC-USD": backtest.above_trend(series["BTC-USD"], 24)}
+        windows = backtest.run_rolling(
+            series, trends, window=timedelta(days=10), step=timedelta(days=10), trend_days=1
+        )
+        assert len(windows) == 4
+        for window in windows:
+            results = window.base["BTC-USD"]
+            assert {r.bars for r in results} == {240}
+            assert len(window.stressed["BTC-USD"]) == len(results)
+        rows = {r.strategy: r for r in backtest.rolling_rows(windows)}
+        assert rows["hold"].windows == 4 and rows["hold"].beat_hold is None
+        assert rows["ladder (anchor) +1d exit"].beat_hold is not None
+        report = backtest.render_rolling(
+            windows, window=timedelta(days=10), step=timedelta(days=10)
+        )
+        assert "4 windows" in report and "beat hold" in report
+
+    def test_a_window_that_never_trades_counts_as_zero(self):
+        empty = backtest.Result("ladder (lot)", "BTC-USD", 10, None, None, Decimal("1.9"))
+        hold = replace(empty, strategy="hold", realized=Decimal("-5"), max_capital=Decimal("100"))
+        window = backtest.RollingWindow(
+            T0, T0, {"BTC-USD": [empty, hold]}, {"BTC-USD": [empty, hold]}
+        )
+        [row, _] = backtest.rolling_rows([window])
+        assert row.returns == [0.0] and row.beat_hold == 1
+
+    def test_no_whole_window_says_so(self):
+        text = backtest.render_rolling([], window=timedelta(days=90), step=timedelta(days=30))
+        assert "no whole 90-day window" in text
 
 
 def test_the_cli_fetches_warmup_and_trades_the_same_window(config, monkeypatch, capsys, tmp_path):
@@ -286,5 +353,18 @@ def test_the_cli_fetches_warmup_and_trades_the_same_window(config, monkeypatch, 
     out = capsys.readouterr().out
     assert requested == [12]  # 10 days traded + 2 of warm-up
     assert "BTC-USD (240 bars)" in out  # only the 10-day window is traded
-    assert "ladder (anchor) +2d" in out
-    assert "buying only on a bar that closed above its 2-day average" in out
+    assert "ladder (anchor) +2d exit" in out
+    assert "buy only on a bar that closed above its 2-day average" in out
+
+
+def test_the_cli_adds_rolling_windows(config, monkeypatch, capsys, tmp_path):
+    bars = make_candles(oscillating(24 * 30), anchor=T0)
+    monkeypatch.setattr(
+        "robinhood_crypto_agent.cli.backtest_history", lambda *a, **k: bars
+    )
+    args = ["--data-dir", str(tmp_path / "data"), "backtest", "--symbols", "BTC-USD"]
+    assert main([*args, "--days", "28", "--trend-days", "2", "--roll-window", "7"]) == 0
+    out = capsys.readouterr().out
+    assert "ROLLING WINDOWS" in out
+    assert "7-day windows, a new one every 30 days: 1 window from" in out
+    assert main([*args, "--roll-window", "7", "--roll-step", "0"]) == EXIT_ERROR

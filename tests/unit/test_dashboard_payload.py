@@ -19,14 +19,11 @@ from robinhood_crypto_agent.dashboard import (
 from robinhood_crypto_agent.decisions import Decision, DecisionKind
 from robinhood_crypto_agent.errors import AgentError
 from robinhood_crypto_agent.models import (
-    CompositeView,
-    Direction,
     ExecutionPlan,
     ExecutionRecord,
     OrderType,
     Proposal,
     ProposalStatus,
-    Regime,
     RiskDecision,
     RiskFinding,
     Side,
@@ -54,7 +51,7 @@ def proposal(proposal_id="abc123def456", *, passed=True, when=None):
         reference_price=Decimal("100"),
         notional=Decimal("0.10"),
         created_at=created,
-        view=CompositeView("BTC-USD", Regime.TRENDING, 0.6, 0.8, Direction.LONG, [], {}),
+        reason="dip: closed 95.00, 5.0% under the anchor 100.00",
         plan=ExecutionPlan(
             "PROMPT", [Tranche(0, Decimal("0.001"), Decimal("100"), OrderType.LIMIT)], "now"
         ),
@@ -200,6 +197,20 @@ class TestPayloadShape:
         payload = build_payload(config, audit=audit)
         first, second = payload["proposals"][0], payload["proposals"][1]
         assert first["proposed_at"] >= second["proposed_at"]
+
+    def test_a_ladder_proposal_shows_its_reason_and_is_not_hit_rate_scored(self, config):
+        audit = AuditLog(config.audit_path)
+        store = PriceStore(config.price_store_path)
+        store.import_candles(make_candles([100] * 20, anchor=utcnow() - timedelta(hours=20)))
+        audit.record_proposal(
+            proposal(),
+            {"strategy": "ladder", "rule": "dip", "step": 0, "trigger_reason": "dip: ..."},
+        )
+        [row] = build_payload(config, audit=audit, store=store)["proposals"]
+        assert (row["strategy"], row["rule"], row["step"]) == ("ladder", "dip", 0)
+        assert row["notes"] == ["dip: closed 95.00, 5.0% under the anchor 100.00"]
+        assert row["signals"] == [] and row["score"] is None
+        assert row["outcome"] is None
 
     def test_limit_keeps_the_most_recent(self, config):
         audit = AuditLog(config.audit_path)

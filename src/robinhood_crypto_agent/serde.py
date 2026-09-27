@@ -5,6 +5,9 @@ possibly separate sessions -- so a proposal has to survive a round trip through
 JSON. It is read back from the audit log rather than from a scratch file on
 purpose: the thing a human approves is then literally the thing that was
 recorded, with no second copy that could drift from it.
+
+Proposals the retired System 1 made carry a composite ``view`` instead of a
+``reason``. They still read: the reason becomes a one-line summary of the view.
 """
 
 from __future__ import annotations
@@ -13,17 +16,13 @@ from typing import Any
 
 from .errors import AuditError
 from .models import (
-    CompositeView,
-    Direction,
     ExecutionPlan,
     OrderType,
     Proposal,
     ProposalStatus,
-    Regime,
     RiskDecision,
     RiskFinding,
     Side,
-    Signal,
     Tranche,
     parse_timestamp,
 )
@@ -33,7 +32,6 @@ from .numeric import to_decimal
 def proposal_from_dict(data: dict[str, Any]) -> Proposal:
     """Reconstruct a :class:`Proposal` from its serialized form."""
     try:
-        view = _view_from_dict(data["view"])
         plan = _plan_from_dict(data["plan"])
         risk = _risk_from_dict(data["risk"])
         return Proposal(
@@ -44,7 +42,7 @@ def proposal_from_dict(data: dict[str, Any]) -> Proposal:
             reference_price=to_decimal(data["reference_price"], field="reference_price"),
             notional=to_decimal(data["notional"], field="notional"),
             created_at=parse_timestamp(str(data["created_at"])),
-            view=view,
+            reason=_reason(data),
             plan=plan,
             risk=risk,
             status=ProposalStatus(str(data.get("status", ProposalStatus.PROPOSED.value))),
@@ -59,29 +57,19 @@ def proposal_from_dict(data: dict[str, Any]) -> Proposal:
         raise AuditError(f"could not rehydrate proposal: {exc}") from exc
 
 
-def _view_from_dict(data: dict[str, Any]) -> CompositeView:
-    return CompositeView(
-        symbol=str(data["symbol"]),
-        regime=Regime(str(data.get("regime", Regime.UNKNOWN.value))),
-        score=float(data.get("score", 0.0)),
-        confidence=float(data.get("confidence", 0.0)),
-        direction=Direction(str(data.get("direction", Direction.FLAT.value))),
-        signals=[_signal_from_dict(s) for s in data.get("signals") or []],
-        weights={str(k): float(v) for k, v in (data.get("weights") or {}).items()},
-        notes=[str(n) for n in data.get("notes") or []],
+def _reason(data: dict[str, Any]) -> str:
+    if data.get("reason") is not None:
+        return str(data["reason"])
+    view = data.get("view")
+    if not isinstance(view, dict):
+        return ""
+    notes = [str(n) for n in view.get("notes") or []]
+    summary = (
+        f"System 1: {view.get('direction', '?')}, score {float(view.get('score', 0.0)):+.3f}, "
+        f"confidence {float(view.get('confidence', 0.0)):.3f}, "
+        f"regime {view.get('regime', 'unknown')}"
     )
-
-
-def _signal_from_dict(data: dict[str, Any]) -> Signal:
-    return Signal(
-        name=str(data["name"]),
-        symbol=str(data["symbol"]),
-        score=float(data["score"]),
-        confidence=float(data["confidence"]),
-        direction=Direction(str(data["direction"])),
-        rationale=str(data.get("rationale", "")),
-        detail=dict(data.get("detail") or {}),
-    )
+    return "; ".join([summary, *notes[:1]])
 
 
 def _plan_from_dict(data: dict[str, Any]) -> ExecutionPlan:

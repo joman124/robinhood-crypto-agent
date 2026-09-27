@@ -1,61 +1,36 @@
-# Strategy parameters.
+# The trading rule: the trend ladder. See docs/strategy.md.
 #
-# Weights are per-regime and are L1-normalized on load, so they are read as
-# relative importance rather than needing to sum to 1 by hand.
+# It replaced System 1 (indicators, news, the escalation trigger and System 2)
+# at the owner's request, 2026-09-27, after the backtests in docs/strategy.md.
+# `rhca backtest` replays exactly this rule, so its "ladder (anchor) +50d exit"
+# row is the evidence for what the agent proposes.
 
 strategy:
-  # Bars are aggregated from ingested quotes -- see docs/data-constraints.md.
-  # A 60-minute bar needs roughly hourly ingestion to be well-sampled.
+  # Bars are aggregated from ingested quotes, with Coinbase bars filling in
+  # history -- see docs/data-constraints.md. The rule decides on closed bars.
   bar_interval_minutes: 60
-  min_bars: 30
 
-  fast_ma: 12
-  slow_ma: 26
-  signal_ma: 9
-  rsi_period: 14
-  atr_period: 14
-  adx_period: 14
-  adx_trend_threshold: 22
-  breakout_lookback: 20
+  # percent under the anchor : dollars. Buy $5 on a close 5% under the
+  # anchor, $10 at 10% under, $20 at 20% under -- each once per cycle. Sells
+  # mirror them over the anchor: $5 worth at +5%, $10 worth at +10%, and
+  # everything left at +20%. At most $35 is in one coin at a time.
+  steps: "5:5,10:10,20:20"
 
-  # Sizing cuts exposure when realized volatility runs above this per-bar target.
-  target_volatility_pct: 1.0
-  volatility_lookback: 20
+  # Buy only on a close above the average of the last 50 days of hourly
+  # closes. Fixed at 50 by the owner before any result was seen. 0 turns the
+  # filter off, and the trend exit with it.
+  trend_days: 50
 
-  # How long a headline can move the news signal. Its confidence decays
-  # linearly to zero across the window.
-  news_window_minutes: 120
+  # Sell everything on a close at or under that average. The filter alone
+  # only stops buying in a downtrend; the ladder then held what it had bought
+  # all the way down (-12% on BTC and -24% on ETH, on capital, over the year
+  # to 2026-09-27). This is the fix. It was added without a backtest: the
+  # "+50d exit" rows of `rhca backtest` are the evidence to read before
+  # approving the first proposal.
+  trend_exit: true
 
-  # The time exit, added by the owner 2026-09-26. Once a coin the agent bought
-  # has been held this many bars (6 x 60 min = 6 hours), `rhca run` and
-  # `rhca analyze` propose selling it, for approval by id like any trade. Six
-  # matches the horizon every proposal is scored on. 0 turns it off. It only
-  # ever sells what the agent's own recorded buys added -- never a coin bought
-  # outside it.
-  exit_after_bars: 6
-
-  # news is optional: it counts only when a recent headline exists, so its
-  # weight never dilutes the price signals on a quiet day. At 0.50 against
-  # price weights summing to 1, news alone moves a neutral price view to at
-  # most +/-0.33 -- past the 0.3 trigger (config/pipeline.yaml) only for a
-  # major headline labeled with near-full confidence. Mostly it tips a price
-  # signal that already leans the same way.
-  weights:
-    trending:
-      trend: 0.50
-      momentum: 0.25
-      breakout: 0.15
-      mean_reversion: 0.10
-      news: 0.50
-    ranging:
-      mean_reversion: 0.50
-      breakout: 0.20
-      trend: 0.15
-      momentum: 0.15
-      news: 0.50
-    unknown:
-      trend: 0.25
-      momentum: 0.25
-      breakout: 0.25
-      mean_reversion: 0.25
-      news: 0.50
+  # While the agent holds none of a coin, a dip is measured from the highest
+  # close since this date or since the agent last sold out of it, whichever is
+  # later. The day the ladder went live, so the first dip is measured from
+  # prices the agent actually watched.
+  anchor_since: 2026-09-27

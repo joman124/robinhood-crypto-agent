@@ -41,20 +41,25 @@ def workspace(tmp_path, monkeypatch):
                     "max_notional_per_trade_usd": 250,
                     "max_daily_notional_usd": 1000,
                     "max_daily_loss_usd": 200,
-                    "min_abs_score": 0.15,
+                    "min_notional_per_trade_usd": 5,
                     "max_spread_pct": 0.75,
                 }
             }
         )
     )
+    # A one-day trend average, so 80 bars are plenty.
+    (config_dir / "strategy.yaml").write_text(yaml.safe_dump({"strategy": {"trend_days": 1}}))
     data_dir = tmp_path / "data"
 
     now = datetime.now(timezone.utc)
+    hour = now.replace(minute=0, second=0, microsecond=0)
     price = 60000.0
     bars = []
+    # A steady climb, then two closes 3% lower each: 5.9% under the high,
+    # still above the one-day average -- the ladder's $5 step.
     for index in range(80):
-        start = now - timedelta(hours=80 - index)
-        close = price * 1.0035
+        start = hour - timedelta(hours=80 - index)
+        close = price * (1.01 if index < 78 else 0.97)
         bars.append(
             {
                 "start": start.isoformat(),
@@ -168,6 +173,8 @@ def test_status_on_an_empty_workspace_reports_no_history(workspace, capsys):
     assert "propose_only" in out
     assert "kill switch: released" in out
     assert "no observations recorded" in out
+    assert "ladder         : anchor mode, steps -5%/$5, -10%/$10, -20%/$20" in out
+    assert "BTC-USD      : no ladder fill yet" in out
 
 
 def test_analyze_without_quotes_fails_with_guidance(workspace, capsys):
@@ -237,6 +244,12 @@ def test_full_happy_path(workspace, capsys):
     activity = workspace.audit.daily_activity()
     assert activity.execution_count == 1
     assert activity.executed_notional > Decimal("0")
+
+    # The fill opens the ladder's cycle: status shows it, and the step is spent.
+    assert workspace.run("status") == EXIT_OK
+    assert "steps bought: 1" in capsys.readouterr().out
+    assert workspace.run("analyze") == EXIT_BLOCKED
+    assert "no order this bar" in capsys.readouterr().out
 
 
 def test_vague_approval_is_refused(workspace, capsys):

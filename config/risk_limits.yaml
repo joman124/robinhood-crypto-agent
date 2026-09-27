@@ -4,9 +4,9 @@
 
 limits:
   # Per-trade sizing. Scaled to the $500 Agentic account by the owner,
-  # 2026-09-22 (was 250 / 10). $50 matches the 10% concentration cap, and the
-  # $5 floor keeps a candidate that clears the escalation trigger (conviction
-  # of at least 0.15, so $7.50 before volatility scaling) large enough to size.
+  # 2026-09-22 (was 250 / 10). $50 matches the 10% concentration cap. The $5
+  # floor is the ladder's smallest step (config/strategy.yaml), and its largest
+  # step, $20, sits well under the cap.
   max_notional_per_trade_usd: 50       # ceiling: 2500
   min_notional_per_trade_usd: 5
 
@@ -32,16 +32,7 @@ limits:
   # How far price may move between proposing and submitting
   price_drift_tolerance_pct: 0.5       # ceiling: 1.5
 
-  # Signal quality floors
-  min_signal_confidence: 0.35
-  min_abs_score: 0.25
-
-  # Sell side. Disabled by the owner on 2026-09-25: the dashboard's accuracy
-  # breakdown showed 0 wins across every decided sell proposal (52 decided --
-  # losses and flats only, worst -4.74%), on top of a 0% win rate on both
-  # sides for BTC-USD and ETH-USD specifically.
-  # Re-enabled by the owner, 2026-09-26, with real money in the Agentic
-  # account: with sells off, nothing could ever close a position. The time exit
-  # (exit_after_bars, config/strategy.yaml) does not depend on this switch;
-  # this one governs signal-driven sells of coins the account holds.
-  disable_sell_side: false
+  # The signal floors (min_signal_confidence, min_abs_score) and the
+  # disable_sell_side switch went with System 1, 2026-09-27: the ladder has no
+  # composite score to put a floor under, and every sell it makes closes a
+  # position it opened.

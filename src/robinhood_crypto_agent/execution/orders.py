@@ -6,19 +6,14 @@ Nothing here places an order. These functions build the *arguments* for
 is what actually calls the tool, and it does so only after a human has approved
 a specific proposal by id.
 
-The execution plan is chosen by regime, because *how* to fill a trade is a
-different question from whether to take it:
+Every ladder proposal is one order, ``PROMPT``: a limit at the price the
+rule's step was priced at -- the ask for a buy, the bid for a sell -- which is
+what the backtest fills at. A ``market_orders_only`` pair gets a market order,
+since a limit would be refused.
 
-``PROMPT``
-    One order, now, at or near the reference price. A trend signal is
-    time-sensitive -- waiting for a better entry in a trending market usually
-    means not getting filled at all.
-
-``STAGED``
-    Several limit orders laddered away from the mark. In a ranging market
-    price is expected to come back, so paying the spread for immediacy is
-    wasteful. An unfilled tranche is an acceptable outcome, not a problem to
-    fix by chasing.
+Plans with several tranches (``STAGED``) are System 1's, and exist only in its
+records in the audit log. The payload builders here still handle any tranche
+of any plan, so an old proposal reads the same as ever.
 """
 
 from __future__ import annotations
@@ -36,7 +31,6 @@ from ..models import (
     OrderType,
     PairConstraints,
     Proposal,
-    Regime,
     Side,
     TimeInForce,
     Tranche,
@@ -45,13 +39,6 @@ from ..numeric import ZERO, format_decimal, quantize_to_increment
 from ..sizing import SizingResult
 
 STYLE_PROMPT = "PROMPT"
-STYLE_STAGED = "STAGED"
-
-#: Ladder offsets for a staged entry, as fractions of ATR (or of price when ATR
-#: is unavailable). The first tranche sits at the touch so some fill is likely.
-STAGED_OFFSETS: tuple[float, ...] = (0.0, 0.5, 1.0)
-#: Fallback ladder spacing as a fraction of price, when ATR is unknown.
-FALLBACK_OFFSET_PCT = 0.004
 
 
 def snap_price(price: Decimal, side: Side, constraints: PairConstraints | None) -> Decimal:
@@ -69,110 +56,26 @@ def snap_price(price: Decimal, side: Side, constraints: PairConstraints | None) 
     return quantize_to_increment(price, increment, rounding=rounding)
 
 
-def _limit_price(
-    reference: float,
-    offset: float,
-    side: Side,
-    constraints: PairConstraints,
-) -> Decimal:
-    """Price one rung of a ladder, snapped conservatively to the pair's tick."""
-    raw = Decimal(str(reference - offset if side is Side.BUY else reference + offset))
-    if raw <= ZERO:
-        raw = Decimal(str(reference))
-    return snap_price(raw, side, constraints)
-
-
-def plan_for_view(
-    sizing: SizingResult,
-    *,
-    regime: Regime,
-    constraints: PairConstraints,
-    atr: float | None = None,
+def single_order_plan(
+    sizing: SizingResult, *, constraints: PairConstraints, rationale: str
 ) -> ExecutionPlan:
-    """Choose an execution style and lay out its tranches."""
-    reference = float(sizing.reference_price)
-
+    """One order for the whole quantity, at the reference price."""
     if constraints.market_orders_only:
-        return ExecutionPlan(
-            style=STYLE_PROMPT,
-            tranches=[
-                Tranche(
-                    index=0,
-                    quantity=sizing.quantity,
-                    target_price=sizing.reference_price,
-                    order_type=OrderType.MARKET,
-                )
-            ],
-            rationale=(
-                f"{constraints.symbol} accepts market orders only, so the plan is a "
-                "single market order regardless of regime"
-            ),
+        tranche = Tranche(
+            index=0,
+            quantity=sizing.quantity,
+            target_price=sizing.reference_price,
+            order_type=OrderType.MARKET,
         )
-
-    if regime is not Regime.RANGING:
-        return ExecutionPlan(
-            style=STYLE_PROMPT,
-            tranches=[
-                Tranche(
-                    index=0,
-                    quantity=sizing.quantity,
-                    target_price=snap_price(sizing.reference_price, sizing.side, constraints),
-                    order_type=OrderType.LIMIT,
-                )
-            ],
-            rationale=(
-                f"regime is {regime.value}: fill promptly with one marketable limit at "
-                "the reference price rather than waiting for a better entry"
-            ),
+        rationale += f"; {constraints.symbol} accepts market orders only"
+    else:
+        tranche = Tranche(
+            index=0,
+            quantity=sizing.quantity,
+            target_price=snap_price(sizing.reference_price, sizing.side, constraints),
+            order_type=OrderType.LIMIT,
         )
-
-    step = atr if (atr and atr > 0) else reference * FALLBACK_OFFSET_PCT
-    tranche_count = len(STAGED_OFFSETS)
-    base_quantity = quantize_to_increment(
-        sizing.quantity / Decimal(tranche_count), constraints.quantity_increment
-    )
-
-    tranches: list[Tranche] = []
-    allocated = ZERO
-    for index, multiplier in enumerate(STAGED_OFFSETS):
-        is_last = index == tranche_count - 1
-        # The last tranche absorbs the rounding remainder so the tranches sum
-        # to exactly the approved quantity -- never more.
-        quantity = (sizing.quantity - allocated) if is_last else base_quantity
-        if quantity <= ZERO:
-            continue
-        allocated += quantity
-        tranches.append(
-            Tranche(
-                index=index,
-                quantity=quantity,
-                target_price=_limit_price(
-                    reference, step * multiplier, sizing.side, constraints
-                ),
-                order_type=OrderType.LIMIT,
-            )
-        )
-
-    if not tranches:
-        tranches = [
-            Tranche(
-                index=0,
-                quantity=sizing.quantity,
-                target_price=snap_price(sizing.reference_price, sizing.side, constraints),
-                order_type=OrderType.LIMIT,
-            )
-        ]
-
-    return ExecutionPlan(
-        style=STYLE_STAGED,
-        tranches=tranches,
-        rationale=(
-            f"regime is ranging: ladder {len(tranches)} limit order(s) "
-            f"{'below' if sizing.side is Side.BUY else 'above'} the mark, spaced "
-            f"{'by ATR' if atr else f'{FALLBACK_OFFSET_PCT:.1%} apart'}. "
-            "An unfilled tranche is expected; do not chase it."
-        ),
-    )
+    return ExecutionPlan(style=STYLE_PROMPT, tranches=[tranche], rationale=rationale)
 
 
 def build_order_request(

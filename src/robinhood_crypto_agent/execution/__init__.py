@@ -2,7 +2,7 @@
 
 from .gate import ApprovalGate, ExecutionAuthorization
 from .kill_switch import KillSwitch, KillSwitchState
-from .orders import build_order_request, build_plan_requests, plan_for_view
+from .orders import build_order_request, build_plan_requests, single_order_plan
 
 __all__ = [
     "ApprovalGate",
@@ -11,5 +11,5 @@ __all__ = [
     "KillSwitchState",
     "build_order_request",
     "build_plan_requests",
-    "plan_for_view",
+    "single_order_plan",
 ]

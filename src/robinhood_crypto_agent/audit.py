@@ -109,9 +109,9 @@ class AuditLog:
         *wanted* to do and was stopped from doing is the main evidence that the
         risk controls are doing anything.
 
-        ``extra`` carries annotations such as the escalation trigger's verdict
-        and System 2's decision. The core fields are written after it, so an
-        annotation can never overwrite what was actually proposed.
+        ``extra`` carries annotations such as the ladder's rule and step, and
+        where the proposal came from. The core fields are written after it, so
+        an annotation can never overwrite what was actually proposed.
         """
         return self.append(
             KIND_PROPOSAL,
@@ -126,9 +126,6 @@ class AuditLog:
                 "status": proposal.status.value,
                 "risk_passed": proposal.risk.passed,
                 "risk_failures": [f.rule for f in proposal.risk.blocking_failures],
-                "score": proposal.view.score,
-                "confidence": proposal.view.confidence,
-                "regime": proposal.view.regime.value,
                 "spread_pct": (
                     format_decimal(proposal.spread_pct) if proposal.spread_pct is not None else None
                 ),

@@ -19,12 +19,12 @@ There is **no crypto equivalent**. The only crypto price tool is
 ```
 
 `open_price` is the previous close — one prior data point, not a series. So
-there is no way to ask the server "what did BTC do over the last 30 hours?",
-and every indicator this agent uses needs exactly that.
+there is no way to ask the server "what did BTC do over the last 50 days?",
+and the trend ladder needs exactly that.
 
-This is not a gap that can be papered over. An RSI needs 15 bars, an ADX needs
-28, and a Donchian breakout needs its lookback window. Without history, an
-indicator-based crypto strategy has nothing to compute.
+This is not a gap that can be papered over. The ladder's trend average needs
+1,200 hourly closes (50 days), and its anchor is the highest close since the
+last cycle. Without history, it has nothing to compute.
 
 ## What this agent does instead
 
@@ -54,43 +54,33 @@ price history coverage:
   ETH-USD: no observations recorded
 ```
 
-`rhca analyze` skips such a symbol with a reason rather than producing a
-confident signal from nothing:
+`rhca analyze` skips such a symbol with a reason rather than acting on
+nothing:
 
-> `BTC-USD (0 bars): no price history. The MCP server exposes no crypto
-> historicals tool, so history is built by ingesting quotes over time.`
+> `BTC-USD (0 bars): no price history. The MCP server has no crypto
+> historicals tool: rhca bootstrap-history imports Coinbase bars, and rhca run
+> records quotes as it goes.`
 
-### 2. Bar quality depends on sampling rate
+With some bars but fewer than the average needs, it buys nothing and says so:
+`its 50-day average needs 1200 bars and 300 are on hand`.
 
-A bar built from one quote is a point, not a bar: its open, high, low and close
-are all the same number, so its true range is zero and every range-based
-indicator reads it as a market that did not move.
+### 2. Gaps in polling are filled from Coinbase
 
-Every `Candle` carries an `observations` count, and every signal's confidence
-is scaled by the average across the window:
-
-```python
-sample_quality = min(1.0, average_observations_per_bar / 4.0)
-```
-
-Bars sampled once per hour yield a confidence of 0.25 — a quarter of what the
-same price action would earn if sampled four times an hour. Thin sampling
-produces weak opinions rather than confident ones built on very little, and the
-report says so explicitly:
-
-> `bars average 1.0 observations each; confidence scaled by 0.25 for thin sampling`
-
-Roughly four ingests per bar interval is the point where sampling stops
-limiting confidence.
+A bar exists only for an hour in which a quote was recorded. The rule decides
+on each closed bar's close, and the trend average counts bars, so an hour the
+loop was not running would shorten the average's real span. `rhca run` fills
+such gaps from Coinbase's hourly candles each time it starts.
 
 ### 3. History has to be bootstrapped or accumulated
 
 Two options, and they compose:
 
-**Accumulate.** Ingest quotes on a schedule. At 15-minute polling and 60-minute
-bars, the 30 bars `min_bars` wants take about 30 hours to accrue.
+**Accumulate.** Ingest quotes on a schedule. At 60-minute bars, the 1,200 bars
+the trend average wants would take 50 days to accrue, so in practice:
 
-**Bootstrap.** Import OHLC bars from any external source you trust:
+**Bootstrap.** `rhca bootstrap-history` (and `rhca run` at startup) imports
+52 days of Coinbase's hourly candles. Or import OHLC bars from any external
+source you trust:
 
 ```bash
 rhca import-history BTC-USD -f bars.json --interval 60
@@ -113,7 +103,7 @@ what the agent observed is always distinguishable from what it was handed.
 
 Bars are anchored to the UTC day boundary, not to the first observation, so the
 same wall-clock minute always falls in the same bucket — restarting the store
-does not shift every bar boundary and silently change the signals.
+does not shift every bar boundary and silently change a decision.
 
 ## The other quote quirks this forces you to handle
 
