@@ -2,10 +2,11 @@
 
 ## Shadow run (`rhca run`)
 
-The real-time loop: Robinhood quotes and RSS news in, Jev labels the news,
-System 1 scores every symbol, strong candidates go to Claude Sonnet 5, and
-everything is logged and scored. **It cannot place an order** — the Robinhood
-client has no order method. It runs on this PC, in a terminal you leave open.
+The real-time loop: Robinhood quotes in, hourly bars built from them, and the
+trend ladder ([`strategy.md`](./strategy.md)) run on BTC and ETH at every
+closed hour. What the ladder wants is logged as a proposal for you to approve.
+**It cannot place an order** — the Robinhood client has no order method. It
+runs on this PC, in a terminal you leave open.
 
 It reads only market data from Robinhood. The balance and holdings it sizes
 and checks against are the Agentic account's, and you feed those in through
@@ -62,23 +63,8 @@ start. The banner and `rhca status` show the account the key reads, as
 `****1234`. Replacing a key means making a new pair: `rhca keygen --force`,
 then **Add key**. Delete the old key at Robinhood once it's unused.
 
-**Anthropic (System 2): Claude Sonnet 5**
-
-1. Sign in at <https://platform.claude.com> (console.anthropic.com redirects
-   there). API billing is separate from a Claude.ai subscription.
-2. Under **Billing**, add prepaid credit. System 2 is capped at 24 Sonnet calls
-   a day, which is roughly $3.60/day at worst.
-3. Under **API keys**, choose **Create key**. It is shown once. Put it in
-   `.env` as `ANTHROPIC_API_KEY=...`.
-
-**TypeSafe (Jev): news labels**
-
-1. Sign in at <https://console.typesafe.ai>. Jev is early access, so you may
-   have to request access and wait.
-2. Once in, create a key at <https://console.typesafe.ai/keys>, and put it in
-   `.env` as `TYPESAFE_API_KEY=...`.
-3. Still pending? Skip it. The run works without it: headlines are stored but
-   not scored.
+The loop needs no other key. (System 1's Anthropic and TypeSafe keys went
+with it on 2026-09-27; delete them from `.env` if they are still there.)
 
 **Check**
 
@@ -89,9 +75,9 @@ anywhere.
 ### 2. Balance and holdings
 
 The loop never reads a balance. Buying power, holdings and portfolio value are
-the Agentic account's, as you last ingested them. They drive sizing, the
-concentration limit, sell coverage, the open-position cap, and what System 2
-sees when it asks for holdings. In Claude Code, with the `RobinHood` MCP server
+the Agentic account's, as you last ingested them. They drive the
+concentration limit, sell coverage and the open-position cap, and they cap
+every sell at what the account actually holds. In Claude Code, with the `RobinHood` MCP server
 connected:
 
 1. `get_accounts`: the Agentic account is the one the agent can trade. Note its
@@ -129,10 +115,9 @@ PowerShell and cmd, and needs no activation script:
 ```
 
 `run` imports the missing Coinbase bars itself before it starts, so there is
-nothing to remember: the gap between the last imported bar and the first polled
-one would otherwise read to the indicators as a single very long bar, and that
-gap reopens every time the loop is restarted. The banner says how many bars it
-imported. `--no-bootstrap` skips it, and `rhca bootstrap-history` still runs the
+nothing to remember. The 50-day average needs 1,200 hourly bars, so the first
+start fetches 52 days of them, and each restart fills the gap since the loop
+last ran. The banner says how many bars it imported. `--no-bootstrap` skips it, and `rhca bootstrap-history` still runs the
 import on its own if you want it without starting the loop.
 
 A symbol Coinbase cannot serve is reported and skipped rather than stopping the
@@ -154,9 +139,10 @@ not yet been confirmed against a live account. The first run is that check:
       one, the pair's `status` field came back spelled differently from the
       docs. Every proposal would then be blocked by `pair_tradable`, so fix the
       parser before running on.
-- [ ] `data/news.jsonl` has headlines with `labels`, if Jev is on.
-- [ ] The log lists candidates as either `held back: ...` or
-      `escalated -> System 2 ...`.
+- [ ] `rhca status` shows `BTC-USD` and `ETH-USD` with at least 1200/1200
+      bars: enough for the 50-day average. If not, `rhca bootstrap-history`.
+- [ ] `rhca analyze --no-record` gives each coin either a proposal or a
+      `no order this bar: ...` line saying where the next step triggers.
 
 Once it has run, replace the invented REST payloads in
 `tests/unit/test_robinhood_client.py` with trimmed live captures.
@@ -164,41 +150,29 @@ Once it has run, replace the invented REST payloads in
 ### 5. Watch it
 
 ```powershell
-.venv\Scripts\rhca status                 # pipeline RUNNING/NOT RUNNING, counts, last error, keys
-.venv\Scripts\rhca audit --kind proposal  # every candidate, with trigger_reason and system2_decision
-.venv\Scripts\rhca accuracy               # hit rate, now also by status (see below)
+.venv\Scripts\rhca status                 # loop RUNNING/NOT RUNNING, the ladder per coin, keys
+.venv\Scripts\rhca audit --kind proposal  # every proposal, with its rule and trigger_reason
 ```
 
-Every System 1 candidate is logged once per idea: once per side and closed bar,
-plus once more whenever a new headline changes the view. Each is logged with a
-status:
+Each closed hour, the loop logs what the ladder wants, once per bar, for as
+long as it still wants it:
 
-| Status | Meaning |
+| Rule | What it proposes |
 |---|---|
-| `proposed` | Passed risk and the trigger, and System 2 said propose. It gets an Accept button on the dashboard. |
-| `declined_by_system2` | System 2 said pass, or could not answer. |
-| `not_escalated` | Passed risk but not the trigger (threshold, cooldown or daily cap). |
-| `rejected_by_risk` | Blocked by one of the 17 rules. |
+| `dip` | Buy a step's dollars: the close is that step's percent under the anchor, above the 50-day average. |
+| `take_profit` | Sell a step's dollars worth (everything, at the last step): the close is that far over the anchor. |
+| `trend_exit` | Sell everything the ladder holds: the close is at or under the 50-day average. |
 
-All four are scored against what the price did next. `rhca accuracy` groups
-them by status, so the run answers two questions. Does System 2 add anything
-(`proposed` vs `declined_by_system2`)? Is the trigger in the right place
-(escalated vs `not_escalated`)?
+Each proposal is either `proposed` (passed all 14 risk rules) or
+`rejected_by_risk`. A `proposed` row is still only a proposal. Acting on it is
+the normal flow below: a human names the id, `rhca approve` re-checks
+everything, and Claude Code places the order through MCP.
 
-A `proposed` row is still only a proposal. Acting on it is the normal flow
-below: a human names the id, `rhca approve` re-checks everything, and Claude
-Code places the order through MCP.
-
-### Spend
-
-- **Sonnet 5:** at most `max_escalations_per_day` (24) conversations a day. My
-  estimate is $0.05–0.15 each, so about $3.60/day at worst.
-- **Jev:** fractions of a cent per day.
-- **Crypto.com market data:** free, and needs no key. Sonnet reads it through
-  the Anthropic API's MCP connector, and each lookup's result is billed as
-  Sonnet input tokens.
-
-Tune all of these in `config/pipeline.yaml`.
+`rhca status` shows each coin's ladder: what it holds and what that cost, the
+steps bought this cycle, the anchor, and the realized P&L from the fills you
+recorded. That is the number to watch. `rhca accuracy` still reports the
+retired System 1's six-hour hit rate, for the record; the ladder's proposals
+are not scored there, because a dip buy waits days for its sell.
 
 ## First run on a funded account
 
@@ -283,18 +257,20 @@ For a `STAGED` plan, repeat `approve` / `place` / `record-execution` per
 tranche, incrementing `--tranche`. An unfilled tranche is expected — do not
 chase it.
 
-### Time exits
+### The ladder's sells
 
-Six hours after a buy fills (`exit_after_bars` × `bar_interval_minutes`), the
-loop proposes selling it, once per hourly candle until you act on it. It is a
-`proposed` sell whose trigger reads `time exit: bought …`. On the dashboard it
-has an Accept button like any other proposal. Take it through the same steps:
-`plan-order`, preview, `approve` by its id, place, `record-execution`, and
-record the fill. Then re-ingest positions and portfolio.
+A `take_profit` or `trend_exit` proposal is a `proposed` sell like any other
+on the dashboard. Take it through the same steps: `plan-order`, preview,
+`approve` by its id, place, `record-execution`, and record the fill. Then
+re-ingest positions and portfolio.
 
-The loop decides what is due from the fills you recorded, so an unrecorded buy
-never gets an exit. If it proposes an exit blocked by `sell_coverage`, the
-holdings snapshot predates the buy: re-ingest positions.
+The ladder knows what it holds only from the fills you record. An unrecorded
+buy is never sold, and an unrecorded sell leaves the ladder thinking it still
+holds the coin. A step with an order recorded but not yet filled or canceled
+is not proposed again, and while a sell order is open no other sell is
+proposed. Record the final state from `get_crypto_orders` either way. If a
+sell is blocked by `sell_coverage`, the holdings snapshot predates the buy:
+re-ingest positions.
 
 ### Close the day
 ```bash
@@ -305,44 +281,56 @@ rhca status
 
 ## Backtesting
 
-Before a strategy trades real money, replay it over history. Run this on the
-PC; the cloud sandbox cannot reach Coinbase:
+Before a rule trades real money, replay it over history. Run this on the PC;
+the cloud sandbox cannot reach Coinbase:
 
 ```powershell
-.venv\Scripts\rhca backtest --days 180                 # the whole watchlist
-.venv\Scripts\rhca backtest --symbols BTC-USD --days 365
-.venv\Scripts\rhca backtest --ladder 5:5,10:10,20:20,40:40   # extend the ladder
-.venv\Scripts\rhca backtest --days 365 --strategies ladder,hold --trend-days 50
+.venv\Scripts\rhca backtest --days 180
+.venv\Scripts\rhca backtest --days 365
+.venv\Scripts\rhca backtest --days 730 --roll-window 90       # plus rolling windows
+.venv\Scripts\rhca backtest --days 730 --roll-window 90 --roll-step 15
+.venv\Scripts\rhca backtest --ladder 5:5,10:10,20:20,40:40     # try other steps
 ```
 
-`--trend-days 50` adds a filtered copy of each ladder, marked `+50d`. It buys
-only on a bar that closed above its 50-day average; sells are unchanged. The 50
-days of warm-up are fetched before the window, so the window matches a run
-without the flag.
+The symbols, the steps and the trend window default to the watchlist and
+`config/strategy.yaml` (BTC and ETH, `5:5,10:10,20:20`, 50 days). The 50 days
+of warm-up for the average are fetched before the window, so the window
+itself is exactly `--days` long. `--trend-days 0` drops every trend row.
 
 It compares, on the same bars:
 
-- **ladder (lot)**: buy $5, $10 and $20 at 5%, 10% and 20% under the recent
-  high; each lot sells when it is up its own step from where it was bought.
-- **ladder (anchor)**: the same buys, but the sells are measured from the
-  one anchor price. $5 goes at +5%, $10 at +10%, everything left at +20%.
-- **signal**: this agent's System 1 with the six-hour exit, under the live
-  caps. It has no System 2 and no news, since neither can be replayed.
+- **ladder (lot)** and **ladder (anchor)**: buy $5, $10 and $20 at 5%, 10%
+  and 20% under the anchor. `lot` sells each lot at its own step over where it
+  was bought. `anchor` sells from the anchor: $5 worth at +5%, $10 worth at
+  +10%, everything left at +20%.
+- **… +50d**: the same, buying only on a close above the 50-day average.
+- **… +50d exit**: that, and selling everything on a close at or under it.
+  **`ladder (anchor) +50d exit` is the rule the agent trades.**
+- **trend +50d**: $100 held while the close is above the average, nothing at
+  or under it.
 - **hold**: $100 bought on the first bar.
 
 Every trade pays the 1.9% round trip, and `stressed` re-runs at 2.85%. Bars
 are cached for 6 hours under `data/backtest/`; `--refresh` refetches.
 
-**Read it in this order:** total P&L, worst drawdown, then `win +open`.
-`win closed` counts only trades that were sold. A ladder sells only into
-strength, so in a falling market it closes almost nothing and its closed win
-rate stays perfect while `open P&L` holds the loss. A strategy is worth
-trading when its total beats `hold` in both the normal and the stressed run,
-on more than one coin and more than one window. A single good number is not
-enough.
+**Read it in this order:** total P&L and `on capital`, worst drawdown, then
+`win +open`. `win closed` counts only trades that were sold. A ladder sells
+only into strength, so in a falling market it closes almost nothing and its
+closed win rate stays perfect while `open P&L` holds the loss. The ladders
+tie up at most $35 per coin and the baselines $100, so compare `on capital`.
+Check `trades` too: the exit rows can churn when the price hovers near the
+average (`strategy.md`, "Watch the trades column").
 
-A backtest authorizes nothing. It doesn't change a limit or the approval
-gate, and it says nothing about the next trade.
+`--roll-window 90` re-runs everything over 90-day windows, a new one every
+`--roll-step` days (default 30), each starting flat. It shows, per strategy:
+how many windows made money, how many beat `hold` (normal and stressed), and
+the median, worst and best return on capital. It shows whether a result
+holds across start dates or rests on one lucky one.
+
+**The bar the agent's rule has to clear** before its first live proposal is
+approved is in [`strategy.md`](./strategy.md#validating-it). A backtest
+authorizes nothing. It doesn't change a limit or the approval gate, and it
+says nothing about the next trade.
 
 ## Reconciling against Robinhood
 

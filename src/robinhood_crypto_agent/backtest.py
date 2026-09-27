@@ -3,35 +3,23 @@
 Three strategies on the same bars:
 
 ``ladder``
-    Buy the dip, sell the rip, in dollar steps. With the default steps (5:5,
-    10:10, 20:20) it buys $5 when the close is 5% under the anchor, $10 at 10%
-    under, $20 at 20% under. While nothing is held the anchor follows the price
-    up, so a dip is measured from the high since the last cycle; once a sell
-    empties the position the anchor resets to that close. "Up 5%" reads two
-    ways, so there are two modes:
+    The trend ladder the agent trades (:mod:`strategy.ladder`), driven through
+    the same :meth:`Ladder.decide` the live pipeline calls. It runs in both
+    sell modes, ``lot`` and ``anchor``, and with a trend window
+    (``--trend-days N``) twice more: ``+Nd`` buys only on a bar that closed
+    above the average of the last N days of closes, and ``+Nd exit`` also sells
+    everything on a bar that closed at or under it. The average is warmed up on
+    N days of bars fetched before the window, so the window itself is the same
+    as without the filter.
 
-    * ``lot`` -- each buy sells when the price is up its own step from where
-      *it* was bought: the $5 lot at +5%, the $10 lot at +10%, the $20 lot at
-      +20%. A step re-arms once its lot is sold. This is a grid.
-    * ``anchor`` -- both directions measure from the one anchor: sell $5 worth
-      at 5% over it, $10 at 10% over, and everything left at 20% over. Each
-      step fires once per cycle.
-
-    With a trend filter (``--trend-days N``) a ladder buys only on a bar that
-    closed above the average of the last N days of closes; below it, it buys
-    nothing. Sells are unchanged, so a coin already held still exits by the
-    ladder's own rules. The average is warmed up on N days of bars fetched
-    before the window, so the window itself is the same as without the filter.
-
-``signal``
-    This agent's own System 1: the composite view each bar, buying only what
-    would clear the risk floors *and* the escalation trigger, sized as live,
-    and closed by the time exit (``exit_after_bars``) or by a strong bearish
-    view on a held coin when sells are enabled. System 2 cannot be replayed
-    and there is no news history, so this is System 1 alone.
+``trend``
+    The plainest use of the same average: buy $100 on a close above it, sell
+    everything on a close at or under it. It trades a few times a year, so the
+    spread barely matters, and it asks whether the ladder adds anything to the
+    trend filter alone.
 
 ``hold``
-    Buy once on the first bar and hold: the baseline both have to beat.
+    Buy once on the first bar and hold: the baseline everything has to beat.
 
 Every trade crosses the spread: a buy pays the mark plus half of it, a sell
 gets the mark less half, at bar closes. The report counts what a win rate
@@ -39,38 +27,55 @@ hides. Positions still open at the end are marked to the bid and shown
 separately, and a second win rate counts them. The worst drawdown and the
 most capital tied up are reported next to the profit. A ladder can close
 nearly every trade at a profit while holding a large loss it never sold.
+
+**Rolling windows** (``--roll-window``) re-run every strategy over many
+windows of the same length, each starting flat, so one lucky or unlucky start
+date cannot carry the verdict.
 """
 
 from __future__ import annotations
 
-import math
+import statistics
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Mapping, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence
 
-from .config import AgentConfig
-from .models import Candle, CompositeView, Direction, PairConstraints, Position, Side
+from .models import Candle, Side
 from .numeric import ZERO, round_money
-from .sizing import size_position
-from .strategy import CompositeStrategy
+from .strategy.ladder import (
+    DEFAULT_STEPS,
+    MODE_ANCHOR,
+    MODE_LOT,
+    MODES,
+    HeldLot,
+    Ladder,
+    above_trend,
+    describe_steps,
+    parse_steps,
+    trend_bars,
+    trend_lookup,
+)
 from .symbols import canonical
 
+if TYPE_CHECKING:
+    from .config import AgentConfig
+
+__all__ = [
+    "DEFAULT_LADDER",
+    "above_trend",
+    "parse_ladder",
+    "trend_bars",
+]
+
 #: (percent from the anchor, dollars) -- the steps the owner proposed.
-DEFAULT_LADDER: tuple[tuple[Decimal, Decimal], ...] = (
-    (Decimal("5"), Decimal("5")),
-    (Decimal("10"), Decimal("10")),
-    (Decimal("20"), Decimal("20")),
-)
+DEFAULT_LADDER = DEFAULT_STEPS
+parse_ladder = parse_steps
 #: The round trip measured on Robinhood's market-maker quotes, 2026-09.
 DEFAULT_ROUND_TRIP_PCT = Decimal("1.9")
-LADDER_MODES = ("lot", "anchor")
-#: What the buy-and-hold baseline invests.
+LADDER_MODES = MODES
+#: What the buy-and-hold and trend baselines invest.
 HOLD_DOLLARS = Decimal("100")
-#: The account the signal strategy is sized against.
-DEFAULT_PORTFOLIO = Decimal("500")
-#: Bars of history the composite view reads, as ``rhca analyze`` does.
-LOOKBACK_BARS = 200
 
 
 @dataclass
@@ -82,6 +87,16 @@ class Lot:
     #: The mark it was bought at, and the ladder step that bought it.
     mark: Decimal = ZERO
     step: int = -1
+
+
+@dataclass(frozen=True)
+class Fill:
+    """One order, as filled: when, which way, how much, at what price."""
+
+    at: datetime
+    side: Side
+    quantity: Decimal
+    price: Decimal
 
 
 @dataclass(frozen=True)
@@ -114,6 +129,8 @@ class Book:
         self.peak_equity = ZERO
         self.max_drawdown = ZERO
         self.equity_curve: list[tuple[datetime, Decimal]] = []
+        self.fills: list[Fill] = []
+        self._realized = ZERO
 
     @property
     def held(self) -> Decimal:
@@ -125,7 +142,14 @@ class Book:
 
     @property
     def realized(self) -> Decimal:
-        return sum((trade.pnl for trade in self.closed), ZERO)
+        return self._realized
+
+    def _close(self, trade: ClosedTrade) -> None:
+        self.closed.append(trade)
+        self._realized += trade.pnl
+
+    def bid(self, mark: Decimal) -> Decimal:
+        return mark * (Decimal(1) - self.half)
 
     def buy(
         self, at: datetime, index: int, mark: Decimal, dollars: Decimal, *, step: int = -1
@@ -134,20 +158,22 @@ class Book:
         if dollars <= ZERO or price <= ZERO:
             return
         self.lots.append(Lot(dollars / price, price, at, index, mark, step))
+        self.fills.append(Fill(at, Side.BUY, dollars / price, price))
         self.buys += 1
         self.max_capital = max(self.max_capital, self.open_cost)
 
     def sell(self, at: datetime, mark: Decimal, quantity: Decimal) -> None:
         """Close ``quantity`` against the oldest lots, at the bid."""
-        price = mark * (Decimal(1) - self.half)
+        price = self.bid(mark)
         remaining = min(quantity, self.held)
         if remaining <= ZERO:
             return
         self.sells += 1
+        self.fills.append(Fill(at, Side.SELL, remaining, price))
         while remaining > ZERO and self.lots:
             lot = self.lots[0]
             take = min(lot.quantity, remaining)
-            self.closed.append(ClosedTrade(lot.opened_at, at, take, lot.price, price))
+            self._close(ClosedTrade(lot.opened_at, at, take, lot.price, price))
             remaining -= take
             if take >= lot.quantity:
                 self.lots.pop(0)
@@ -159,22 +185,16 @@ class Book:
         if lot not in self.lots:
             return
         self.sells += 1
-        price = mark * (Decimal(1) - self.half)
-        self.closed.append(ClosedTrade(lot.opened_at, at, lot.quantity, lot.price, price))
+        self.fills.append(Fill(at, Side.SELL, lot.quantity, self.bid(mark)))
+        self._close(ClosedTrade(lot.opened_at, at, lot.quantity, lot.price, self.bid(mark)))
         self.lots.remove(lot)
 
-    def sell_lots_opened_by(self, at: datetime, mark: Decimal, index: int) -> None:
-        """The time exit: sell every lot opened at or before bar ``index``."""
-        due = sum((lot.quantity for lot in self.lots if lot.opened_index <= index), ZERO)
-        if due > ZERO:
-            self.sell(at, mark, due)
-
     def unrealized(self, mark: Decimal) -> Decimal:
-        bid = mark * (Decimal(1) - self.half)
+        bid = self.bid(mark)
         return sum((lot.quantity * (bid - lot.price) for lot in self.lots), ZERO)
 
     def mark(self, at: datetime, mark: Decimal) -> None:
-        equity = self.realized + self.unrealized(mark)
+        equity = self._realized + self.unrealized(mark)
         self.equity_curve.append((at, equity))
         self.peak_equity = max(self.peak_equity, equity)
         self.max_drawdown = max(self.max_drawdown, self.peak_equity - equity)
@@ -200,6 +220,7 @@ class Result:
     max_drawdown: Decimal = ZERO
     final_bid: Decimal = ZERO
     equity_curve: list[tuple[datetime, Decimal]] = field(default_factory=list)
+    fills: list[Fill] = field(default_factory=list)
 
     @property
     def total(self) -> Decimal:
@@ -256,55 +277,50 @@ def _finish(strategy: str, candles: Sequence[Candle], book: Book, round_trip: De
         unrealized=book.unrealized(last),
         max_capital=book.max_capital,
         max_drawdown=book.max_drawdown,
-        final_bid=last * (Decimal(1) - book.half),
+        final_bid=book.bid(last),
         equity_curve=list(book.equity_curve),
+        fills=list(book.fills),
     )
 
 
-def above_trend(candles: Sequence[Candle], bars: int) -> dict[datetime, bool]:
-    """Per bar start: did it close above the average of the last ``bars`` closes?
-
-    The average includes the bar itself, and a bar with fewer than ``bars``
-    closes behind it has no entry -- the filter reads that as "not above", so
-    nothing is bought before the average exists.
-    """
-    if bars <= 0:
-        raise ValueError("the trend average needs at least one bar")
-    out: dict[datetime, bool] = {}
-    closes: list[Decimal] = []
-    total = ZERO
-    for candle in candles:
-        closes.append(candle.close)
-        total += candle.close
-        if len(closes) > bars:
-            total -= closes[-bars - 1]
-        if len(closes) >= bars:
-            out[candle.start] = candle.close > total / Decimal(bars)
-    return out
+def ladder_name(mode: str, trend_days: int = 0, trend_exit: bool = False) -> str:
+    """``ladder (anchor)``, ``ladder (anchor) +50d``, ``ladder (anchor) +50d exit``."""
+    name = f"ladder ({mode})"
+    if trend_days:
+        name += f" +{trend_days}d"
+        if trend_exit:
+            name += " exit"
+    return name
 
 
-def trend_bars(days: int, bar_interval_minutes: int) -> int:
-    """How many bars make ``days`` of history."""
-    return max(1, days * 24 * 60 // bar_interval_minutes)
+def live_strategy_name(config: "AgentConfig") -> str:
+    """The row that replays what the agent trades, per config/strategy.yaml."""
+    settings = config.strategy
+    return ladder_name(MODE_ANCHOR, settings.trend_days, settings.ladder().trend_exit)
 
 
 def run_ladder(
     candles: Sequence[Candle],
     *,
     steps: Sequence[tuple[Decimal, Decimal]] = DEFAULT_LADDER,
-    mode: str = "lot",
+    mode: str = MODE_LOT,
     round_trip_pct: Decimal = DEFAULT_ROUND_TRIP_PCT,
     trend: Mapping[datetime, bool] | None = None,
+    trend_exit: bool = False,
 ) -> Result:
-    """The dip/rip ladder; see the module docstring for the exact rules.
+    """The ladder, one :meth:`Ladder.decide` per bar, filled at the close.
 
-    ``trend`` (from :func:`above_trend`) blocks every buy on a bar that did not
-    close above its average. ``None`` is no filter.
+    ``trend`` (from :func:`above_trend`) turns the filter on: no buy on a bar
+    that did not close above its average. ``trend_exit`` also sells
+    everything on a bar that closed at or under it. ``None`` is no filter.
     """
-    if mode not in LADDER_MODES:
-        raise ValueError(f"ladder mode must be one of {LADDER_MODES}, got {mode!r}")
+    rule = Ladder(
+        steps=tuple(sorted(steps)),
+        mode=mode,
+        trend_filter=trend is not None,
+        trend_exit=trend_exit,
+    )
     book = Book(round_trip_pct / Decimal(2))
-    steps = sorted(steps)
     anchor: Decimal | None = None
     bought: set[int] = set()
     sold: set[int] = set()
@@ -318,128 +334,62 @@ def run_ladder(
             anchor = close if anchor is None else max(anchor, close)
         assert anchor is not None
 
-        if mode == "lot":
-            for lot in list(book.lots):
-                pct = steps[lot.step][0]
-                if close >= lot.mark * (Decimal(1) + pct / Decimal(100)):
-                    book.sell_lot(candle.end, close, lot)
-                    bought.discard(lot.step)  # the step re-arms
-        else:
-            for level, (pct, dollars) in enumerate(steps):
-                if level in sold or book.held <= ZERO:
-                    continue
-                if close >= anchor * (Decimal(1) + pct / Decimal(100)):
-                    bid = close * (Decimal(1) - book.half)
-                    last_step = level == len(steps) - 1
-                    book.sell(candle.end, close, book.held if last_step else dollars / bid)
-                    sold.add(level)
-
-        buying = trend is None or trend.get(candle.start, False)
-        for level, (pct, dollars) in enumerate(steps):
-            if level in bought or not buying:
-                continue
-            if close <= anchor * (Decimal(1) - pct / Decimal(100)):
-                book.buy(candle.end, index, close, dollars, step=level)
-                bought.add(level)
+        lots = (
+            [HeldLot(lot.step, lot.mark, key=lot) for lot in book.lots]
+            if mode == MODE_LOT
+            else ()
+        )
+        orders = rule.decide(
+            anchor=anchor,
+            close=close,
+            above=trend_lookup(trend, candle),
+            held=book.held,
+            bought=bought,
+            sold=sold,
+            lots=lots,
+        )
+        for order in orders:
+            if order.side is Side.BUY:
+                assert order.dollars is not None and order.step is not None
+                book.buy(candle.end, index, close, order.dollars, step=order.step)
+                bought.add(order.step)
                 in_cycle = True
+            elif isinstance(order.lot, Lot):
+                book.sell_lot(candle.end, close, order.lot)
+                bought.discard(order.lot.step)  # the step re-arms
+            elif book.held > ZERO:
+                quantity = (
+                    book.held
+                    if order.everything or order.dollars is None
+                    else order.dollars / book.bid(close)
+                )
+                book.sell(candle.end, close, quantity)
+                if order.step is not None:
+                    sold.add(order.step)
 
         book.mark(candle.end, close)
 
-    return _finish(f"ladder ({mode})", candles, book, round_trip_pct)
+    return _finish(ladder_name(mode), candles, book, round_trip_pct)
 
 
-def signal_views(candles: Sequence[Candle], config: AgentConfig) -> list[CompositeView | None]:
-    """The composite view at every bar close, or ``None`` before ``min_bars``.
-
-    Separate from the trading loop because it is most of the cost and does not
-    depend on the spread: the base and stressed runs share one set.
-    """
-    strategy = CompositeStrategy(config.strategy)
-    symbol = canonical(candles[0].symbol) if candles else ""
-    views: list[CompositeView | None] = []
-    for index in range(len(candles)):
-        if index + 1 < config.strategy.min_bars:
-            views.append(None)
-            continue
-        window = candles[max(0, index + 1 - LOOKBACK_BARS) : index + 1]
-        views.append(strategy.evaluate(symbol, window))
-    return views
-
-
-def run_signal(
+def run_trend(
     candles: Sequence[Candle],
-    config: AgentConfig,
     *,
+    trend: Mapping[datetime, bool],
+    dollars: Decimal = HOLD_DOLLARS,
     round_trip_pct: Decimal = DEFAULT_ROUND_TRIP_PCT,
-    portfolio_value: Decimal = DEFAULT_PORTFOLIO,
-    views: Sequence[CompositeView | None] | None = None,
+    name: str = "trend",
 ) -> Result:
-    """System 1 as ``rhca run`` trades it, less System 2 and news.
-
-    Buys must clear the risk floors, the escalation trigger, the cooldown, the
-    concentration cap on ``portfolio_value`` and the daily notional cap.
-    """
+    """Hold ``dollars`` while the close is above its average, nothing below."""
     book = Book(round_trip_pct / Decimal(2))
-    if views is None:
-        views = signal_views(candles, config)
-    limits, pipeline, settings = config.risk, config.pipeline, config.strategy
-    min_score = max(limits.min_abs_score, pipeline.trigger_min_abs_score)
-    min_confidence = max(limits.min_signal_confidence, pipeline.trigger_min_confidence)
-    cooldown = max(1, math.ceil(pipeline.escalation_cooldown_minutes / settings.bar_interval_minutes))
-    symbol = canonical(candles[0].symbol) if candles else ""
-    constraints = PairConstraints.permissive(symbol)
-    position_cap = portfolio_value * limits.max_position_pct_of_portfolio / Decimal(100)
-    last_buy: int | None = None
-    traded: dict[object, Decimal] = {}  # notional per UTC day, for the daily cap
-
     for index, candle in enumerate(candles):
-        close = candle.close
-        if settings.exit_after_bars > 0:
-            book.sell_lots_opened_by(candle.end, close, index - settings.exit_after_bars)
-
-        view = views[index]
-        if view is not None:
-            window = candles[max(0, index + 1 - LOOKBACK_BARS) : index + 1]
-            strong = (
-                Decimal(str(abs(view.score))) >= min_score
-                and Decimal(str(view.confidence)) >= min_confidence
-            )
-            if strong and view.direction is Direction.LONG and (
-                last_buy is None or index - last_buy >= cooldown
-            ):
-                held = book.held
-                sizing = size_position(
-                    view,
-                    reference_price=close * (Decimal(1) + book.half),
-                    candles=window,
-                    limits=limits,
-                    strategy=settings,
-                    constraints=constraints,
-                    portfolio_value=portfolio_value,
-                    position=Position(symbol, held) if held > ZERO else None,
-                )
-                day = candle.end.date()
-                # The concentration and daily-notional rules, as the risk
-                # engine applies them live.
-                within_caps = (
-                    held * close + sizing.notional <= position_cap
-                    and traded.get(day, ZERO) + sizing.notional <= limits.max_daily_notional_usd
-                )
-                if sizing.viable and sizing.side is Side.BUY and within_caps:
-                    book.buy(candle.end, index, close, sizing.notional)
-                    traded[day] = traded.get(day, ZERO) + sizing.notional
-                    last_buy = index
-            elif (
-                strong
-                and view.direction is Direction.SHORT
-                and book.held > ZERO
-                and not limits.disable_sell_side
-            ):
-                book.sell(candle.end, close, book.held)
-
-        book.mark(candle.end, close)
-
-    return _finish("signal", candles, book, round_trip_pct)
+        above = trend.get(candle.start)
+        if book.held > ZERO and above is False:
+            book.sell(candle.end, candle.close, book.held)
+        elif book.held <= ZERO and above is True:
+            book.buy(candle.end, index, candle.close, dollars)
+        book.mark(candle.end, candle.close)
+    return _finish(name, candles, book, round_trip_pct)
 
 
 def run_hold(
@@ -454,20 +404,6 @@ def run_hold(
             book.buy(candle.end, index, candle.close, dollars)
         book.mark(candle.end, candle.close)
     return _finish("hold", candles, book, round_trip_pct)
-
-
-def parse_ladder(text: str) -> tuple[tuple[Decimal, Decimal], ...]:
-    """``"5:5,10:10,20:20"`` -> ((5, 5), (10, 10), (20, 20))."""
-    steps = []
-    for part in text.split(","):
-        pct, _, dollars = part.strip().partition(":")
-        step = (Decimal(pct), Decimal(dollars))
-        if step[0] <= ZERO or step[1] <= ZERO:
-            raise ValueError(f"ladder step {part!r} must be positive percent:dollars")
-        steps.append(step)
-    if not steps:
-        raise ValueError("the ladder needs at least one step")
-    return tuple(sorted(steps))
 
 
 def combined_drawdown(results: Sequence[Result]) -> Decimal:
@@ -503,24 +439,26 @@ def rate(value: float | None) -> str:
     return "-" if value is None else f"{value * 100:.0f}%"
 
 
-STRATEGY_NAMES = ("ladder", "signal", "hold")
+STRATEGY_NAMES = ("ladder", "trend", "hold")
 #: The stress run charges this much more spread than the base run.
 STRESS_FACTOR = Decimal("1.5")
 
 
 def run_all(
     candles: Sequence[Candle],
-    config: AgentConfig,
     *,
     strategies: Sequence[str] = STRATEGY_NAMES,
     steps: Sequence[tuple[Decimal, Decimal]] = DEFAULT_LADDER,
     round_trip_pct: Decimal = DEFAULT_ROUND_TRIP_PCT,
-    views: Sequence[CompositeView | None] | None = None,
     trend: Mapping[datetime, bool] | None = None,
     trend_days: int = 0,
 ) -> list[Result]:
-    """Every requested strategy on one symbol's bars; the ladder in both modes,
-    and again under the trend filter when ``trend`` is given."""
+    """Every requested strategy on one symbol's bars.
+
+    The ladder runs in both modes; with ``trend`` it runs again with the
+    filter, and again with the filter and the exit. ``trend`` needs a trend
+    map, so without one it is skipped.
+    """
     results: list[Result] = []
     if "ladder" in strategies:
         for mode in LADDER_MODES:
@@ -528,13 +466,25 @@ def run_all(
                 run_ladder(candles, steps=steps, mode=mode, round_trip_pct=round_trip_pct)
             )
         if trend is not None:
-            for mode in LADDER_MODES:
-                filtered = run_ladder(
-                    candles, steps=steps, mode=mode, round_trip_pct=round_trip_pct, trend=trend
-                )
-                results.append(replace(filtered, strategy=f"{filtered.strategy} +{trend_days}d"))
-    if "signal" in strategies:
-        results.append(run_signal(candles, config, round_trip_pct=round_trip_pct, views=views))
+            for trend_exit in (False, True):
+                for mode in LADDER_MODES:
+                    filtered = run_ladder(
+                        candles,
+                        steps=steps,
+                        mode=mode,
+                        round_trip_pct=round_trip_pct,
+                        trend=trend,
+                        trend_exit=trend_exit,
+                    )
+                    results.append(
+                        replace(filtered, strategy=ladder_name(mode, trend_days, trend_exit))
+                    )
+    if "trend" in strategies and trend is not None:
+        results.append(
+            run_trend(
+                candles, trend=trend, round_trip_pct=round_trip_pct, name=f"trend +{trend_days}d"
+            )
+        )
     if "hold" in strategies:
         results.append(run_hold(candles, round_trip_pct=round_trip_pct))
     return results
@@ -592,8 +542,10 @@ def pool(results: Sequence[Result]) -> list[Pooled]:
     return [Pooled(name, [r for r in results if r.strategy == name]) for name in names]
 
 
+NAME_WIDTH = 28
+
 _HEADER = (
-    f"  {'strategy':<22}{'trades':>7}{'win closed':>12}{'win +open':>11}"
+    f"  {'strategy':<{NAME_WIDTH}}{'trades':>7}{'win closed':>12}{'win +open':>11}"
     f"{'total P&L':>11}{'on capital':>12}{'worst dd':>10}{'tied up':>9}"
     f"{'open P&L':>10}{'stressed':>11}"
 )
@@ -606,11 +558,40 @@ def _trades(row: Result | Pooled) -> int:
 def _row(name: str, row: Result | Pooled, stressed: Result | Pooled) -> str:
     on_capital = row.total / row.max_capital * Decimal(100) if row.max_capital > ZERO else None
     return (
-        f"  {name:<22}{_trades(row):>7}"
+        f"  {name:<{NAME_WIDTH}}{_trades(row):>7}"
         f"{rate(row.closed_win_rate):>12}{rate(row.win_rate_with_open):>11}"
         f"{money(row.total):>11}{pct(on_capital):>12}{money(row.max_drawdown):>10}"
         f"{money(row.max_capital):>9}{money(row.unrealized):>10}{money(stressed.total):>11}"
     )
+
+
+def _legend(
+    steps: Sequence[tuple[Decimal, Decimal]], trend_days: int, config: "AgentConfig", names: set
+) -> list[str]:
+    total = sum((dollars for _, dollars in steps), ZERO)
+    lines = [
+        f"Ladder steps {describe_steps(steps)}: at most {money(total)} in a coin at once.",
+    ]
+    if trend_days:
+        lines += [
+            f"'+{trend_days}d' rows buy only on a bar that closed above its {trend_days}-day "
+            "average; sells are unchanged.",
+            f"'+{trend_days}d exit' rows also sell everything on a bar that closed at or under it.",
+            f"'trend +{trend_days}d' holds {money(HOLD_DOLLARS)} while the close is above that "
+            "average, and nothing at or under it.",
+        ]
+    lines.append(
+        f"'hold' buys {money(HOLD_DOLLARS)} on the first bar. Sizes differ: compare 'on capital'."
+    )
+    live = live_strategy_name(config)
+    if live in names:
+        lines.append(f"The agent trades '{live}' (config/strategy.yaml).")
+    else:
+        lines.append(
+            f"The agent trades '{live}' (config/strategy.yaml), which this run does not "
+            "include: its --trend-days differs."
+        )
+    return lines
 
 
 def render_report(
@@ -619,34 +600,24 @@ def render_report(
     *,
     steps: Sequence[tuple[Decimal, Decimal]],
     round_trip_pct: Decimal,
-    config: AgentConfig,
+    config: "AgentConfig",
     trend_days: int = 0,
 ) -> str:
     """The comparison, per symbol and pooled, with what to read first."""
     everything = [r for results in base.values() for r in results]
     starts = [r.start for r in everything if r.start]
     ends = [r.end for r in everything if r.end]
-    ladder = ", ".join(f"-{p}%/${d}" for p, d in steps)
     lines = [
-        "=" * 100,
+        "=" * 110,
         "BACKTEST",
-        "=" * 100,
+        "=" * 110,
         f"{min(starts):%Y-%m-%d} to {max(ends):%Y-%m-%d}, "
         f"{config.strategy.bar_interval_minutes}-minute bars, trading at bar closes."
         if starts and ends
         else "no bars",
         f"Every trade crosses a {round_trip_pct}% round trip, half on each side; "
         f"'stressed' re-runs at {round_trip_pct * STRESS_FACTOR}%.",
-        f"Ladder steps {ladder}. Signal = System 1 with the "
-        f"{config.strategy.exit_after_bars}-bar exit; no System 2, no news.",
-        *(
-            [
-                f"'+{trend_days}d' rows: the same ladders, buying only on a bar that closed "
-                f"above its {trend_days}-day average. Sells are unchanged."
-            ]
-            if trend_days
-            else []
-        ),
+        *_legend(steps, trend_days, config, {r.strategy for r in everything}),
         "",
         "Read total P&L, worst drawdown and 'win +open' first. 'win closed' ignores",
         "positions never sold, which is where a ladder keeps its losses.",
@@ -667,6 +638,206 @@ def render_report(
         "at once; 'on capital' = total P&L over that. A backtest is evidence about",
         "a rule on past prices, not about the next trade: it authorizes nothing.",
     ]
+    return "\n".join(lines)
+
+
+# -- rolling windows --------------------------------------------------------
+
+
+def window_starts(
+    series: Mapping[str, Sequence[Candle]], *, window: timedelta, step: timedelta
+) -> list[datetime]:
+    """Window starts, the last window ending on the last bar every symbol has.
+
+    Only whole windows count: one that would start before a symbol's first bar
+    is dropped, so every window compares the same span for every symbol.
+    """
+    if window <= timedelta(0) or step <= timedelta(0):
+        raise ValueError("the window and the step must be positive")
+    firsts = [bars[0].start for bars in series.values() if bars]
+    lasts = [bars[-1].end for bars in series.values() if bars]
+    if not firsts:
+        return []
+    first, end = max(firsts), min(lasts)
+    starts = []
+    start = end - window
+    while start >= first:
+        starts.append(start)
+        start -= step
+    return sorted(starts)
+
+
+@dataclass
+class RollingWindow:
+    start: datetime
+    end: datetime
+    base: dict[str, list[Result]]
+    stressed: dict[str, list[Result]]
+
+
+def run_rolling(
+    series: Mapping[str, Sequence[Candle]],
+    trends: Mapping[str, Mapping[datetime, bool] | None],
+    *,
+    window: timedelta,
+    step: timedelta,
+    strategies: Sequence[str] = STRATEGY_NAMES,
+    steps: Sequence[tuple[Decimal, Decimal]] = DEFAULT_LADDER,
+    round_trip_pct: Decimal = DEFAULT_ROUND_TRIP_PCT,
+    trend_days: int = 0,
+) -> list[RollingWindow]:
+    """Every strategy over every window, each window starting flat.
+
+    The trend maps cover the whole history, so a window's average is already
+    warm on its first bar.
+    """
+    windows = []
+    for start in window_starts(series, window=window, step=step):
+        end = start + window
+        base: dict[str, list[Result]] = {}
+        stressed: dict[str, list[Result]] = {}
+        for symbol, bars in series.items():
+            candles = [c for c in bars if start <= c.start and c.end <= end]
+            if not candles:
+                continue
+            for runs, cost in ((base, round_trip_pct), (stressed, round_trip_pct * STRESS_FACTOR)):
+                runs[symbol] = run_all(
+                    candles,
+                    strategies=strategies,
+                    steps=steps,
+                    round_trip_pct=cost,
+                    trend=trends.get(symbol),
+                    trend_days=trend_days,
+                )
+        windows.append(RollingWindow(start, end, base, stressed))
+    return windows
+
+
+def _on_capital(total: Decimal, capital: Decimal) -> float:
+    """Return on capital in percent; a window that never traded made 0%."""
+    return float(total / capital * Decimal(100)) if capital > ZERO else 0.0
+
+
+@dataclass
+class RollingRow:
+    """One strategy across every window."""
+
+    strategy: str
+    returns: list[float] = field(default_factory=list)
+    hold_returns: list[float] = field(default_factory=list)
+    stressed_returns: list[float] = field(default_factory=list)
+    stressed_hold_returns: list[float] = field(default_factory=list)
+
+    @property
+    def windows(self) -> int:
+        return len(self.returns)
+
+    @property
+    def positive(self) -> int:
+        return sum(1 for r in self.returns if r > 0)
+
+    @property
+    def beat_hold(self) -> int | None:
+        if not self.hold_returns:
+            return None
+        return sum(1 for r, h in zip(self.returns, self.hold_returns, strict=True) if r > h)
+
+    @property
+    def beat_hold_stressed(self) -> int | None:
+        if not self.stressed_hold_returns:
+            return None
+        return sum(
+            1
+            for r, h in zip(self.stressed_returns, self.stressed_hold_returns, strict=True)
+            if r > h
+        )
+
+
+def rolling_rows(
+    windows: Sequence[RollingWindow], *, symbol: str | None = None
+) -> list[RollingRow]:
+    """Per strategy: its return on capital in each window, beside hold's.
+
+    ``symbol`` picks one symbol; ``None`` pools every symbol per window, as
+    total P&L over total capital tied up.
+    """
+    rows: dict[str, RollingRow] = {}
+
+    def returns(results: Mapping[str, list[Result]]) -> dict[str, float]:
+        picked = [
+            r
+            for sym, rs in results.items()
+            if symbol is None or sym == symbol
+            for r in rs
+        ]
+        out = {}
+        for pooled in pool(picked):
+            out[pooled.strategy] = _on_capital(pooled.total, pooled.max_capital)
+        return out
+
+    for window in windows:
+        base = returns(window.base)
+        stressed = returns(window.stressed)
+        if not base:
+            continue
+        hold, hold_stressed = base.get("hold"), stressed.get("hold")
+        for name, value in base.items():
+            row = rows.setdefault(name, RollingRow(name))
+            row.returns.append(value)
+            row.stressed_returns.append(stressed[name])
+            if name != "hold" and hold is not None and hold_stressed is not None:
+                row.hold_returns.append(hold)
+                row.stressed_hold_returns.append(hold_stressed)
+    return list(rows.values())
+
+
+_ROLLING_HEADER = (
+    f"  {'strategy':<{NAME_WIDTH}}{'windows':>8}{'positive':>10}{'beat hold':>11}"
+    f"{'stressed':>10}{'median':>9}{'worst':>9}{'best':>9}"
+)
+
+
+def _count(value: int | None, total: int) -> str:
+    return "-" if value is None else f"{value}/{total}"
+
+
+def _rolling_line(row: RollingRow) -> str:
+    return (
+        f"  {row.strategy:<{NAME_WIDTH}}{row.windows:>8}"
+        f"{_count(row.positive, row.windows):>10}"
+        f"{_count(row.beat_hold, row.windows):>11}"
+        f"{_count(row.beat_hold_stressed, row.windows):>10}"
+        f"{pct(statistics.median(row.returns)):>9}"
+        f"{pct(min(row.returns)):>9}{pct(max(row.returns)):>9}"
+    )
+
+
+def render_rolling(
+    windows: Sequence[RollingWindow], *, window: timedelta, step: timedelta
+) -> str:
+    if not windows:
+        return (
+            f"ROLLING WINDOWS: no whole {window.days}-day window fits in the history. "
+            "Fetch more (--days) or shorten --roll-window."
+        )
+    symbols = list(dict.fromkeys(s for w in windows for s in w.base))
+    lines = [
+        "=" * 110,
+        "ROLLING WINDOWS",
+        "=" * 110,
+        f"{window.days}-day windows, a new one every {step.days} days: {len(windows)} "
+        f"window{'' if len(windows) == 1 else 's'} "
+        f"from {windows[0].start:%Y-%m-%d} to {windows[-1].end:%Y-%m-%d}.",
+        "Each window starts flat. Every figure is return on capital ('on capital' above);",
+        "a window with no trade counts as 0%. 'beat hold' compares with hold in the same",
+        "window, and 'stressed' does the same at the stressed round trip.",
+    ]
+    for symbol in symbols:
+        lines += ["", symbol, _ROLLING_HEADER]
+        lines += [_rolling_line(row) for row in rolling_rows(windows, symbol=symbol)]
+    if len(symbols) > 1:
+        lines += ["", f"ALL {len(symbols)} SYMBOLS (pooled per window)", _ROLLING_HEADER]
+        lines += [_rolling_line(row) for row in rolling_rows(windows)]
     return "\n".join(lines)
 
 

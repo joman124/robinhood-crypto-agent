@@ -1,160 +1,59 @@
-"""Sizing: every factor may only shrink the position."""
+"""Sizing: the ladder's dollars become a quantity the pair accepts, never more."""
 
 from decimal import Decimal
 
-import pytest
+from robinhood_crypto_agent.config import RiskLimits
+from robinhood_crypto_agent.models import PairConstraints, Side
+from robinhood_crypto_agent.sizing import size_buy, size_sell
 
-from robinhood_crypto_agent.config import RiskLimits, StrategyConfig
-from robinhood_crypto_agent.models import (
-    CompositeView,
-    Direction,
-    PairConstraints,
-    Position,
-    Regime,
-    Side,
-)
-from robinhood_crypto_agent.sizing import size_position
-from tests.conftest import make_candles, uptrend
+D = Decimal
+PAIR = PairConstraints("BTC-USD", D("0.00000001"), min_order_size=D("0.000001"))
+LIMITS = RiskLimits(min_notional_per_trade_usd=D("5"), max_notional_per_trade_usd=D("50"))
 
 
-def view(score=0.8, confidence=0.9, direction=Direction.LONG):
-    return CompositeView(
-        symbol="BTC-USD",
-        regime=Regime.TRENDING,
-        score=score,
-        confidence=confidence,
-        direction=direction,
-        signals=[],
-        weights={},
-    )
+def test_a_buy_spends_its_dollars_at_the_reference_price_snapped_down():
+    result = size_buy("BTC-USD", dollars=D("5"), reference_price=D("65000"), constraints=PAIR,
+                      limits=LIMITS)
+    assert result.viable and result.side is Side.BUY
+    assert result.quantity == D("0.00007692")  # 5 / 65000, rounded down to the increment
+    assert result.notional == D("5.00")
+    assert result.quantity * D("65000") <= D("5")
 
 
-def size(view_obj, *, limits=None, constraints=None, price="100", **kwargs):
-    return size_position(
-        view_obj,
-        reference_price=Decimal(price),
-        candles=make_candles(uptrend()),
-        limits=limits or RiskLimits(),
-        strategy=StrategyConfig(),
-        constraints=constraints
-        or PairConstraints("BTC-USD", Decimal("0.00000001"), min_order_size=Decimal("0.000001")),
-        **kwargs,
-    )
+def test_a_step_under_the_minimum_trade_is_refused():
+    result = size_buy("BTC-USD", dollars=D("4"), reference_price=D("100"), constraints=PAIR,
+                      limits=LIMITS)
+    assert not result.viable and "minimum trade size" in result.rejected_reason
 
 
-def test_size_scales_with_conviction():
-    strong = size(view(score=1.0, confidence=1.0))
-    weak = size(view(score=0.4, confidence=0.5))
-    assert strong.notional > weak.notional
+def test_sizing_never_shrinks_a_step_to_fit_a_cap():
+    """A step over the per-trade cap is proposed at its size, and risk blocks it."""
+    tight = RiskLimits(min_notional_per_trade_usd=D("5"), max_notional_per_trade_usd=D("10"))
+    result = size_buy("BTC-USD", dollars=D("20"), reference_price=D("100"), constraints=PAIR,
+                      limits=tight)
+    assert result.notional == D("20.00")
 
 
-def test_size_never_exceeds_the_per_trade_cap():
-    limits = RiskLimits(max_notional_per_trade_usd=Decimal("100"))
-    result = size(view(score=1.0, confidence=1.0), limits=limits)
-    assert result.notional <= Decimal("100")
+def test_the_pair_minimums_bind():
+    coarse = PairConstraints("BTC-USD", D("0.01"), min_order_size=D("0.1"))
+    result = size_buy("BTC-USD", dollars=D("5"), reference_price=D("65000"), constraints=coarse,
+                      limits=LIMITS)
+    assert not result.viable and "rounds to zero" in result.rejected_reason
+    small = size_sell("BTC-USD", quantity=D("0.05"), reference_price=D("100"), constraints=coarse)
+    assert not small.viable and "minimum order size" in small.rejected_reason
 
 
-def test_concentration_cap_applies():
-    result = size(view(score=1.0, confidence=1.0), portfolio_value=Decimal("200"))
-    assert result.notional <= Decimal("20")  # 10% of 200
-    assert result.detail["concentration_cap"] == "20.00"
+def test_a_sell_keeps_its_quantity_snapped_down_with_no_trade_minimum():
+    """Closing a position is never refused for being small: that would strand it."""
+    result = size_sell("BTC-USD", quantity=D("0.000054321"), reference_price=D("65000"),
+                       constraints=PAIR)
+    assert result.viable and result.side is Side.SELL
+    assert result.quantity == D("0.00005432")
+    assert result.notional < D("5")
 
 
-def test_below_minimum_notional_is_rejected_not_rounded_up():
-    result = size(view(score=0.05, confidence=0.1))
-    assert not result.viable
-    assert "minimum trade size" in result.rejected_reason
-
-
-def test_flat_view_is_not_sized():
-    result = size(view(direction=Direction.FLAT))
-    assert not result.viable
-    assert "flat" in result.rejected_reason
-
-
-def test_quantity_is_snapped_down_to_the_increment():
-    constraints = PairConstraints("BTC-USD", Decimal("0.001"))
-    result = size(view(score=1.0, confidence=1.0), constraints=constraints, price="97")
-    assert result.quantity % Decimal("0.001") == 0
-    assert result.quantity * Decimal("97") <= RiskLimits().max_notional_per_trade_usd
-
-
-def test_coarse_increment_rejects_rather_than_rounding_up():
-    constraints = PairConstraints("BTC-USD", Decimal("1"))
-    result = size(view(), constraints=constraints, price="1000000")
-    assert not result.viable
-    assert "rounds to zero" in result.rejected_reason
-
-
-def test_pair_minimum_order_size_is_respected():
-    constraints = PairConstraints(
-        "BTC-USD", Decimal("0.00000001"), min_order_size=Decimal("10")
-    )
-    result = size(view(), constraints=constraints, price="1000")
-    assert not result.viable
-    assert "minimum order size" in result.rejected_reason
-
-
-def test_pair_maximum_order_size_caps_quantity():
-    constraints = PairConstraints(
-        "BTC-USD", Decimal("0.001"), max_order_size=Decimal("0.005")
-    )
-    result = size(view(score=1.0, confidence=1.0), constraints=constraints, price="100")
-    assert result.quantity <= Decimal("0.005")
-
-
-def test_pair_minimum_notional_is_respected():
-    constraints = PairConstraints(
-        "BTC-USD", Decimal("0.00000001"), min_notional=Decimal("500")
-    )
-    result = size(view(), constraints=constraints)
-    assert not result.viable
-    assert "below the pair minimum" in result.rejected_reason
-
-
-def test_sell_without_a_position_is_refused():
-    """This agent is spot-only; a sell with no holding would be a short."""
-    result = size(view(score=-0.8, direction=Direction.SHORT))
-    assert not result.viable
-    assert "does not short" in result.rejected_reason
-
-
-def test_sell_is_capped_at_the_held_quantity():
-    result = size(
-        view(score=-1.0, confidence=1.0, direction=Direction.SHORT),
-        position=Position("BTC-USD", Decimal("0.01")),
-        price="100",
-    )
-    assert result.side is Side.SELL
-    assert result.quantity <= Decimal("0.01")
-
-
-def test_high_volatility_cuts_size():
-    calm = [100 * (1.001**i) for i in range(60)]
-    wild = [100 * (1.05 if i % 2 else 0.96) ** 1 * (1.001**i) for i in range(60)]
-    limits, strategy = RiskLimits(), StrategyConfig()
-    constraints = PairConstraints("BTC-USD", Decimal("0.00000001"))
-
-    def notional(prices):
-        return size_position(
-            view(score=1.0, confidence=1.0),
-            reference_price=Decimal("100"),
-            candles=make_candles(prices),
-            limits=limits,
-            strategy=strategy,
-            constraints=constraints,
-        ).notional
-
-    assert notional(wild) < notional(calm)
-
-
-def test_zero_reference_price_is_rejected():
-    result = size(view(), price="0")
-    assert not result.viable
-    assert "positive" in result.rejected_reason
-
-
-@pytest.mark.parametrize("score,confidence", [(0.0, 0.9), (0.9, 0.0)])
-def test_zero_conviction_is_rejected(score, confidence):
-    result = size(view(score=score, confidence=confidence))
-    assert not result.viable
+def test_a_bad_price_is_refused():
+    assert not size_sell("BTC-USD", quantity=D("1"), reference_price=D("0"),
+                         constraints=PAIR).viable
+    assert not size_buy("BTC-USD", dollars=D("5"), reference_price=D("0"), constraints=PAIR,
+                        limits=LIMITS).viable

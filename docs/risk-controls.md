@@ -27,14 +27,14 @@ config.py. Raising a risk ceiling is a deliberate code change, not a config edit
 Config can only make the agent **more** conservative. Widening a limit past its
 ceiling requires editing code, which shows up in a diff and gets reviewed.
 
-There are floors too, where "too small" is the unsafe direction
-(`min_signal_confidence`, `min_notional_per_trade_usd`), and consistency checks
+There is a floor too, where "too small" is the unsafe direction
+(`min_notional_per_trade_usd`), and consistency checks
 — a per-trade cap above the daily cap is rejected, since no single trade could
 ever pass.
 
 ## 2. The risk engine
 
-Seventeen rules run on **every** proposal, and **all of them run**. Nothing
+Fourteen rules run on **every** proposal, and **all of them run**. Nothing
 short-circuits on the first failure, so the report shows every reason a trade
 was blocked — fixing one and rediscovering the next is how a limit gets
 whittled away one edit at a time.
@@ -44,13 +44,10 @@ whittled away one edit at a time.
 | `execution_mode` | mode is not `propose_only` |
 | `kill_switch` | the switch is engaged |
 | `watchlist` | the symbol is not on the allowlist |
-| `sell_side_disabled` | selling, while `disable_sell_side` is set (owner-toggled: on 2026-09-25 after every sell had lost or gone flat, off again 2026-09-26) |
 | `pair_tradable` | untradable, or globally halted (regional halt → warning) |
 | `order_type_supported` | a limit order on a `market_orders_only` pair |
 | `quote_freshness` | the reference quote is older than the cap |
 | `spread` | bid/ask spread exceeds `max_spread_pct` |
-| `signal_confidence` | composite confidence below the floor |
-| `signal_strength` | composite \|score\| below the floor |
 | `sizing` | the sizing model declined, with its reason |
 | `per_trade_notional` | **worst case after the collar** exceeds the cap |
 | `daily_notional` | today's executions + this trade exceed the daily cap |
@@ -66,14 +63,18 @@ a sell can return ~5% less. `per_trade_notional` checks the worst case after
 that collar, not the nominal — so a cap that passes still holds if the price
 moves on the way in.
 
-**Exits.** A time exit (`exit_after_bars`, `config/strategy.yaml`) sells a
-lot the agent bought once it has been held that long. Five rules do not apply
-to it, because each would block closing a position rather than limit risk:
-`sell_side_disabled`, `signal_confidence`, `signal_strength`,
-`per_trade_notional` and `daily_notional`. Each still runs, and passes saying
-"not applied to a time exit" and what it would have found. Every other rule
-binds an exit as it binds a trade, the kill switch and `sell_coverage`
-included.
+**Sells.** Every sell the trend ladder proposes closes a position it opened:
+a take-profit, or the trend exit. Two rules do not apply to a sell, because
+each limits *new* exposure and would only block closing a position:
+`per_trade_notional` and `daily_notional`. Both still run, and pass saying
+"not applied to a take-profit" (or "a trend exit") and what they would have
+found. Every other rule binds a sell as it binds a buy, the kill switch and
+`sell_coverage` included.
+
+**Retired with System 1, 2026-09-27:** `signal_confidence` and
+`signal_strength` (floors under a composite score the ladder does not have),
+and `sell_side_disabled` (a switch for System 1's signal sells). Their records
+remain in the audit log.
 
 **Warnings vs blocks.** A missing portfolio value makes `concentration`
 *unenforceable*, so it reports a non-blocking warning saying exactly that
@@ -94,7 +95,8 @@ The one path from a proposal to an order payload. It requires:
 - **A fresh quote within `price_drift_tolerance_pct`** of the proposal's
   reference price. Past that, the gate refuses and asks for a fresh proposal
   rather than filling against a stale quote.
-- **Remaining unfilled quantity.** A staged plan fills over tranches; the gate
+- **Remaining unfilled quantity.** An order can fill over several records (or a
+  System 1 staged plan over tranches); the gate
   subtracts what already filled and refuses a tranche that would exceed the
   remainder, so re-approving cannot silently double a position.
 

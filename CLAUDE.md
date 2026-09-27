@@ -18,12 +18,12 @@ You are the only component that can **place an order**:
   It gives you proposals and validated payloads.
 - **`rhca run`** is a shadow-mode loop that runs on its own. It *reads* from
   Robinhood's Crypto API with a read-only client (quotes and pairs only; the
-  Agentic account's balance and holdings come from `rhca ingest`). It labels
-  news with Jev (TypeSafe AI), and asks Claude Sonnet 5
-  (System 2) to propose or pass on strong candidates. It logs proposals; it
-  never orders.
+  Agentic account's balance and holdings come from `rhca ingest`). Each closed
+  hour it runs the trend ladder (`docs/strategy.md`) on BTC and ETH, and logs
+  what the ladder wants as proposals. It never orders.
 - **A human** approves a specific proposal by its id. Nothing else is approval
-  — including a System 2 `propose`, which is a suggestion in the log.
+  — including the ladder wanting it, and including a proposal the dashboard
+  shows as ready.
 
 ## Hard rules
 
@@ -85,11 +85,9 @@ You are the only component that can **place an order**:
     budget.
 
 13. **Keep the shadow run shadow.** Never add an order or cancel method to
-    `robinhood.py`, and never give System 2 (`system2.py`) a tool that writes
-    anything but its decision. Its MCP connector toolset stays an allowlist of
-    read-only tools by name — never the whole server. Unattended execution is
-    Phase 2: it goes behind `ApprovalGate`, with the preconditions in
-    `docs/autonomy.md`, as a deliberate human decision.
+    `robinhood.py`. Unattended execution is Phase 2: it goes behind
+    `ApprovalGate`, with the preconditions in `docs/autonomy.md`, as a
+    deliberate human decision.
 
 14. **Never print or log a credential.** `rhca status` lists key *names* only.
     Keys live in the environment or in the gitignored `.env`; they never go
@@ -97,18 +95,19 @@ You are the only component that can **place an order**:
 
 ## Following an execution plan
 
-A proposal's plan says *how* to fill it:
+Every ladder proposal is **`PROMPT`**: one tranche, one limit order at its
+`target_price` (the ask for a buy, the bid for a sell). Submit it promptly.
+Never re-price it to chase a fill, and never add size to it.
 
-- **`PROMPT`** (one tranche) — submit one order, promptly, at the reference
-  price. The signal is time-sensitive; do not wait for a better entry.
-- **`STAGED`** (several tranches) — submit one **limit** order per tranche at
-  its `target_price`. An unfilled tranche is an expected outcome, not a
-  problem. Never chase it by crossing the spread, and never add size beyond the
-  plan's tranches.
+Older proposals from the retired System 1 may be **`STAGED`** (several
+tranches, one limit order each). If one is ever approved, log every tranche
+with its own `record-execution --tranche N`; `rhca approve` refuses a tranche
+that would exceed the remaining unfilled quantity.
 
-Log every tranche with its own `record-execution --tranche N` against the same
-proposal id. The audit log sums them, and `rhca approve` refuses a tranche that
-would exceed the remaining unfilled quantity.
+The ladder rebuilds its state from the fills you record. Record the
+`place_crypto_order` response, and then the fill from `get_crypto_orders`
+once it happens (or the cancellation, if it never fills). Until then it
+treats the step as taken and will not propose it again.
 
 ## Tool-contract facts worth remembering
 
@@ -145,11 +144,12 @@ rhca record-execution <id> --tranche 0 -f response.json
 ```
 
 When `rhca run` is running, its proposals are already in the audit log with a
-`status` (`proposed`, `declined_by_system2`, `not_escalated`,
-`rejected_by_risk`). Act only on `proposed` ones a human names by id, through
-the same `plan-order` → `approve` → `place_crypto_order` → `record-execution`
-steps. Check `rhca status` for whether the loop is alive before trusting its
-quotes.
+`status` (`proposed` or `rejected_by_risk`; System 1's old records also carry
+`declined_by_system2` and `not_escalated`). Act only on `proposed` ones a human
+names by id, through the same `plan-order` → `approve` → `place_crypto_order`
+→ `record-execution` steps. Check `rhca status` for whether the loop is alive
+before trusting its quotes; it also shows each coin's ladder position and
+realized P&L.
 
 Once a day, record realized P&L so the daily loss cap is real:
 

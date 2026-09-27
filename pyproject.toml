@@ -5,14 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "robinhood-crypto-agent"
 version = "0.1.0"
-description = "A propose-only Robinhood crypto trading agent: a real-time System 1 (indicators + Jev news labels) that escalates to Claude Sonnet 5."
+description = "A propose-only Robinhood crypto trading agent: a trend-filtered dip ladder on BTC and ETH, with every order approved by a human."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "PyYAML>=6.0",
-    # System 2. Imported lazily by the CLI, so the decision engine and its
-    # tests never load it.
-    "anthropic>=1.0,<2",
     # Ed25519 request signing for Robinhood's Crypto Trading API.
     "cryptography>=42",
 ]

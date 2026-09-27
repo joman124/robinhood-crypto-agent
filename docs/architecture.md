@@ -8,54 +8,51 @@ Claude Code ──── MCP ────► Robinhood         the only order pa
      │ JSON in / payloads out
      ▼
 rhca (this package) ── read-only API ──► Robinhood   quotes, pairs
-                    ── HTTPS ──────────► RSS, Jev, Claude Sonnet 5
-                                           (+ Crypto.com market data via MCP)
+                    ── HTTPS ──────────► Coinbase    public candles (history)
                     ── order? ─────────►  ✗   (no code path exists)
 ```
 
-The package now reads from Robinhood (`rhca run`, `robinhood.py`), and calls
-news feeds, Jev and Anthropic. It still cannot place or cancel an order: the
-Robinhood client has only GET methods, and System 2's tools are read-only apart
-from its own decision. So a bug in this repository still costs a bad proposal,
-never a bad order.
+The package reads from Robinhood (`rhca run`, `robinhood.py`) and fetches
+Coinbase's public candles for history. It cannot place or cancel an order: the
+Robinhood client has only GET methods. So a bug in this repository costs a bad
+proposal, never a bad order.
 
-The decision path is still testable offline. Every network client is injected
+The decision path is testable offline. Every network client is injected
 (`runner.Services`), and the test suite fakes each one and touches no network.
 
 ## The real-time loop (`rhca run`)
 
 ```
-quotes (Robinhood) ─┐
-RSS ─► Jev ─────────┼─► System 1: candles ─► 4 price signals + news ─► composite
-                    │                                   │
-                    │               size ─► plan ─► 17 risk rules ─► candidate
-                    │                                   │
-                    │             trigger: confidence, |score|, cooldown, cap
-                    │                  no ─► logged (not_escalated)
-                    │                  yes ─► System 2: Sonnet 5, propose/pass
-                    │                                   │
-                    └────────────► audit log ─► outcomes ─► dashboard
+quotes (Robinhood) ─► price store ─► closed hourly bars ─┐
+                                                          ├─► trend ladder ─► size ─► plan
+recorded fills (audit log) ─► ledger: held, anchor, steps ┘                            │
+                                                                          14 risk rules
+                                                                                       │
+                                               dashboard ◄── audit log ◄── proposal ◄──┘
 ```
 
-System 1 is deterministic and fast. The one model call inside it is Jev, which
-labels text and never sees a price. System 2 runs only when System 1 is
-already confident *and* the risk engine has already said yes. So Sonnet can
-veto a trade, but it can never talk the system into one the rules refuse.
+The rule (`strategy/ladder.py`) is a pure function of the last closed bar, its
+trend average, and the ladder's state. The state is not kept in memory: the
+ledger rebuilds it from the audit log on every pass, so a restart changes
+nothing, and the ladder only ever sells what its own recorded fills bought.
+`rhca backtest` drives the same function over history.
 
 ## The pipeline
 
 ```
-ingest ──► price store ──► candles ──► signals ──► composite ──► sizing
-                                          ▲                        │
-                          news (Jev) ─────┘   proposal ◄── plan ◄── risk
-                                                │
-                                        approval gate ──► order payload
+ingest ──► price store ──► candles ──┐
+                                     ├─► ladder.decide ──► sizing ──► plan ──► risk
+audit log ──► ledger ────────────────┘                                          │
+                                                   approval gate ◄── proposal ◄─┘
+                                                         │
+                                                   order payload
 ```
 
 Each stage may decline, and a decline carries a reason. A symbol always ends
 with either a proposal or an explanation — an empty result list with no
-explanation would hide the difference between "nothing looks good" and "three
-of five symbols have no data".
+explanation would hide the difference between "nothing looks good" and "this
+symbol has no data". With no order to make, the explanation says where the
+next step would buy or sell.
 
 ## Modules
 
@@ -65,21 +62,20 @@ of five symbols have no data".
 | `mcp/parse.py` | Response parsers, written against live payload shapes |
 | `store/prices.py` | Append-only observations; bars derived on read |
 | `store/state.py` | Cached account/market snapshot, written atomically |
-| `indicators.py` | Aligned indicator series, Wilder smoothing where it applies |
-| `strategy/` | Four signal sources, regime detection, confidence-weighted blend |
-| `sizing.py` | Conviction × volatility scaling × caps |
-| `risk.py` | 17 rules, all evaluated, each naming itself |
-| `execution/orders.py` | Execution plans and validated order payloads |
+| `strategy/ladder.py` | The trend ladder: one pure rule, shared by the loop and the backtest |
+| `ledger.py` | The ladder's holdings, cycle and P&L, rebuilt from recorded fills |
+| `agent.py` | Bars + ledger → the rule → sized, planned, risk-checked proposals |
+| `sizing.py` | A step's dollars → a quantity the pair accepts, snapped down |
+| `risk.py` | 14 rules, all evaluated, each naming itself |
+| `execution/orders.py` | One-order plans and validated order payloads |
 | `execution/gate.py` | The approval gate — the one path to an order payload |
 | `execution/kill_switch.py` | File-based, fail-safe stop |
 | `audit.py` | Append-only log; the daily caps are computed from it |
 | `robinhood.py` | Read-only, Ed25519-signed Crypto Trading API client — no order methods |
-| `news.py` | RSS/Atom parsing and the append-only news store |
-| `jev.py` | Jev (TypeSafe AI) labels a headline: asset, direction, impact |
-| `trigger.py` | "Is confidence high?" — thresholds, cooldown, daily cap |
-| `system2.py` | Claude Sonnet 5: propose or pass, read-only tools, plus an allowlisted Crypto.com market-data MCP connector |
-| `runner.py` | `rhca run`: cadences, dedupe, heartbeat, per-task failure isolation |
-| `bootstrap.py` | Coinbase candles, so a fresh checkout has history at once |
+| `runner.py` | `rhca run`: cadences, once-per-bar dedupe, heartbeat, per-task failure isolation |
+| `bootstrap.py` | Coinbase candles: the 52 days the trend average needs, at once |
+| `backtest.py` | `rhca backtest`: the ladder against its baselines, whole and in rolling windows |
+| `outcomes.py` | The retired System 1's six-hour hit rate, kept for its records |
 | `net.py` | The one HTTP helper: timeouts, size cap, error wording |
 
 ## The contract layer
@@ -112,14 +108,15 @@ to `float`. The order API takes decimal strings, and a float round-trip is how
 additionally guarantees no exponent notation — `str(Decimal("1E-8"))` is
 `"1E-8"`, which the API will not accept.
 
-Indicators *are* floats: they are statistics, not monetary amounts, and never
-flow back into an order field.
+The trend average is a `Decimal` too, so the rule compares like with like and
+the backtest and the live loop make identical decisions.
 
 ## Why bars exclude the partial current bar
 
-An indicator computed on a bar five minutes into its hour changes under its own
-feet. A signal that flips between two runs minutes apart is worse than no
-signal, so the forming bar is excluded unless `include_partial` is set.
+A decision on a bar five minutes into its hour changes under its own feet. A
+rule that flips between two runs minutes apart is worse than no rule, and the
+backtest decides on closed bars, so the forming bar is excluded unless
+`include_partial` is set.
 
 ## Why the audit log is load-bearing
 

@@ -9,31 +9,18 @@ from robinhood_crypto_agent.audit import DailyActivity
 from robinhood_crypto_agent.config import AgentConfig, RiskLimits
 from robinhood_crypto_agent.execution.kill_switch import KillSwitchState
 from robinhood_crypto_agent.models import (
-    CompositeView,
-    Direction,
     ExecutionMode,
     OrderType,
     PairConstraints,
     Position,
     Quote,
-    Regime,
     Side,
     utcnow,
 )
 from robinhood_crypto_agent.risk import RiskContext, RiskEngine, summarize
 from robinhood_crypto_agent.sizing import SizingResult
 
-
-def make_view(score=0.8, confidence=0.9):
-    return CompositeView(
-        symbol="BTC-USD",
-        regime=Regime.TRENDING,
-        score=score,
-        confidence=confidence,
-        direction=Direction.LONG,
-        signals=[],
-        weights={},
-    )
+SYMBOL = "BTC-USD"
 
 
 def make_sizing(quantity="0.001", notional="80", side=Side.BUY):
@@ -84,7 +71,7 @@ def rule(decision, name):
 
 
 def test_a_clean_proposal_passes_everything(config):
-    decision = RiskEngine(config).evaluate(make_view(), make_sizing(), make_context(config))
+    decision = RiskEngine(config).evaluate(SYMBOL, make_sizing(), make_context(config))
     assert decision.passed
     assert summarize(decision) == "PASS"
 
@@ -96,20 +83,18 @@ def test_every_rule_runs_even_after_a_failure(config):
         kill_switch=KillSwitchState(engaged=True, reason="manual"),
         activity=make_activity(notional="5000", pnl="-500"),
     )
-    decision = RiskEngine(config).evaluate(make_view(), make_sizing(), context)
+    decision = RiskEngine(config).evaluate(SYMBOL, make_sizing(), context)
     failures = {f.rule for f in decision.blocking_failures}
     assert {"kill_switch", "daily_notional", "daily_loss"} <= failures
 
 
 def test_kill_switch_blocks(config):
     context = make_context(config, kill_switch=KillSwitchState(engaged=True, reason="manual"))
-    assert not RiskEngine(config).evaluate(make_view(), make_sizing(), context).passed
+    assert not RiskEngine(config).evaluate(SYMBOL, make_sizing(), context).passed
 
 
 def test_symbol_off_the_watchlist_is_blocked(config):
-    view = make_view()
-    object.__setattr__(view, "symbol", "DOGE-USD")
-    decision = RiskEngine(config).evaluate(view, make_sizing(), make_context(config))
+    decision = RiskEngine(config).evaluate("DOGE-USD", make_sizing(), make_context(config))
     assert not rule(decision, "watchlist").passed
 
 
@@ -120,7 +105,7 @@ def test_auto_execution_mode_is_refused(config):
         rhs_account_number="1",
         data_dir=config.data_dir,
     )
-    decision = RiskEngine(auto).evaluate(make_view(), make_sizing(), make_context(auto))
+    decision = RiskEngine(auto).evaluate(SYMBOL, make_sizing(), make_context(auto))
     finding = rule(decision, "execution_mode")
     assert not finding.passed
     assert "not implemented" in finding.message
@@ -130,7 +115,7 @@ def test_wide_spread_blocks(config):
     """Market-maker-routed crypto quotes routinely exceed the spread cap."""
     wide = Quote("BTC-USD", Decimal("80466"), Decimal("81982"), Decimal("81224"), utcnow())
     decision = RiskEngine(config).evaluate(
-        make_view(), make_sizing(), make_context(config, quote=wide)
+        SYMBOL, make_sizing(), make_context(config, quote=wide)
     )
     assert not rule(decision, "spread").passed
 
@@ -144,7 +129,7 @@ def test_stale_quote_blocks(config):
         utcnow() - timedelta(minutes=10),
     )
     decision = RiskEngine(config).evaluate(
-        make_view(), make_sizing(), make_context(config, quote=stale)
+        SYMBOL, make_sizing(), make_context(config, quote=stale)
     )
     assert not rule(decision, "quote_freshness").passed
 
@@ -154,7 +139,7 @@ def test_halted_pair_warns_but_a_global_halt_blocks(config):
         "BTC-USD", Decimal("0.00000001"), halted=True, halted_regions=("NY",)
     )
     decision = RiskEngine(config).evaluate(
-        make_view(), make_sizing(), make_context(config, constraints=regional)
+        SYMBOL, make_sizing(), make_context(config, constraints=regional)
     )
     finding = rule(decision, "pair_tradable")
     assert not finding.passed and not finding.blocking  # a warning
@@ -163,7 +148,7 @@ def test_halted_pair_warns_but_a_global_halt_blocks(config):
         "BTC-USD", Decimal("0.00000001"), halted=True, halted_regions=("ALL",)
     )
     decision = RiskEngine(config).evaluate(
-        make_view(), make_sizing(), make_context(config, constraints=global_halt)
+        SYMBOL, make_sizing(), make_context(config, constraints=global_halt)
     )
     assert not rule(decision, "pair_tradable").passed
     assert rule(decision, "pair_tradable").blocking
@@ -172,7 +157,7 @@ def test_halted_pair_warns_but_a_global_halt_blocks(config):
 def test_market_only_pair_blocks_a_limit_order(config):
     constraints = PairConstraints("BTC-USD", Decimal("0.00000001"), market_orders_only=True)
     decision = RiskEngine(config).evaluate(
-        make_view(),
+        SYMBOL,
         make_sizing(),
         make_context(config, constraints=constraints, order_type=OrderType.LIMIT),
     )
@@ -186,20 +171,20 @@ def test_per_trade_cap_uses_the_worst_case_collar(config):
         watchlist=("BTC-USD",), rhs_account_number="1", risk=limits, data_dir=config.data_dir
     )
     decision = RiskEngine(scoped).evaluate(
-        make_view(), make_sizing(notional="248"), make_context(scoped)
+        SYMBOL, make_sizing(notional="248"), make_context(scoped)
     )
     assert not rule(decision, "per_trade_notional").passed
 
 
 def test_daily_notional_cap_counts_prior_executions(config):
     context = make_context(config, activity=make_activity(notional="960"))
-    decision = RiskEngine(config).evaluate(make_view(), make_sizing(notional="80"), context)
+    decision = RiskEngine(config).evaluate(SYMBOL, make_sizing(notional="80"), context)
     assert not rule(decision, "daily_notional").passed
 
 
 def test_daily_loss_cap_blocks(config):
     context = make_context(config, activity=make_activity(pnl="-250"))
-    decision = RiskEngine(config).evaluate(make_view(), make_sizing(), context)
+    decision = RiskEngine(config).evaluate(SYMBOL, make_sizing(), context)
     assert not rule(decision, "daily_loss").passed
 
 
@@ -208,7 +193,7 @@ def test_open_position_cap_blocks_a_sixth_new_position(config):
         f"SYM{i}-USD": Position(f"SYM{i}-USD", Decimal("1")) for i in range(5)
     }
     context = make_context(config, positions=positions)
-    decision = RiskEngine(config).evaluate(make_view(), make_sizing(), context)
+    decision = RiskEngine(config).evaluate(SYMBOL, make_sizing(), context)
     assert not rule(decision, "open_positions").passed
 
 
@@ -217,7 +202,7 @@ def test_adding_to_an_existing_position_does_not_open_a_new_one(config):
     positions = {f"SYM{i}-USD": Position(f"SYM{i}-USD", Decimal("1")) for i in range(4)}
     positions["BTC-USD"] = Position("BTC-USD", Decimal("1"))  # 5 open, at the cap
     context = make_context(config, positions=positions)
-    decision = RiskEngine(config).evaluate(make_view(), make_sizing(), context)
+    decision = RiskEngine(config).evaluate(SYMBOL, make_sizing(), context)
     assert rule(decision, "open_positions").passed
 
 
@@ -227,7 +212,7 @@ def test_concentration_limit_blocks(config):
         portfolio_value=Decimal("500"),
         positions={"BTC-USD": Position("BTC-USD", Decimal("0.0006"))},
     )
-    decision = RiskEngine(config).evaluate(make_view(), make_sizing(notional="80"), context)
+    decision = RiskEngine(config).evaluate(SYMBOL, make_sizing(notional="80"), context)
     assert not rule(decision, "concentration").passed
 
 
@@ -239,14 +224,14 @@ def test_selling_an_over_concentrated_position_is_not_blocked_by_concentration(c
         positions={"BTC-USD": Position("BTC-USD", Decimal("0.005"))},  # ~$400: 80% of it
     )
     decision = RiskEngine(config).evaluate(
-        make_view(score=-0.8), make_sizing(notional="80", side=Side.SELL), context
+        SYMBOL, make_sizing(notional="80", side=Side.SELL), context
     )
     assert rule(decision, "concentration").passed
 
 
 def test_missing_portfolio_value_warns_instead_of_silently_passing(config):
     context = make_context(config, portfolio_value=None)
-    decision = RiskEngine(config).evaluate(make_view(), make_sizing(), context)
+    decision = RiskEngine(config).evaluate(SYMBOL, make_sizing(), context)
     finding = rule(decision, "concentration")
     assert finding.passed and not finding.blocking
     assert "could not be checked" in finding.message
@@ -255,17 +240,9 @@ def test_missing_portfolio_value_warns_instead_of_silently_passing(config):
 def test_sell_without_enough_holding_is_blocked(config):
     context = make_context(config, positions={"BTC-USD": Position("BTC-USD", Decimal("0.0001"))})
     decision = RiskEngine(config).evaluate(
-        make_view(), make_sizing(quantity="0.001", side=Side.SELL), context
+        SYMBOL, make_sizing(quantity="0.001", side=Side.SELL), context
     )
     assert not rule(decision, "sell_coverage").passed
-
-
-def test_low_confidence_and_weak_score_block(config):
-    engine = RiskEngine(config)
-    weak = engine.evaluate(make_view(score=0.1), make_sizing(), make_context(config))
-    assert not rule(weak, "signal_strength").passed
-    unsure = engine.evaluate(make_view(confidence=0.05), make_sizing(), make_context(config))
-    assert not rule(unsure, "signal_confidence").passed
 
 
 def test_sizing_rejection_surfaces_as_a_finding(config):
@@ -277,7 +254,7 @@ def test_sizing_rejection_surfaces_as_a_finding(config):
         reference_price=Decimal("80000"),
         rejected_reason="quantity rounds to zero",
     )
-    decision = RiskEngine(config).evaluate(make_view(), rejected, make_context(config))
+    decision = RiskEngine(config).evaluate(SYMBOL, rejected, make_context(config))
     assert not rule(decision, "sizing").passed
     assert "BLOCKED by" in summarize(decision)
 
@@ -285,7 +262,7 @@ def test_sizing_rejection_surfaces_as_a_finding(config):
 def test_a_sizing_rejection_does_not_masquerade_as_missing_coverage(config):
     """The blocked rule must be the one that actually blocked.
 
-    A weak signal sizes to zero, and a zero quantity used to fail
+    A sell that sizes to zero used to fail
     ``sell_coverage`` too -- reporting a coverage problem on an account holding
     plenty, and pointing whoever read the audit log at the wrong rule.
     """
@@ -298,7 +275,7 @@ def test_a_sizing_rejection_does_not_masquerade_as_missing_coverage(config):
         rejected_reason="sized notional $4.38 is below the $5.00 minimum trade size",
     )
     context = make_context(config, positions={"BTC-USD": Position("BTC-USD", Decimal("10"))})
-    decision = RiskEngine(config).evaluate(make_view(), rejected, context)
+    decision = RiskEngine(config).evaluate(SYMBOL, rejected, context)
 
     assert rule(decision, "sell_coverage").passed
     assert "sizing produced no order" in rule(decision, "sell_coverage").message
@@ -307,39 +284,48 @@ def test_a_sizing_rejection_does_not_masquerade_as_missing_coverage(config):
     assert not decision.passed
 
 
-def test_sell_side_disabled_blocks_sells_but_not_buys(config):
-    disabled = AgentConfig(
-        watchlist=("BTC-USD",),
-        rhs_account_number="1",
-        risk=RiskLimits(disable_sell_side=True),
-        data_dir=config.data_dir,
-    )
-    context = make_context(disabled, positions={"BTC-USD": Position("BTC-USD", Decimal("1"))})
-    engine = RiskEngine(disabled)
-
-    sell_decision = engine.evaluate(
-        make_view(score=-0.8), make_sizing(side=Side.SELL), context
-    )
-    assert not rule(sell_decision, "sell_side_disabled").passed
-    assert not sell_decision.passed
-
-    buy_decision = engine.evaluate(make_view(), make_sizing(side=Side.BUY), context)
-    assert rule(buy_decision, "sell_side_disabled").passed
-
-
-def test_sell_side_disabled_defaults_to_off(config):
-    """The default stays permissive; the gate is a deliberate config edit, not a code default."""
-    decision = RiskEngine(config).evaluate(
-        make_view(score=-0.8), make_sizing(side=Side.SELL), make_context(config)
-    )
-    assert rule(decision, "sell_side_disabled").passed
-
-
 def test_sell_coverage_still_blocks_a_real_shortfall(config):
     """The rule it replaces must keep working when sizing did produce an order."""
     context = make_context(config, positions={"BTC-USD": Position("BTC-USD", Decimal("0.0001"))})
     decision = RiskEngine(config).evaluate(
-        make_view(), make_sizing(quantity="0.001", side=Side.SELL), context
+        SYMBOL, make_sizing(quantity="0.001", side=Side.SELL), context
     )
     assert not rule(decision, "sell_coverage").passed
     assert not decision.passed
+
+
+def test_the_rules_that_run(config):
+    """Fourteen, in a fixed order; System 1's signal floors went with it."""
+    decision = RiskEngine(config).evaluate(SYMBOL, make_sizing(), make_context(config))
+    assert [f.rule for f in decision.findings] == [
+        "execution_mode",
+        "kill_switch",
+        "watchlist",
+        "pair_tradable",
+        "order_type_supported",
+        "quote_freshness",
+        "spread",
+        "sizing",
+        "per_trade_notional",
+        "daily_notional",
+        "daily_loss",
+        "open_positions",
+        "concentration",
+        "sell_coverage",
+    ]
+
+
+def test_an_exit_passes_only_the_caps_on_new_exposure(config):
+    context = make_context(
+        config,
+        activity=make_activity(notional="5000", pnl="0"),
+        kill_switch=KillSwitchState(engaged=True, reason="manual"),
+        positions={"BTC-USD": Position("BTC-USD", Decimal("1"))},
+    )
+    decision = RiskEngine(config).evaluate(
+        SYMBOL, make_sizing(notional="900", side=Side.SELL), context, exit_reason="trend exit"
+    )
+    assert rule(decision, "per_trade_notional").passed
+    assert rule(decision, "daily_notional").passed
+    assert "not applied to a trend exit" in rule(decision, "daily_notional").message
+    assert [f.rule for f in decision.blocking_failures] == ["kill_switch"]

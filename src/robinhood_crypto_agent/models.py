@@ -102,20 +102,6 @@ class TimeInForce(str, Enum):
     GFM = "gfm"
 
 
-class Direction(str, Enum):
-    """Which way a signal points, independent of how strongly."""
-
-    LONG = "long"
-    SHORT = "short"
-    FLAT = "flat"
-
-
-class Regime(str, Enum):
-    TRENDING = "trending"
-    RANGING = "ranging"
-    UNKNOWN = "unknown"
-
-
 class ExecutionMode(str, Enum):
     """How far the agent is allowed to go on its own.
 
@@ -139,12 +125,13 @@ class ExecutionMode(str, Enum):
 class ProposalStatus(str, Enum):
     PROPOSED = "proposed"
     REJECTED_BY_RISK = "rejected_by_risk"
+    #: The two below are System 1's, retired 2026-09-27. They stay so the
+    #: records it left in the audit log still read, and so the approval gate
+    #: can keep refusing them: neither was ever a proposal.
+    #:
     #: Passed risk but not the escalation trigger, so System 2 never saw it.
-    #: Logged anyway: calibrating the trigger needs the outcomes of the
-    #: candidates it held back, not just the ones it let through.
     NOT_ESCALATED = "not_escalated"
-    #: Escalated to System 2, which passed on it -- or failed to answer, which
-    #: is treated the same way, because silence is never approval.
+    #: Escalated to System 2, which passed on it or failed to answer.
     DECLINED_BY_SYSTEM2 = "declined_by_system2"
 
 
@@ -282,108 +269,6 @@ class Account(JsonMixin):
 
 
 @dataclass(frozen=True)
-class Signal(JsonMixin):
-    """One strategy signal's read on one symbol.
-
-    ``score`` is bounded to [-1, 1]: -1 maximally bearish, +1 maximally bullish.
-    ``confidence`` in [0, 1] is how much history/quality backed that score, and
-    is what lets a thin-data signal contribute proportionally less rather than
-    being silently treated as equal to a well-supported one.
-    """
-
-    name: str
-    symbol: str
-    score: float
-    confidence: float
-    direction: Direction
-    rationale: str
-    detail: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not -1.0 <= self.score <= 1.0:
-            raise ValueError(f"{self.name}: score {self.score} outside [-1, 1]")
-        if not 0.0 <= self.confidence <= 1.0:
-            raise ValueError(f"{self.name}: confidence {self.confidence} outside [0, 1]")
-
-
-#: Jev's ``asset`` answer for news about the crypto market as a whole, which
-#: applies to every symbol on the watchlist.
-MARKET_WIDE = "MARKET"
-
-#: How each direction label signs a news item's score.
-DIRECTION_SIGNS = {"bullish": 1.0, "bearish": -1.0, "neutral": 0.0}
-
-#: The top level of Jev's impact scale (levels 0..3).
-MAX_IMPACT = 3.0
-
-
-@dataclass(frozen=True)
-class NewsLabels(JsonMixin):
-    """Jev's typed read on one headline, with its calibrated confidences.
-
-    ``confidence`` here is how sure Jev is of its *label* -- that a headline is
-    about ETH and bearish -- not the probability that ETH falls. Whether the
-    labels predict anything is what outcome scoring measures.
-    """
-
-    asset: str
-    asset_confidence: float
-    direction: str
-    direction_confidence: float
-    impact: float
-    model: str = ""
-
-
-@dataclass(frozen=True)
-class NewsItem(JsonMixin):
-    """One headline or post, as fetched, and Jev's labels once it has them."""
-
-    item_id: str
-    source: str
-    title: str
-    published_at: datetime
-    url: str | None = None
-    summary: str = ""
-    labels: NewsLabels | None = None
-
-    def applies_to(self, symbol: str) -> bool:
-        """Whether this item is about ``symbol``'s asset, or the whole market."""
-        if self.labels is None:
-            return False
-        base = symbol.upper().partition("-")[0]
-        return self.labels.asset in (base, MARKET_WIDE)
-
-    @property
-    def score(self) -> float:
-        """Direction times impact, in [-1, 1]; zero when unlabeled or neutral."""
-        if self.labels is None:
-            return 0.0
-        sign = DIRECTION_SIGNS.get(self.labels.direction, 0.0)
-        return max(-1.0, min(1.0, sign * self.labels.impact / MAX_IMPACT))
-
-    @property
-    def confidence(self) -> float:
-        """Right asset *and* right direction: the product of the two confidences."""
-        if self.labels is None:
-            return 0.0
-        return max(0.0, min(1.0, self.labels.asset_confidence * self.labels.direction_confidence))
-
-
-@dataclass(frozen=True)
-class CompositeView(JsonMixin):
-    """The blended strategy opinion on one symbol."""
-
-    symbol: str
-    regime: Regime
-    score: float
-    confidence: float
-    direction: Direction
-    signals: list[Signal]
-    weights: dict[str, float]
-    notes: list[str] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
 class RiskFinding(JsonMixin):
     """One risk rule's verdict. ``blocking`` findings stop the proposal."""
 
@@ -449,13 +334,16 @@ class Proposal(JsonMixin):
     reference_price: Decimal
     notional: Decimal
     created_at: datetime
-    view: CompositeView
+    #: Why the rule proposed it, in one line: which step, and the numbers.
+    reason: str
     plan: ExecutionPlan
     risk: RiskDecision
     status: ProposalStatus
+    #: How it was sized, and under ``"ladder"`` the rule's state when it was
+    #: made: rule, step, anchor, close, trend average. The ledger rebuilds the
+    #: ladder's cycles from it.
     sizing_detail: dict[str, Any] = field(default_factory=dict)
     #: The quote's bid/ask spread as a percentage of the mark, when proposed.
-    #: Outcome scoring charges half of it as the exit leg's cost.
     spread_pct: Decimal | None = None
 
     @staticmethod

@@ -1,11 +1,11 @@
 # robinhood-crypto-agent
 
-A crypto trading agent for Robinhood with two layers. System 1 is fast and
-deterministic: indicators, a news signal labeled by
-[Jev](https://typesafe.ai/), and 17 risk rules. It escalates only its confident
-ideas to System 2, **Claude Sonnet 5**. Orders go only through
-[Claude Code](https://claude.com/claude-code) and the **RobinHood MCP server**,
-after a human approves.
+A crypto trading agent for Robinhood that trades one rule on BTC and ETH: the
+**trend ladder**. It buys dips in dollar steps while the price is above its
+50-day average, sells into strength, and sells everything when the price
+closes under that average. Fourteen risk rules check every proposal. Orders go
+only through [Claude Code](https://claude.com/claude-code) and the
+**RobinHood MCP server**, after a human approves each one by id.
 
 > ⚠️ **This trades real money.** `place_crypto_order` places a real order
 > against a real account. There is no paper-trading endpoint to point at.
@@ -24,7 +24,7 @@ the risk limits, and the audit trail. It can *read* from Robinhood (see
      └───────┬──────────────────────────────────┬─────────────────-┘
              │ JSON responses                   │ proposals, payloads
              ▼                                  ▼
-   get_crypto_quotes ──► rhca ingest ──► price history ──► strategy
+   get_crypto_quotes ──► rhca ingest ──► price history ──► trend ladder
    get_currency_pairs                                          │
    get_crypto_positions                                        ▼
    get_portfolio                                    sizing ──► risk engine
@@ -41,24 +41,17 @@ hands it a payload after a human has approved a **specific proposal by id**.
 ### The real-time loop: `rhca run` (shadow mode)
 
 ```
-Robinhood quotes ──┐
-RSS ─► Jev ────────┼─► System 1: indicators + news + 17 risk rules
-                   │        │
-                   │   confidence high?  no ─► logged, still scored
-                   │        │ yes
-                   │   System 2: Claude Sonnet 5 ─► propose / pass
-                   │        (+ Crypto.com market data, MCP connector)
-                   │        │
-                   └──────► audit log ─► outcome scoring ─► dashboard
+Robinhood quotes ─► hourly bars ─► trend ladder ─► 14 risk rules ─► proposal
+                                        ▲                               │
+                 recorded fills ────────┘                               ▼
+                 (the ladder's state)                      audit log ─► dashboard
 ```
 
 `rhca run` polls Robinhood's Crypto Trading API with a **read-only** client (no
 order method exists), for quotes and trading pairs only. The balance and
-holdings it sizes against are the Agentic account's, which Claude Code feeds in
-with `rhca ingest`. Jev labels every headline, and Sonnet judges only what
-already passed every risk rule and the trigger. Every candidate is logged and
-scored against what the price did next, including the ones held back. That is
-the evidence for whether each stage earns its place. Setup and keys:
+holdings it checks against are the Agentic account's, which Claude Code feeds
+in with `rhca ingest`. On each closed hour it runs the ladder, and logs what
+the ladder wants as a proposal for a human to approve. Setup and keys:
 [`docs/runbook.md`](./docs/runbook.md#shadow-run-rhca-run).
 
 ## What it does
@@ -67,12 +60,16 @@ the evidence for whether each stage earns its place. Setup and keys:
   tool — only live quotes. So the agent records every quote it is given and
   aggregates bars from them. This is the central design constraint; see
   [`docs/data-constraints.md`](./docs/data-constraints.md).
-- **Reads the market by regime.** ADX separates trending from ranging, and the
-  signal weights change accordingly — trend following and mean reversion are
-  near-opposites, so blending them at fixed weights averages out to noise.
-- **Sizes by conviction and volatility.** Three multiplicative factors, each
-  bounded at 1.0, so the result can never exceed the per-trade cap.
-- **Refuses, loudly and specifically.** Seventeen risk rules run on every
+- **Trades one backtested rule.** The trend ladder
+  ([`docs/strategy.md`](./docs/strategy.md)): $5, $10 and $20 at 5%, 10% and
+  20% under the recent high, only above the 50-day average; sells mirror the
+  buys, and a close under the average sells everything. `rhca backtest`
+  replays the same code the live loop runs, and a test holds the two to the
+  same trades.
+- **Rebuilds its state from what filled.** The anchor, the steps taken and
+  what is held all come from the fills recorded in the audit log, so a restart
+  changes nothing and the ladder never sells a coin it did not buy.
+- **Refuses, loudly and specifically.** Fourteen risk rules run on every
   proposal — all of them, so the report names every blocker rather than the
   first. See [`docs/risk-controls.md`](./docs/risk-controls.md).
 - **Validates order payloads offline.** The RobinHood order contract is
@@ -80,13 +77,13 @@ the evidence for whether each stage earns its place. Setup and keys:
   Robinhood. See [`docs/architecture.md`](./docs/architecture.md#the-contract-layer).
 - **Logs everything, append-only.** Including proposals the risk engine
   blocked — that record is the evidence the controls do anything.
-- **Scores itself.** Every proposal is measured against what the price actually
-  did over a fixed horizon, as the whole round trip: bought at the ask, sold at
-  the bid. A win made money after that; anything that lost money is a loss. With
-  nothing resolved the hit rate reads *unknown*, never 0%.
-- **Has a web dashboard** ([`dashboard/`](./dashboard)) for reviewing proposals,
-  seeing the measured hit rate, and accepting or declining — which records a
-  decision the agent replays through the same approval gate, never an order.
+- **Reports its P&L.** `rhca status` shows each coin's ladder position, cost
+  and realized P&L from the recorded fills. (The six-hour hit rate in
+  `rhca accuracy` scored the retired System 1's predictions; the ladder waits
+  days for its sells, so it is measured on P&L instead.)
+- **Has a web dashboard** ([`dashboard/`](./dashboard)) for reviewing proposals
+  and accepting or declining — which records a decision the agent replays
+  through the same approval gate, never an order.
 
 ## Setup
 
@@ -115,7 +112,7 @@ tool response is never retyped or paraphrased.
 
 ```bash
 # The real-time loop (keys in .env -- see .env.example)
-rhca bootstrap-history          # Coinbase bars, so indicators work at once
+rhca bootstrap-history          # 52 days of Coinbase bars, for the 50-day average
 rhca run --once                 # one pass of every task: the smoke test
 rhca run --keep-awake           # shadow mode until Ctrl+C
 
@@ -136,11 +133,9 @@ rhca plan-order <proposal-id>
 rhca approve <proposal-id> --approval "execute <proposal-id>" --quote fresh.json
 rhca record-execution <proposal-id> --tranche 0 -f response.json
 
-# How good have the suggestions been?
-rhca accuracy
-
-# Would a different rule have done better? Replays months of Coinbase bars
-rhca backtest --days 180
+# Replay the ladder, the trend baseline and buy-and-hold on Coinbase bars,
+# over the whole window and over rolling 90-day windows
+rhca backtest --days 730 --roll-window 90
 
 # Push proposals + outcomes to the dashboard, pull back your accept/decline
 rhca dashboard-sync --url https://your-project.vercel.app --token "$TOKEN"
@@ -165,30 +160,27 @@ src/robinhood_crypto_agent/
 ├── cli.py              # the command surface
 ├── runner.py           # rhca run: the real-time loop, shadow mode
 ├── robinhood.py        # read-only Crypto Trading API client (no order methods)
-├── news.py             # RSS/Atom feeds and the news store
-├── jev.py              # Jev (TypeSafe AI) headline labels
-├── trigger.py          # "is confidence high?" before System 2
-├── system2.py          # Claude Sonnet 5: propose or pass
 ├── bootstrap.py        # Coinbase candles for a fresh checkout
+├── backtest.py         # rhca backtest: the ladder vs its baselines
 ├── net.py              # the one HTTP helper
-├── agent.py            # the analysis pipeline
+├── agent.py            # the analysis pipeline: bars + ledger -> ladder -> proposals
+├── ledger.py           # the ladder's holdings and cycle, from recorded fills
 ├── config.py           # config, clamped by hard code ceilings
 ├── models.py           # domain types
 ├── numeric.py          # Decimal helpers; no price ever becomes a float
 ├── symbols.py          # BTCUSD vs BTC-USD reconciliation
-├── indicators.py       # SMA/EMA/RSI/MACD/ATR/ADX/Bollinger/Donchian
-├── risk.py             # the 17 risk rules
-├── sizing.py           # conviction x volatility x caps
+├── risk.py             # the 14 risk rules
+├── sizing.py           # a step's dollars -> a quantity the pair accepts
 ├── audit.py            # append-only log; the daily caps read from it
 ├── serde.py            # proposal round-trip through the log
 ├── reports.py          # human-readable output
-├── outcomes.py         # scoring proposals against what the price did next
+├── outcomes.py         # scoring System 1's old proposals, for the record
 ├── decisions.py        # accept/decline records from the dashboard
 ├── dashboard.py        # the payload the dashboard renders
 ├── mcp/                # the RobinHood tool contract and response parsers
 ├── store/              # price history and cached account state
-├── strategy/           # signals, regime detection, composite blending
-└── execution/          # plans, order payloads, approval gate, kill switch
+├── strategy/           # the trend ladder: one pure rule, live and backtest
+└── execution/          # order payloads, approval gate, kill switch
 
 dashboard/              # Next.js app, deployable to Vercel
 ```
@@ -205,13 +197,11 @@ destination, not a dead end — but it is refused until the promotion criteria i
 makes every proposal fail the `execution_mode` risk check.
 
 The good news for Phase 2 is that only *one* step is human-shaped. Sizing, the
-17 risk rules, the kill switch, the price-drift re-check, the
+14 risk rules, the kill switch, the price-drift re-check, the
 remaining-quantity accounting and the audit-log daily caps all already run
 without a human. Phase 2 swaps the authorization source; it does not rework the
 pipeline.
 
-**Next up.** The first shadow run with real keys: confirm the Robinhood REST
-shapes, then let it run long enough to compare hit rates by status. Did what
-System 2 proposed beat what it passed on? Did escalated candidates beat the
-ones held back? The dashboard answers the first two directly (accuracy by
-pipeline stage). See [`docs/roadmap.md`](./docs/roadmap.md).
+**Next up.** Run `rhca backtest` on real bars and hold the trend ladder to the
+bar in [`docs/strategy.md`](./docs/strategy.md#validating-it) before
+approving its first live proposal. See [`docs/roadmap.md`](./docs/roadmap.md).

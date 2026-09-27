@@ -10,9 +10,7 @@ nothing depends on :func:`push`.
 
 What is deliberately **not** in the payload
 -------------------------------------------
-Account numbers, buying power, portfolio value, position sizes, order ids — and
-System 2's written rationale, because Sonnet reads the holdings and may quote
-them. The dashboard's job is to show what the agent *suggested* and whether
+Account numbers, buying power, portfolio value, position sizes and order ids. The dashboard's job is to show what the agent *suggested* and whether
 those suggestions were any good. It does not need to know how much money is
 behind them, and a dashboard that never receives that data cannot leak it.
 """
@@ -57,6 +55,7 @@ SHAREABLE_FINDING_MESSAGES = frozenset(
         "order_type_supported",
         "quote_freshness",
         "spread",
+        # System 1's, retired; its records in the log still carry them.
         "signal_confidence",
         "signal_strength",
     }
@@ -77,10 +76,15 @@ PROPOSAL_FIELDS = (
     "status",
     "risk_passed",
     "risk_failures",
+    "strategy",
+    "rule",
+    "step",
+    "trigger_reason",
+    # System 1's, retired 2026-09-27. Absent on the ladder's proposals; its
+    # own records in the log still carry them.
     "score",
     "confidence",
     "regime",
-    "trigger_reason",
     "system2_decision",
     "system2_confidence",
 )
@@ -138,8 +142,9 @@ def build_payload(
         else:
             row["outcome"] = None
 
-        # Blocked, never-escalated and System-2-declined candidates are shown
-        # for the record, but only a live proposal gets an Accept button.
+        # Blocked proposals (and System 1's never-escalated and declined
+        # candidates) are shown for the record, but only a live proposal gets
+        # an Accept button.
         row["actionable"] = bool(record.get("risk_passed")) and (
             record.get("status", ProposalStatus.PROPOSED.value) == ProposalStatus.PROPOSED.value
         )
@@ -167,8 +172,6 @@ def build_payload(
             "by_regime": {k: v.to_dict() for k, v in group_by(outcomes, "regime").items()},
             "by_symbol": {k: v.to_dict() for k, v in group_by(outcomes, "symbol").items()},
             "by_side": {k: v.to_dict() for k, v in group_by(outcomes, "side").items()},
-            # The shadow run's question: did what System 2 proposed beat what
-            # it passed on, and what the trigger held back?
             "by_status": {k: v.to_dict() for k, v in group_by(outcomes, "status").items()},
         },
         "today": {
@@ -194,8 +197,8 @@ def build_payload(
 
 
 def _proposal_detail(record: dict[str, Any]) -> dict[str, Any]:
-    """Signals, plan and risk verdicts from the stored proposal, minus anything
-    that describes the account."""
+    """The reason, plan and risk verdicts from the stored proposal, minus
+    anything that describes the account. System 1's records carry signals."""
     stored = record.get("proposal") if isinstance(record.get("proposal"), dict) else {}
     view = stored.get("view") if isinstance(stored.get("view"), dict) else {}
     plan = stored.get("plan") if isinstance(stored.get("plan"), dict) else {}
@@ -228,9 +231,12 @@ def _proposal_detail(record: dict[str, Any]) -> dict[str, Any]:
             finding["message"] = str(f.get("message", ""))[:MAX_TEXT]
         findings.append(finding)
 
+    notes = [str(n) for n in view.get("notes") or []]
+    if stored.get("reason"):
+        notes = [str(stored["reason"])]
     return {
         "signals": signals,
-        "notes": [str(n)[:MAX_TEXT] for n in view.get("notes") or []],
+        "notes": [n[:MAX_TEXT] for n in notes],
         "plan": {
             "style": plan.get("style"),
             "tranches": len(plan.get("tranches") or []),
@@ -302,7 +308,6 @@ def _pipeline(config: AgentConfig) -> dict[str, Any] | None:
         "last_cycle_at": beat.get("last_cycle_at"),
         "cycles": beat.get("cycles"),
         "counts": beat.get("counts") or {},
-        "escalations_today": beat.get("escalations_today"),
         "services": beat.get("services") or {},
         "last_error": {"task": error.get("task"), "at": error.get("at")} if error else None,
         "stale_after_seconds": stale_after_seconds(config),

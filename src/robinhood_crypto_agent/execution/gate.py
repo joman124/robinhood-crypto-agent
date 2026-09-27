@@ -19,10 +19,11 @@ The rules it enforces, and why each one exists:
   proposal rather than filling against a stale quote.
 * **Already-filled quantity is subtracted.** A staged plan fills over several
   tranches, and re-approving one must not silently double the position.
-* **Only a proposal can be approved.** ``rhca run`` logs every candidate,
-  including ones the trigger held back (``not_escalated``) and ones System 2
-  passed on (``declined_by_system2``). Those are records, not proposals. To act
-  on one anyway, run ``rhca analyze`` for a fresh proposal and approve that.
+* **Only a proposal can be approved.** The retired System 1 logged candidates
+  its trigger held back (``not_escalated``) and ones System 2 passed on
+  (``declined_by_system2``). Those are records, not proposals, and stay
+  unapprovable. To act on the idea anyway, run ``rhca analyze`` for a fresh
+  proposal and approve that.
 
 The gate returns a *payload*, not a filled order. Calling the MCP tool remains
 a separate, deliberate act.

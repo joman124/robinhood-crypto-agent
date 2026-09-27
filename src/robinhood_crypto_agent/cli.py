@@ -17,11 +17,10 @@ so nothing has to be retyped or paraphrased -- paraphrasing a tool response is
 how a fabricated fill ends up in an audit log.
 
 **``rhca run``, in shadow mode.** The real-time loop reads quotes and trading
-pairs from Robinhood's Crypto API with a read-only client, labels news with Jev
-and escalates strong candidates to Claude Sonnet 5 (see ``runner``). Balance and
-holdings are the Agentic account's, as ``rhca ingest`` last cached them. It
-proposes; it cannot order. Its proposals go through the same ``rhca approve``
-gate.
+pairs from Robinhood's Crypto API with a read-only client and runs the trend
+ladder on every closed bar (see ``runner``). Balance and holdings are the
+Agentic account's, as ``rhca ingest`` last cached them. It proposes; it cannot
+order. Its proposals go through the same ``rhca approve`` gate.
 """
 
 from __future__ import annotations
@@ -42,14 +41,13 @@ from . import reports
 from . import runner as runner_mod
 from .agent import Agent, MarketState
 from .audit import AuditLog, day_from
-from .bootstrap import fetch_coinbase_candles, fetch_coinbase_history
+from .bootstrap import fetch_coinbase_history
 from .config import AgentConfig, load_config
 from .errors import AgentError
 from .execution.gate import ApprovalGate
 from .execution.kill_switch import REASON_DAILY_LOSS, REASON_MANUAL, KillSwitch
 from .execution.orders import build_plan_requests
-from .jev import API_KEY_ENV as JEV_KEY_ENV
-from .jev import JevClient
+from .ledger import LadderPosition, ladder_positions
 from .mcp.contract import CRYPTO_TOOLS, TOOL_CONTRACTS, validate_crypto_order_args
 from .mcp.parse import (
     parse_accounts,
@@ -68,8 +66,8 @@ from .robinhood import RobinhoodClient, generate_key_pair
 from .serde import proposal_from_dict
 from .store import PriceStore, StateCache
 from .store.state import SECTION_CRYPTO_BUYING_POWER
+from .strategy.ladder import describe_steps
 from .symbols import canonical
-from .system2 import System2
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -109,8 +107,6 @@ def check_account(account: Any, expected: str) -> None:
 CREDENTIAL_ENVS = (
     ROBINHOOD_KEY_ENV,
     ROBINHOOD_PRIVATE_KEY_ENV,
-    JEV_KEY_ENV,
-    "ANTHROPIC_API_KEY",
     "RHCA_DASHBOARD_URL",
     "RHCA_DASHBOARD_TOKEN",
 )
@@ -274,16 +270,71 @@ def cmd_status(args: argparse.Namespace) -> int:
         )
     print()
 
+    for line in describe_ladder(config, audit, state):
+        print(line)
+    print()
+
     coverages = [
         store.coverage(
             symbol,
             interval_minutes=config.strategy.bar_interval_minutes,
-            required_bars=config.strategy.min_bars,
+            required_bars=config.strategy.required_bars,
         )
         for symbol in config.watchlist
     ]
     print(reports.render_coverage(coverages))
     return EXIT_OK
+
+
+def describe_ladder(config: AgentConfig, audit: AuditLog, state: StateCache) -> list[str]:
+    """``rhca status`` lines for the ladder: the rule, then each coin's cycle
+    and P&L as the recorded fills have it."""
+    settings = config.strategy
+    ladder = settings.ladder()
+    trend = (
+        f"buys only above the {settings.trend_days}-day average"
+        + (", sells everything at or under it" if ladder.trend_exit else "")
+        if settings.trend_days
+        else "no trend filter"
+    )
+    lines = [f"ladder         : anchor mode, steps {describe_steps(ladder.steps)}; {trend}"]
+    positions = ladder_positions(audit)
+    quotes = state.quotes()
+    for symbol in config.watchlist:
+        position = positions.get(symbol) or LadderPosition(symbol)
+        lines.append(f"  {symbol:13}: {_describe_position(position, quotes.get(symbol))}")
+    return lines
+
+
+def _describe_position(position: LadderPosition, quote: Any) -> str:
+    realized = f"realized ${round_money(position.realized_pnl)}"
+    if position.held <= 0:
+        state = (
+            f"flat since {position.flat_since:%Y-%m-%d %H:%M} UTC"
+            if position.flat_since
+            else "no ladder fill yet"
+        )
+        if position.in_cycle:
+            state = "an order is open, nothing filled yet"
+        return f"{state}; {realized}"
+    parts = [f"holding {format_decimal(position.held)}"]
+    cost = position.cost
+    if cost is not None:
+        parts.append(f"cost ${round_money(cost)}")
+        if quote is not None:
+            value = position.held * quote.bid
+            parts.append(f"worth ${round_money(value)} at the bid ({money_sign(value - cost)})")
+    steps = ", ".join(str(s + 1) for s in sorted(position.bought)) or "none"
+    parts.append(f"steps bought: {steps}")
+    if position.anchor is not None:
+        parts.append(f"anchor {format_decimal(position.anchor)}")
+    parts.append(realized)
+    return "; ".join(parts)
+
+
+def money_sign(value: Decimal) -> str:
+    rounded = round_money(value)
+    return f"-${-rounded}" if rounded < 0 else f"+${rounded}"
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
@@ -424,7 +475,7 @@ def _crypto_buying_power(row: dict[str, Any]) -> Decimal | None:
     return to_decimal(raw, field="crypto_buying_power") if raw is not None else None
 
 
-#: Quotes per bar the strategy treats as fully sampled (strategy/base.py).
+#: Quotes per bar that stand for a fully sampled exchange candle.
 FULL_BAR_OBSERVATIONS = 4
 
 
@@ -487,7 +538,7 @@ def cmd_import_history(args: argparse.Namespace) -> int:
     coverage = store.coverage(
         symbol,
         interval_minutes=config.strategy.bar_interval_minutes,
-        required_bars=config.strategy.min_bars,
+        required_bars=config.strategy.required_bars,
     )
     print(f"  {coverage.describe()}")
     return EXIT_OK
@@ -522,7 +573,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
                     "skipped": [
                         {"symbol": o.symbol, "reason": o.skipped_reason, "bars": o.bars}
                         for o in result.outcomes
-                        if o.proposal is None
+                        if not o.proposals
                     ],
                 },
                 indent=2,
@@ -929,7 +980,10 @@ def import_recent_history(
     interval = config.strategy.bar_interval_minutes
     for symbol in config.watchlist:
         try:
-            candles = fetch_coinbase_candles(symbol, interval_minutes=interval)
+            # Enough for the trend average: its window plus two days' slack.
+            candles = fetch_coinbase_history(
+                symbol, interval_minutes=interval, days=config.strategy.history_days
+            )
         except AgentError as exc:
             failures.append(f"{symbol}: {exc}")
             continue
@@ -940,7 +994,7 @@ def import_recent_history(
         missing = [c for c in candles if c.start not in existing]
         store.import_candles(missing)
         coverage = store.coverage(
-            symbol, interval_minutes=interval, required_bars=config.strategy.min_bars
+            symbol, interval_minutes=interval, required_bars=config.strategy.required_bars
         )
         imported.append((symbol, len(missing), coverage.describe()))
     return imported, failures
@@ -956,8 +1010,8 @@ def cmd_bootstrap_history(args: argparse.Namespace) -> int:
     if failures and not imported:
         raise AgentError("no symbol could be bootstrapped from Coinbase")
     print(
-        "\nImported bars are marked source=import and feed only the indicators; proposals "
-        "are always priced off a live Robinhood quote."
+        "\nImported bars are marked source=import. They set the anchor and the trend "
+        "average; proposals are always priced off a live Robinhood quote."
     )
     return EXIT_OK
 
@@ -1077,7 +1131,9 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         else list(config.watchlist)
     )
     try:
-        steps = backtest_mod.parse_ladder(args.ladder)
+        steps = (
+            backtest_mod.parse_ladder(args.ladder) if args.ladder else config.strategy.steps
+        )
     except (ValueError, ArithmeticError) as exc:
         raise AgentError(f"--ladder: {exc}") from exc
     round_trip = to_decimal(args.spread_pct, field="spread-pct")
@@ -1085,12 +1141,15 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     unknown = sorted(set(strategies) - set(backtest_mod.STRATEGY_NAMES))
     if unknown:
         raise AgentError(
-            f"unknown strategies {unknown}; choose from {list(backtest_mod.STRATEGY_NAMES)}"
+            f"unknown strategies {unknown}; choose from {list(backtest_mod.STRATEGY_NAMES)} "
+            "(System 1's 'signal' was retired with it)"
         )
 
-    trend_days = args.trend_days
+    trend_days = config.strategy.trend_days if args.trend_days is None else args.trend_days
     if trend_days < 0:
         raise AgentError("--trend-days must be 0 (off) or a number of days")
+    if args.roll_window < 0 or args.roll_step <= 0:
+        raise AgentError("--roll-window must be 0 (off) or days, and --roll-step positive")
     interval = config.strategy.bar_interval_minutes
 
     # With a trend filter, fetch trend_days more history than the window and
@@ -1133,15 +1192,12 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     base: dict[str, list[backtest_mod.Result]] = {}
     stressed: dict[str, list[backtest_mod.Result]] = {}
     for symbol, candles in series.items():
-        views = backtest_mod.signal_views(candles, config) if "signal" in strategies else None
         for runs, cost in ((base, round_trip), (stressed, round_trip * backtest_mod.STRESS_FACTOR)):
             runs[symbol] = backtest_mod.run_all(
                 candles,
-                config,
                 strategies=strategies,
                 steps=steps,
                 round_trip_pct=cost,
-                views=views,
                 trend=trends[symbol],
                 trend_days=trend_days,
             )
@@ -1167,6 +1223,21 @@ def cmd_backtest(args: argparse.Namespace) -> int:
             trend_days=trend_days,
         )
     )
+    if args.roll_window:
+        window = timedelta(days=args.roll_window)
+        step = timedelta(days=args.roll_step)
+        windows = backtest_mod.run_rolling(
+            series,
+            trends,
+            window=window,
+            step=step,
+            strategies=strategies,
+            steps=steps,
+            round_trip_pct=round_trip,
+            trend_days=trend_days,
+        )
+        print()
+        print(backtest_mod.render_rolling(windows, window=window, step=step))
     return EXIT_OK
 
 
@@ -1197,31 +1268,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     check_account(account, expected_account)
     state = StateCache(config.data_dir / "market_state.json")
 
-    system2 = None
-    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-        import anthropic  # only the live loop needs the SDK
-
-        fetch_quote, fetch_holdings = runner_mod.system2_tools(robinhood, state)
-        system2 = System2(
-            anthropic.Anthropic(),
-            fetch_quote=fetch_quote,
-            fetch_holdings=fetch_holdings,
-            model=config.pipeline.system2_model,
-            bar_minutes=config.strategy.bar_interval_minutes,
-            market_data_url=config.pipeline.market_data_mcp_url or None,
-        )
-
     dashboard_url = os.environ.get("RHCA_DASHBOARD_URL")
     dashboard_token = os.environ.get("RHCA_DASHBOARD_TOKEN")
     services = runner_mod.Services(
         robinhood=robinhood,
-        jev=JevClient.from_env(),
-        system2=system2,
         dashboard=(dashboard_url, dashboard_token) if dashboard_url and dashboard_token else None,
     )
 
-    # Headlines carry curly quotes and emoji; a legacy Windows console encoding
-    # would otherwise turn one into a logging traceback.
+    # A legacy Windows console encoding would otherwise turn a stray character
+    # in a log line into a logging traceback.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
@@ -1240,17 +1295,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     print(f"  agentic account  : {describe_ingested_balance(state)}")
     print(f"  watchlist        : {', '.join(config.watchlist)}")
-    print("  System 1         : indicators + news signal + 17 risk rules")
-    print(f"  Jev news labels  : {'on' if services.jev else f'OFF (set {JEV_KEY_ENV})'}")
-    system2_state = config.pipeline.system2_model if system2 else "OFF (set ANTHROPIC_API_KEY)"
-    print(f"  System 2         : {system2_state}")
-    market_data = config.pipeline.market_data_mcp_url if system2 else ""
-    print(f"  market data      : {market_data or 'off'} (System 2's MCP connector)")
+    ladder = config.strategy.ladder()
+    trend = (
+        f"buy only above the {config.strategy.trend_days}-day average"
+        + (", sell all at or under it" if ladder.trend_exit else "")
+        if ladder.trend_filter
+        else "no trend filter"
+    )
+    print(f"  rule             : trend ladder, {describe_steps(ladder.steps)}; {trend}")
+    print("  risk             : 14 rules, then a human approves each proposal by id")
     print(f"  dashboard sync   : {'on' if services.dashboard else 'off'}")
-    # Bootstrapping here rather than asking for it beforehand: a gap between
-    # the last imported bar and the first polled one reads to the indicators as
-    # one very long bar, and that gap opens every time the loop is restarted.
-    # Coinbase being unreachable is not a reason to refuse to start.
+    # Bootstrapping here rather than asking for it beforehand: the trend
+    # average needs weeks of bars, and every restart leaves a gap between the
+    # last imported bar and the first polled one. Coinbase being unreachable
+    # is not a reason to refuse to start.
     if args.no_bootstrap:
         print("  history          : bootstrap skipped (--no-bootstrap)")
     else:
@@ -1293,7 +1351,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser(
-        "run", help="the real-time loop in shadow mode: poll, score, escalate, record"
+        "run", help="the real-time loop in shadow mode: poll, run the ladder, record"
     )
     run.add_argument("--once", action="store_true", help="one cycle of every task, then exit")
     run.add_argument("--minutes", type=float, default=None, help="stop after this long")
@@ -1308,29 +1366,40 @@ def build_parser() -> argparse.ArgumentParser:
     run.set_defaults(func=cmd_run)
 
     bootstrap = sub.add_parser(
-        "bootstrap-history", help="import recent bars from Coinbase so indicators work at once"
+        "bootstrap-history",
+        help="import Coinbase bars so the trend average and anchor exist at once",
     )
     bootstrap.set_defaults(func=cmd_bootstrap_history)
 
     backtest = sub.add_parser(
         "backtest",
-        help="replay the dip/rip ladder, the signal strategy and buy-and-hold on history",
+        help="replay the trend ladder, the trend baseline and buy-and-hold on history",
     )
     backtest.add_argument("--symbols", default=None, help="comma-separated; default the watchlist")
     backtest.add_argument("--days", type=int, default=90, help="history to fetch (default 90)")
     backtest.add_argument(
-        "--strategies", default="ladder,signal,hold", help="any of ladder, signal, hold"
+        "--strategies", default="ladder,trend,hold", help="any of ladder, trend, hold"
     )
     backtest.add_argument(
-        "--ladder", default="5:5,10:10,20:20", help="percent:dollars steps (default 5:5,10:10,20:20)"
+        "--ladder",
+        default=None,
+        help="percent:dollars steps (default: config/strategy.yaml's, 5:5,10:10,20:20)",
     )
     backtest.add_argument(
         "--spread-pct", default=str(backtest_mod.DEFAULT_ROUND_TRIP_PCT),
         help="round trip charged on every trade, percent (default 1.9)",
     )
     backtest.add_argument(
-        "--trend-days", type=int, default=0,
-        help="also run the ladders buying only above this many days' average (0 = off)",
+        "--trend-days", type=int, default=None,
+        help="the trend average's window, in days (default: config/strategy.yaml's; 0 = off)",
+    )
+    backtest.add_argument(
+        "--roll-window", type=int, default=0,
+        help="also re-run every strategy over windows this many days long (0 = off)",
+    )
+    backtest.add_argument(
+        "--roll-step", type=int, default=30,
+        help="days between rolling windows' starts (default 30)",
     )
     backtest.add_argument("--refresh", action="store_true", help="refetch instead of the cache")
     backtest.add_argument(

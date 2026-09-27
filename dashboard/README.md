@@ -3,6 +3,15 @@
 A web view of every trade the agent has suggested, whether those suggestions
 turned out to be good, and a place to accept or decline the ones waiting on you.
 
+> **Since 2026-09-27 the agent trades the trend ladder** (`docs/strategy.md`),
+> and this frontend has not caught up. A ladder proposal arrives with `rule`
+> (`dip`, `take_profit`, `trend_exit`), `step` and its reason in `notes` and
+> `trigger_reason`. It carries no signals, score, confidence or System 2
+> verdict, so those show as blank, and it is not hit-rate scored: the ladder
+> waits days for its sells, so its measure is P&L (`rhca status`). The
+> panels below that describe signals, System 2 and accuracy by stage now
+> describe only the retired System 1's records.
+
 ## What is on the page
 
 - **Status strip.** Whether the shadow loop (`rhca run`) is running, the kill
@@ -141,7 +150,7 @@ rhca dashboard-sync --url http://localhost:3000 --token dev-token
   after that, and a loss if it lost money at all. A move that merely beat the
   spread on the mark is not a profit in practice, so it is not a win here.
 - A time exit is a rule closing a position, not a prediction, so it is not
-  scored.
+  scored. Neither is any of the trend ladder's proposals.
 - Outcomes are scored for **every** proposal, including ones you declined. The
   record is of the agent's judgement, not of the subset you happened to like.
 

@@ -12,13 +12,15 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field, replace
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from .errors import ConfigError
-from .models import ExecutionMode
+from .models import ExecutionMode, parse_timestamp
 from .numeric import ZERO, to_decimal
+from .strategy.ladder import DEFAULT_STEPS, MODE_ANCHOR, Ladder, parse_steps, trend_bars
 from .symbols import canonical
 
 DEFAULT_CONFIG_DIR = Path("config")
@@ -43,7 +45,6 @@ ABSOLUTE_CEILINGS: dict[str, Decimal] = {
 #: Floors, for limits where "too small" is the unsafe direction.
 ABSOLUTE_FLOORS: dict[str, Decimal] = {
     "min_notional_per_trade_usd": Decimal("1"),
-    "min_signal_confidence": Decimal("0.15"),
 }
 
 
@@ -60,13 +61,6 @@ class RiskLimits:
     max_spread_pct: Decimal = Decimal("0.75")
     price_drift_tolerance_pct: Decimal = Decimal("0.5")
     max_quote_age_seconds: int = 90
-    min_signal_confidence: Decimal = Decimal("0.35")
-    min_abs_score: Decimal = Decimal("0.25")
-    #: Every sell proposal that has resolved so far has lost or gone flat (0/52
-    #: decided as of 2026-09-25). Config can only make the agent more
-    #: conservative, so this is a boolean off-switch rather than a threshold --
-    #: there is no "less strict" version of a rule with a unanimous result.
-    disable_sell_side: bool = False
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any] | None) -> "RiskLimits":
@@ -80,16 +74,12 @@ class RiskLimits:
             "max_position_pct_of_portfolio",
             "max_spread_pct",
             "price_drift_tolerance_pct",
-            "min_signal_confidence",
-            "min_abs_score",
         ):
             if name in data and data[name] is not None:
                 limits = replace(limits, **{name: to_decimal(data[name], field=name)})
         for name in ("max_open_positions", "max_quote_age_seconds"):
             if name in data and data[name] is not None:
                 limits = replace(limits, **{name: int(data[name])})
-        if "disable_sell_side" in data and data["disable_sell_side"] is not None:
-            limits = replace(limits, disable_sell_side=bool(data["disable_sell_side"]))
 
         unknown = set(data) - set(vars(limits))
         if unknown:
@@ -125,177 +115,116 @@ class RiskLimits:
                 f"max_daily_notional_usd={self.max_daily_notional_usd}: a single trade "
                 "could not pass the daily cap"
             )
-        if not ZERO < self.min_abs_score <= Decimal(1):
-            raise ConfigError(f"min_abs_score must be in (0, 1], got {self.min_abs_score}")
 
 
 @dataclass(frozen=True)
 class StrategyConfig:
-    """Indicator parameters, regime weights, and the bar interval."""
+    """The trend ladder's settings (``strategy.ladder``), and the bar interval.
+
+    The agent trades the ladder in ``anchor`` mode; ``lot`` mode exists only as
+    a comparison row in ``rhca backtest``.
+    """
 
     bar_interval_minutes: int = 60
-    min_bars: int = 30
-    fast_ma: int = 12
-    slow_ma: int = 26
-    signal_ma: int = 9
-    rsi_period: int = 14
-    atr_period: int = 14
-    adx_period: int = 14
-    adx_trend_threshold: Decimal = Decimal("22")
-    breakout_lookback: int = 20
-    #: Per-bar volatility the sizing model targets, in percent. Size is cut
-    #: proportionally when realized volatility runs above this.
-    target_volatility_pct: Decimal = Decimal("1.0")
-    volatility_lookback: int = 20
-    #: How long a headline can move the news signal; its confidence decays
-    #: linearly to zero across this window.
-    news_window_minutes: int = 120
-    #: The time exit: once a coin the agent bought has been held this many
-    #: bars, propose selling it. Six matches the scoring horizon, so a position
-    #: is held for exactly the window its entry was graded on. 0 turns it off.
-    exit_after_bars: int = 6
-    #: ``news`` is optional: it only counts when a recent headline exists (see
-    #: strategy.composite), so its weight never dilutes a quiet-news blend.
-    weights: dict[str, dict[str, float]] = field(
-        default_factory=lambda: {
-            "trending": {
-                "trend": 0.50,
-                "momentum": 0.25,
-                "breakout": 0.15,
-                "mean_reversion": 0.10,
-                "news": 0.50,
-            },
-            "ranging": {
-                "mean_reversion": 0.50,
-                "trend": 0.15,
-                "momentum": 0.15,
-                "breakout": 0.20,
-                "news": 0.50,
-            },
-            "unknown": {
-                "trend": 0.25,
-                "momentum": 0.25,
-                "breakout": 0.25,
-                "mean_reversion": 0.25,
-                "news": 0.50,
-            },
-        }
-    )
+    #: (percent under the anchor, dollars) per step, in increasing order.
+    steps: tuple[tuple[Decimal, Decimal], ...] = DEFAULT_STEPS
+    #: Buy only on a close above the average of this many days of closes.
+    #: 0 turns the filter off (and with it the trend exit).
+    trend_days: int = 50
+    #: Sell everything on a close at or under that average.
+    trend_exit: bool = True
+    #: While the agent holds none of a coin, a dip is measured from the highest
+    #: close since this moment or since its last ladder position was sold,
+    #: whichever is later. ``None`` reads every stored bar.
+    anchor_since: datetime | None = None
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any] | None) -> "StrategyConfig":
         data = dict(data or {})
-        weights = data.pop("weights", None)
         config = cls()
         for name, value in data.items():
             if not hasattr(config, name):
                 raise ConfigError(f"unknown strategy setting: {name}")
             if value is None:
                 continue
-            current = getattr(config, name)
-            coerced = to_decimal(value, field=name) if isinstance(current, Decimal) else int(value)
+            try:
+                coerced = _coerce_strategy(name, value)
+            except (ValueError, ArithmeticError, TypeError) as exc:
+                raise ConfigError(f"strategy setting {name}: {exc}") from exc
             config = replace(config, **{name: coerced})
-        if weights is not None:
-            # Merge over the defaults rather than replacing them: configuring
-            # the trending weights must not delete the ranging and unknown
-            # ones, which would leave weights_for() with no entry to fall back
-            # to for an unconfigured regime.
-            merged = {regime: dict(w) for regime, w in cls().weights.items()}
-            merged.update(_normalize_weights(weights))
-            config = replace(config, weights=merged)
         config.validate()
         return config
 
     def validate(self) -> None:
-        if self.fast_ma >= self.slow_ma:
-            raise ConfigError(
-                f"fast_ma={self.fast_ma} must be shorter than slow_ma={self.slow_ma}"
-            )
-        if self.target_volatility_pct <= ZERO:
-            raise ConfigError("target_volatility_pct must be positive")
-        if self.exit_after_bars < 0:
-            raise ConfigError("exit_after_bars must be 0 (off) or a number of bars")
-        for name in ("bar_interval_minutes", "min_bars", "rsi_period", "atr_period",
-                     "adx_period", "breakout_lookback", "signal_ma", "volatility_lookback",
-                     "news_window_minutes"):
-            if getattr(self, name) < 1:
-                raise ConfigError(f"{name} must be at least 1")
-        required = {"trend", "momentum", "breakout", "mean_reversion"}
-        for regime, weights in self.weights.items():
-            missing = required - set(weights)
-            if missing:
-                raise ConfigError(f"weights[{regime}] is missing: {', '.join(sorted(missing))}")
+        if self.bar_interval_minutes < 1:
+            raise ConfigError("bar_interval_minutes must be at least 1")
+        if self.trend_days < 0:
+            raise ConfigError("trend_days must be 0 (off) or a number of days")
+        try:
+            self.ladder()
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
 
-    def weights_for(self, regime: str) -> dict[str, float]:
-        """Weights for a regime, falling back to the equal-weight 'unknown' set."""
-        return dict(self.weights.get(regime) or self.weights.get("unknown") or {})
+    def ladder(self) -> Ladder:
+        """The rule the agent trades."""
+        filtered = self.trend_days > 0
+        return Ladder(
+            steps=self.steps,
+            mode=MODE_ANCHOR,
+            trend_filter=filtered,
+            trend_exit=filtered and self.trend_exit,
+        )
 
+    @property
+    def trend_bars(self) -> int:
+        """Bars in the trend average; 0 when the filter is off."""
+        return trend_bars(self.trend_days, self.bar_interval_minutes) if self.trend_days else 0
 
-def _normalize_weights(raw: Any) -> dict[str, dict[str, float]]:
-    """Validate and L1-normalize each regime's weights so they sum to 1."""
-    if not isinstance(raw, dict):
-        raise ConfigError("strategy weights must be a mapping of regime -> weights")
-    normalized: dict[str, dict[str, float]] = {}
-    for regime, weights in raw.items():
-        if not isinstance(weights, dict) or not weights:
-            raise ConfigError(f"weights[{regime}] must be a non-empty mapping")
-        values = {}
-        for name, weight in weights.items():
-            value = float(weight)
-            if value < 0:
-                raise ConfigError(f"weights[{regime}][{name}]={value} must not be negative")
-            values[str(name)] = value
-        total = sum(values.values())
-        if total <= 0:
-            raise ConfigError(f"weights[{regime}] sum to {total}; at least one must be positive")
-        normalized[str(regime)] = {name: value / total for name, value in values.items()}
-    return normalized
+    @property
+    def required_bars(self) -> int:
+        """Closed bars needed before the rule can say anything."""
+        return max(1, self.trend_bars)
+
+    @property
+    def history_days(self) -> int:
+        """Days of bars to keep on hand: the trend window and two days' slack."""
+        return self.required_bars * self.bar_interval_minutes // (24 * 60) + 2
 
 
-#: Crypto.com's public market-data MCP server: free, keyless, read-only.
-DEFAULT_MARKET_DATA_MCP_URL = "https://mcp.crypto.com/market-data/mcp"
+def _coerce_strategy(name: str, value: Any) -> Any:
+    if name == "steps":
+        if isinstance(value, (list, tuple)):
+            value = ",".join(str(v) for v in value)
+        return parse_steps(str(value))
+    if name == "trend_exit":
+        if not isinstance(value, bool):
+            raise ValueError("expected true or false")
+        return value
+    if name == "anchor_since":
+        if isinstance(value, datetime):
+            return parse_timestamp(value)
+        if isinstance(value, date):
+            return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+        return parse_timestamp(str(value))
+    return int(value)
 
-DEFAULT_RSS_FEEDS: tuple[str, ...] = (
-    "https://cointelegraph.com/rss",
-    "https://decrypt.co/feed",
-    "https://www.theblock.co/rss.xml",
-    "https://bitcoinmagazine.com/feed",
-    "https://cryptoslate.com/feed/",
-)
 
-#: Ceilings and floors for the real-time pipeline. These bound *spend and
-#: politeness*, not trading risk -- the risk engine is untouched by anything
-#: here -- but they are code ceilings for the same reason: a YAML typo must not
-#: turn into a thousand Sonnet calls or a rate-limit ban.
-PIPELINE_CEILINGS = {"max_escalations_per_day": 200}
+#: Floors for the real-time loop's cadences. They bound politeness, not
+#: trading risk: a YAML typo must not turn into a rate-limit ban.
 PIPELINE_FLOORS = {
     "quote_interval_seconds": 10,
     "account_interval_seconds": 60,
-    "news_interval_seconds": 60,
     "sync_interval_seconds": 60,
 }
 
+
 @dataclass(frozen=True)
 class PipelineConfig:
-    """Cadences, the escalation trigger, and the news sources for ``rhca run``."""
+    """Cadences for ``rhca run``."""
 
     quote_interval_seconds: int = 60
     account_interval_seconds: int = 600
-    news_interval_seconds: int = 120
     sync_interval_seconds: int = 300
-    #: The trigger: a candidate goes to System 2 only when it passed every
-    #: risk rule *and* clears these, which are meant to sit above the risk
-    #: engine's own minimums.
-    trigger_min_confidence: Decimal = Decimal("0.5")
-    trigger_min_abs_score: Decimal = Decimal("0.3")
-    escalation_cooldown_minutes: int = 60
-    max_escalations_per_day: int = 24
-    system2_model: str = "claude-sonnet-5"
-    rss_feeds: tuple[str, ...] = DEFAULT_RSS_FEEDS
-    #: A remote MCP server System 2 may query for market data, through the
-    #: Anthropic API's MCP connector. Its tools are allowlisted by name in
-    #: system2.py; "" turns it off.
-    market_data_mcp_url: str = DEFAULT_MARKET_DATA_MCP_URL
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any] | None) -> "PipelineConfig":
@@ -306,18 +235,7 @@ class PipelineConfig:
                 raise ConfigError(f"unknown pipeline setting: {name}")
             if value is None:
                 continue
-            current = getattr(config, name)
-            if isinstance(current, tuple):
-                if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-                    raise ConfigError(f"{name} must be a list of strings")
-                coerced: Any = tuple(v.strip() for v in value)
-            elif isinstance(current, Decimal):
-                coerced = to_decimal(value, field=name)
-            elif isinstance(current, str):
-                coerced = str(value)
-            else:
-                coerced = int(value)
-            config = replace(config, **{name: coerced})
+            config = replace(config, **{name: int(value)})
         config.validate()
         return config
 
@@ -325,23 +243,6 @@ class PipelineConfig:
         for name, floor in PIPELINE_FLOORS.items():
             if getattr(self, name) < floor:
                 raise ConfigError(f"{name}={getattr(self, name)} is below the floor of {floor}")
-        for name, ceiling in PIPELINE_CEILINGS.items():
-            value = getattr(self, name)
-            if not 0 <= value <= ceiling:
-                raise ConfigError(f"{name}={value} must be between 0 and {ceiling}")
-        if not ZERO <= self.trigger_min_confidence <= Decimal(1):
-            raise ConfigError("trigger_min_confidence must be in [0, 1]")
-        if not ZERO < self.trigger_min_abs_score <= Decimal(1):
-            raise ConfigError("trigger_min_abs_score must be in (0, 1]")
-        if self.escalation_cooldown_minutes < 0:
-            raise ConfigError("escalation_cooldown_minutes must not be negative")
-        for url in self.rss_feeds:
-            if not url.startswith("https://"):
-                raise ConfigError(f"RSS feeds must be https URLs, got {url!r}")
-        if self.market_data_mcp_url and not self.market_data_mcp_url.startswith("https://"):
-            raise ConfigError(
-                f"market_data_mcp_url must be an https URL or empty, got {self.market_data_mcp_url!r}"
-            )
 
 
 @dataclass(frozen=True)
@@ -371,10 +272,6 @@ class AgentConfig:
     @property
     def proposals_path(self) -> Path:
         return self.data_dir / "proposals.jsonl"
-
-    @property
-    def news_path(self) -> Path:
-        return self.data_dir / "news.jsonl"
 
     @property
     def heartbeat_path(self) -> Path:

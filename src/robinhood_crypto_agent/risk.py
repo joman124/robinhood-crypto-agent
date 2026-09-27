@@ -26,8 +26,6 @@ from .config import AgentConfig
 from .execution.kill_switch import KillSwitchState
 from .mcp.contract import ORDER_COLLARS
 from .models import (
-    CompositeView,
-    Direction,
     ExecutionMode,
     OrderType,
     PairConstraints,
@@ -42,15 +40,12 @@ from .numeric import ZERO, round_money
 from .sizing import SizingResult
 from .symbols import canonical
 
-#: Rules an exit does not answer to, and why. An exit closes a position the
-#: agent opened: it is not a signal, it only lowers exposure, and blocking it
-#: on a cap would leave the position open -- the one outcome the exit exists to
-#: prevent. Every other rule still applies, the kill switch and sell coverage
-#: included.
+#: Rules a sell does not answer to, and why. Every sell the ladder makes closes
+#: (part of) a position it opened -- a take-profit or the trend exit -- so it
+#: only lowers exposure, and blocking it on a cap would leave the position
+#: open: the one outcome the sell exists to prevent. Every other rule still
+#: applies, the kill switch and sell coverage included.
 EXIT_EXEMPT_RULES: dict[str, str] = {
-    "sell_side_disabled": "the sell-side switch governs signal sells, not closing a position",
-    "signal_confidence": "an exit is a rule, not a signal",
-    "signal_strength": "an exit is a rule, not a signal",
     "per_trade_notional": "the cap limits new exposure; selling what was bought lowers it",
     "daily_notional": "the cap limits new exposure; selling what was bought lowers it",
 }
@@ -86,7 +81,7 @@ class RiskEngine:
 
     def evaluate(
         self,
-        view: CompositeView,
+        symbol: str,
         sizing: SizingResult,
         context: RiskContext,
         *,
@@ -100,19 +95,16 @@ class RiskEngine:
 
         add(self._check_execution_mode())
         add(self._check_kill_switch(context))
-        add(self._check_watchlist(view.symbol))
-        add(self._check_sell_side_disabled(sizing))
+        add(self._check_watchlist(symbol))
         add(self._check_tradable(context))
         add(self._check_order_type(context))
         add(self._check_quote_freshness(context))
         add(self._check_spread(context))
-        add(self._check_confidence(view))
-        add(self._check_score(view))
         add(self._check_sizing(sizing))
         add(self._check_per_trade_notional(sizing))
         add(self._check_daily_notional(sizing, context))
         add(self._check_daily_loss(context))
-        add(self._check_open_positions(view, sizing, context))
+        add(self._check_open_positions(symbol, sizing, context))
         add(self._check_concentration(sizing, context))
         add(self._check_sell_coverage(sizing, context))
 
@@ -158,30 +150,6 @@ class RiskEngine:
                 if allowed
                 else f"{symbol} is not on the watchlist allowlist "
                 f"({', '.join(self.config.watchlist)})"
-            ),
-        )
-
-    def _check_sell_side_disabled(self, sizing: SizingResult) -> RiskFinding:
-        if sizing.side is not Side.SELL:
-            return RiskFinding(
-                rule="sell_side_disabled",
-                passed=True,
-                message="buy order; the sell-side gate does not apply",
-            )
-        if not self.limits.disable_sell_side:
-            return RiskFinding(
-                rule="sell_side_disabled",
-                passed=True,
-                message="sell proposals are enabled",
-            )
-        return RiskFinding(
-            rule="sell_side_disabled",
-            passed=False,
-            message=(
-                "sell proposals are disabled in risk_limits.yaml: every sell that has "
-                "resolved so far has lost or gone flat (0 wins across decided sells as "
-                "of 2026-09-25). Re-enable by setting disable_sell_side: false once "
-                "there is evidence the sell signal has improved."
             ),
         )
 
@@ -261,24 +229,6 @@ class RiskEngine:
             ),
         )
 
-    def _check_confidence(self, view: CompositeView) -> RiskFinding:
-        confidence = Decimal(str(round(view.confidence, 6)))
-        floor = self.limits.min_signal_confidence
-        return RiskFinding(
-            rule="signal_confidence",
-            passed=confidence >= floor,
-            message=f"composite confidence {view.confidence:.3f} (minimum {floor})",
-        )
-
-    def _check_score(self, view: CompositeView) -> RiskFinding:
-        score = Decimal(str(round(abs(view.score), 6)))
-        floor = self.limits.min_abs_score
-        return RiskFinding(
-            rule="signal_strength",
-            passed=score >= floor,
-            message=f"composite |score| {abs(view.score):.3f} (minimum {floor})",
-        )
-
     def _check_sizing(self, sizing: SizingResult) -> RiskFinding:
         if sizing.rejected_reason:
             return RiskFinding(
@@ -340,11 +290,11 @@ class RiskEngine:
         )
 
     def _check_open_positions(
-        self, view: CompositeView, sizing: SizingResult, context: RiskContext
+        self, symbol: str, sizing: SizingResult, context: RiskContext
     ) -> RiskFinding:
         cap = self.limits.max_open_positions
         open_now = context.open_position_count
-        existing = context.position_for(view.symbol)
+        existing = context.position_for(symbol)
         opens_new = sizing.side is Side.BUY and (existing is None or existing.quantity <= ZERO)
         projected = open_now + (1 if opens_new else 0)
         return RiskFinding(
@@ -352,7 +302,7 @@ class RiskEngine:
             passed=projected <= cap,
             message=(
                 f"{open_now} open position(s)"
-                + (f", this would open a new one in {view.symbol}" if opens_new else "")
+                + (f", this would open a new one in {symbol}" if opens_new else "")
                 + f" (cap {cap})"
             ),
         )
@@ -447,14 +397,6 @@ def _exempted(finding: RiskFinding, exit_reason: str) -> RiskFinding:
         passed=True,
         message=f"not applied to a {exit_reason}: {why} (would have read: {finding.message})",
     )
-
-
-def direction_to_side(direction: Direction) -> Side | None:
-    if direction is Direction.LONG:
-        return Side.BUY
-    if direction is Direction.SHORT:
-        return Side.SELL
-    return None
 
 
 def summarize(decision: RiskDecision) -> str:
