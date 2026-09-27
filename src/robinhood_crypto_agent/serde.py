@@ -49,6 +49,11 @@ def proposal_from_dict(data: dict[str, Any]) -> Proposal:
             risk=risk,
             status=ProposalStatus(str(data.get("status", ProposalStatus.PROPOSED.value))),
             sizing_detail=dict(data.get("sizing_detail") or {}),
+            spread_pct=(
+                to_decimal(data["spread_pct"], field="spread_pct")
+                if data.get("spread_pct") is not None
+                else None
+            ),
         )
     except (KeyError, ValueError, TypeError) as exc:
         raise AuditError(f"could not rehydrate proposal: {exc}") from exc

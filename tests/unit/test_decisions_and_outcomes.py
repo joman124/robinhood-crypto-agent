@@ -18,6 +18,8 @@ from robinhood_crypto_agent.execution.gate import OVERRIDE_PHRASE, ApprovalGate
 from robinhood_crypto_agent.execution.kill_switch import KillSwitch
 from robinhood_crypto_agent.models import Quote, Side, utcnow
 from robinhood_crypto_agent.outcomes import (
+    DEFAULT_EXIT_COST_PCT,
+    DEFAULT_HURDLE_PCT,
     AccuracyStats,
     Verdict,
     aggregate,
@@ -190,8 +192,9 @@ class TestOutcomeScoring:
         assert outcome.verdict is Verdict.WIN
         assert outcome.signed_move_pct > 0
 
-    def test_a_move_inside_the_hurdle_is_flat_not_a_win(self):
-        """A gain smaller than the round-trip cost is not a win."""
+    def test_a_gain_that_does_not_cover_the_exit_is_a_loss(self):
+        """The mark rose 0.8% past the ask paid: a win under the old 0.75%
+        hurdle, but selling at the bid, 0.95% below the mark, loses money."""
         t0 = self.anchor()
         outcome = score_proposal(
             proposal_id="p",
@@ -199,9 +202,41 @@ class TestOutcomeScoring:
             side=Side.BUY,
             reference_price=Decimal("100"),
             proposed_at=t0,
-            candles=make_candles([100 + i * 0.01 for i in range(20)], anchor=t0),
+            candles=make_candles([100.8] * 20, anchor=t0),
+        )
+        assert outcome.verdict is Verdict.LOSS
+        # 100.8 x (1 - 0.0095) = 99.8424: -0.1576% after the round trip.
+        assert outcome.signed_move_pct == Decimal("-0.1576")
+        assert "exit at the bid" in outcome.reason
+
+    def test_a_profit_under_the_hurdle_is_flat(self):
+        """Made money after the round trip, but no more than the hurdle."""
+        t0 = self.anchor()
+        outcome = score_proposal(
+            proposal_id="p",
+            symbol="BTC-USD",
+            side=Side.BUY,
+            reference_price=Decimal("100"),
+            proposed_at=t0,
+            candles=make_candles([101.1] * 20, anchor=t0),
         )
         assert outcome.verdict is Verdict.FLAT
+        assert Decimal("0") < outcome.signed_move_pct <= DEFAULT_HURDLE_PCT
+
+    def test_a_sell_buys_back_at_the_ask(self):
+        """A sell's round trip closes half a spread above the mark."""
+        t0 = self.anchor()
+        outcome = score_proposal(
+            proposal_id="p",
+            symbol="BTC-USD",
+            side=Side.SELL,
+            reference_price=Decimal("100"),
+            proposed_at=t0,
+            candles=make_candles([99.5] * 20, anchor=t0),
+            exit_cost_pct=Decimal("1"),
+        )
+        # Bought back at 99.5 x 1.01 = 100.495, above the 100 it sold at.
+        assert outcome.verdict is Verdict.LOSS
 
     def test_an_unelapsed_horizon_is_pending_not_a_loss(self):
         """An agent that just started must not look like a bad one."""
@@ -259,7 +294,7 @@ class TestAccuracyStats:
         series = {
             "win": [100 + i * 2 for i in range(20)],
             "loss": [100 - i * 2 for i in range(20)],
-            "flat": [100 + i * 0.01 for i in range(20)],
+            "flat": [101.1] * 20,
         }
         return [
             score_proposal(
@@ -311,6 +346,43 @@ class TestAccuracyStats:
         payload = aggregate(self.outcomes()).to_dict()
         assert payload["win_rate"] == pytest.approx(0.5)
         assert payload["decided"] == 2
+
+
+def test_a_record_is_charged_half_its_own_spread():
+    t0 = utcnow() - timedelta(hours=20)
+    record = {
+        "proposal_id": "p",
+        "symbol": "BTC-USD",
+        "side": "buy",
+        "reference_price": "100",
+        "recorded_at": t0.isoformat(),
+        "spread_pct": "3.0",
+    }
+    candles = make_candles([101.6] * 20, anchor=t0)
+    outcome = outcome_from_proposal_record(record, candles)
+    assert outcome.exit_cost_pct == Decimal("1.5")
+    # 101.6 x 0.985 = 100.076: +0.076%, under the hurdle.
+    assert outcome.verdict is Verdict.FLAT
+
+    # Without a recorded spread, the default 0.95%: 101.6 x 0.9905 = 100.635.
+    unrecorded = outcome_from_proposal_record(
+        {k: v for k, v in record.items() if k != "spread_pct"}, candles
+    )
+    assert unrecorded.exit_cost_pct == DEFAULT_EXIT_COST_PCT
+    assert unrecorded.verdict is Verdict.WIN
+
+
+def test_a_time_exit_is_not_scored_as_a_prediction():
+    t0 = utcnow() - timedelta(hours=20)
+    record = {
+        "proposal_id": "p",
+        "symbol": "BTC-USD",
+        "side": "sell",
+        "reference_price": "100",
+        "recorded_at": t0.isoformat(),
+        "exit": "time",
+    }
+    assert outcome_from_proposal_record(record, make_candles([90] * 20, anchor=t0)) is None
 
 
 def test_scoring_straight_from_an_audit_record(tmp_path):

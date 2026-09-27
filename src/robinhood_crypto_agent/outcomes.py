@@ -17,12 +17,24 @@ whether it was accepted, filled, or skipped. That is deliberate:
 Realized P&L lives in the audit log and is what the daily loss cap uses. The two
 answer different questions and should not be conflated.
 
-The hurdle
-----------
-A move only counts as a win if it clears a hurdle, because a trade that gains
-less than the round-trip cost is a loss in practice. Robinhood's market-maker
-crypto spreads were observed near 1.9% on BTC, so the default hurdle is not
-decorative — it is most of the battle.
+The round trip
+--------------
+A proposal is graded as the trade it would really have been: in at its
+reference price (the ask for a buy, which already pays half the spread), and
+out at the far side of the book when the horizon closes (the bid for a buy,
+half a spread below the mark). Robinhood's market-maker crypto spreads measure
+near 1.9%, so a buy has to lift the mark about 1.9% from where it started just
+to break even. Grading against the mark alone, as this module used to, called
+a trade that lost ~0.2% after costs a win.
+
+So the verdict is on the move *after* the exit cost:
+
+* **win** -- made more than the hurdle (``DEFAULT_HURDLE_PCT``) after the round trip;
+* **loss** -- lost money after the round trip, by any amount;
+* **flat** -- made money, but no more than the hurdle.
+
+The exit cost is half the spread recorded with the proposal, or
+``DEFAULT_EXIT_COST_PCT`` for a proposal logged before spreads were recorded.
 """
 
 from __future__ import annotations
@@ -33,6 +45,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Iterable, Sequence
 
+from .errors import AgentError
 from .models import Candle, Side, parse_timestamp, utcnow
 from .numeric import ZERO, format_decimal, round_money, to_decimal
 from .symbols import canonical
@@ -42,10 +55,13 @@ from .symbols import canonical
 #: enough that the result is still attributable to it.
 DEFAULT_HORIZON_BARS = 6
 
-#: Minimum signed move, in percent, for a proposal to count as a win. The
-#: default is set above a typical round-trip spread so that "win" means
-#: "would have made money", not merely "moved the right way".
-DEFAULT_HURDLE_PCT = Decimal("0.75")
+#: Profit, in percent and *after* the round trip, a proposal must make to count
+#: as a win. Anything that lost money after the round trip is a loss.
+DEFAULT_HURDLE_PCT = Decimal("0.25")
+
+#: The exit leg's cost, in percent of the mark, when a proposal did not record
+#: its spread: half of the ~1.9% measured on Robinhood's market-maker quotes.
+DEFAULT_EXIT_COST_PCT = Decimal("0.95")
 
 
 class Verdict(str, Enum):
@@ -81,6 +97,8 @@ class Outcome:
     #: declined_by_system2, rejected_by_risk -- so hit rates can be compared
     #: across what each stage let through and what it held back.
     status: str = "proposed"
+    #: What the exit leg cost, in percent of the mark: half the spread.
+    exit_cost_pct: Decimal = DEFAULT_EXIT_COST_PCT
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -99,6 +117,7 @@ class Outcome:
             ),
             "horizon_bars": self.horizon_bars,
             "hurdle_pct": format_decimal(self.hurdle_pct),
+            "exit_cost_pct": format_decimal(self.exit_cost_pct),
             "proposed_at": self.proposed_at.isoformat(),
             "resolved_at": self.resolved_at.isoformat() if self.resolved_at else None,
             "regime": self.regime,
@@ -121,8 +140,9 @@ def score_proposal(
     confidence: float = 0.0,
     horizon_bars: int = DEFAULT_HORIZON_BARS,
     hurdle_pct: Decimal = DEFAULT_HURDLE_PCT,
+    exit_cost_pct: Decimal = DEFAULT_EXIT_COST_PCT,
 ) -> Outcome:
-    """Resolve one proposal against the bars that followed it.
+    """Resolve one proposal against the bars that followed it, after the round trip.
 
     Returns a ``PENDING`` outcome when the horizon has not elapsed yet, and
     ``UNSCORABLE`` when history is missing over the window -- neither is
@@ -148,6 +168,7 @@ def score_proposal(
             score=score,
             confidence=confidence,
             reason=reason,
+            exit_cost_pct=exit_cost_pct,
         )
 
     if reference_price <= ZERO:
@@ -171,13 +192,20 @@ def score_proposal(
     if resolved_price <= ZERO:
         return build(Verdict.UNSCORABLE, reason="resolved price is not positive")
 
-    raw_move = (resolved_price - reference_price) / reference_price * Decimal(100)
-    # A sell proposal wins when the price falls, so the move is signed by side.
-    signed = raw_move if side is Side.BUY else -raw_move
+    # Out at the far side of the book: a buy sells at the bid, half a spread
+    # below the mark; a sell buys back at the ask, half a spread above it.
+    # The reference price already paid the entry half.
+    cost = exit_cost_pct / Decimal(100)
+    if side is Side.BUY:
+        exit_price = resolved_price * (Decimal(1) - cost)
+        signed = (exit_price - reference_price) / reference_price * Decimal(100)
+    else:
+        exit_price = resolved_price * (Decimal(1) + cost)
+        signed = (reference_price - exit_price) / reference_price * Decimal(100)
 
     if signed > hurdle_pct:
         verdict = Verdict.WIN
-    elif signed < -hurdle_pct:
+    elif signed < ZERO:
         verdict = Verdict.LOSS
     else:
         verdict = Verdict.FLAT
@@ -188,8 +216,9 @@ def score_proposal(
         move=signed,
         at=target.end,
         reason=(
-            f"{format_decimal(round_money(signed, 3))}% in the proposal's favour over "
-            f"{horizon_bars} bars against a {hurdle_pct}% hurdle"
+            f"{format_decimal(round_money(signed, 3))}% after the round trip over "
+            f"{horizon_bars} bars (exit at the {'bid' if side is Side.BUY else 'ask'}, "
+            f"{exit_cost_pct}% from the mark); a win needs more than {hurdle_pct}%"
         ),
     )
 
@@ -310,7 +339,13 @@ def outcome_from_proposal_record(
     horizon_bars: int = DEFAULT_HORIZON_BARS,
     hurdle_pct: Decimal = DEFAULT_HURDLE_PCT,
 ) -> Outcome | None:
-    """Score a proposal straight from its audit-log record."""
+    """Score a proposal straight from its audit-log record.
+
+    ``None`` for a record that cannot be scored, and for a time exit: an exit
+    is a rule closing a position, not a prediction, so it has no hit rate.
+    """
+    if record.get("exit"):
+        return None
     try:
         proposal_id = str(record["proposal_id"])
         symbol = canonical(str(record["symbol"]))
@@ -332,8 +367,21 @@ def outcome_from_proposal_record(
         confidence=float(record.get("confidence", 0.0) or 0.0),
         horizon_bars=horizon_bars,
         hurdle_pct=hurdle_pct,
+        exit_cost_pct=_exit_cost(record),
     )
     return replace(outcome, status=str(record.get("status") or "proposed"))
+
+
+def _exit_cost(record: dict[str, Any]) -> Decimal:
+    """Half the spread the proposal recorded, or the default when it has none."""
+    raw = record.get("spread_pct")
+    if raw is None:
+        return DEFAULT_EXIT_COST_PCT
+    try:
+        spread = to_decimal(raw, field="spread_pct")
+    except (AgentError, ValueError, ArithmeticError):
+        return DEFAULT_EXIT_COST_PCT
+    return spread / Decimal(2) if spread > ZERO else DEFAULT_EXIT_COST_PCT
 
 
 def horizon_elapsed_at(

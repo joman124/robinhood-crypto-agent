@@ -81,9 +81,9 @@ the evidence for whether each stage earns its place. Setup and keys:
 - **Logs everything, append-only.** Including proposals the risk engine
   blocked — that record is the evidence the controls do anything.
 - **Scores itself.** Every proposal is measured against what the price actually
-  did over a fixed horizon, past a hurdle set above the round-trip spread. A
-  gain smaller than the spread is not a win. With nothing resolved the hit rate
-  reads *unknown*, never 0%.
+  did over a fixed horizon, as the whole round trip: bought at the ask, sold at
+  the bid. A win made money after that; anything that lost money is a loss. With
+  nothing resolved the hit rate reads *unknown*, never 0%.
 - **Has a web dashboard** ([`dashboard/`](./dashboard)) for reviewing proposals,
   seeing the measured hit rate, and accepting or declining — which records a
   decision the agent replays through the same approval gate, never an order.
@@ -138,6 +138,9 @@ rhca record-execution <proposal-id> --tranche 0 -f response.json
 
 # How good have the suggestions been?
 rhca accuracy
+
+# Would a different rule have done better? Replays months of Coinbase bars
+rhca backtest --days 180
 
 # Push proposals + outcomes to the dashboard, pull back your accept/decline
 rhca dashboard-sync --url https://your-project.vercel.app --token "$TOKEN"

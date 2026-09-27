@@ -17,30 +17,35 @@ risk controls work.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Sequence
+from typing import Any, Sequence
 
 from .audit import AuditLog, DailyActivity, proposal_status_for
 from .config import AgentConfig
 from .execution.kill_switch import KillSwitch
-from .execution.orders import plan_for_view
+from .execution.orders import STYLE_PROMPT, plan_for_view, snap_price
+from .exits import EXIT_TIME, due_lots, open_lots
 from .indicators import latest
 from .models import (
     CompositeView,
     Direction,
+    ExecutionPlan,
     NewsItem,
     OrderType,
     PairConstraints,
     Position,
     Proposal,
     Quote,
+    Regime,
     RiskDecision,
     Side,
+    Tranche,
     utcnow,
 )
-from .numeric import ZERO
+from .numeric import ZERO, quantize_to_increment, round_money
 from .risk import RiskContext, RiskEngine
-from .sizing import size_position
+from .sizing import SizingResult, size_position
 from .store import PriceStore
 from .strategy import CompositeStrategy
 from .strategy.base import SignalContext
@@ -62,6 +67,9 @@ class MarketState:
     portfolio_value: Decimal | None = None
     #: Recent Jev-labeled news; each symbol sees only the items about it.
     news: list[NewsItem] = field(default_factory=list)
+    #: When ``positions`` was last ingested. A snapshot newer than a lot's fill
+    #: that holds none of the coin means it was sold outside the agent.
+    positions_as_of: datetime | None = None
 
     def quote_for(self, symbol: str) -> Quote | None:
         return self.quotes.get(canonical(symbol))
@@ -97,10 +105,12 @@ class AnalysisResult:
     outcomes: list[SymbolOutcome]
     activity: DailyActivity
     generated_at: object = field(default_factory=utcnow)
+    #: Time exits: sells of lots the agent bought and has held the horizon.
+    exits: list[Proposal] = field(default_factory=list)
 
     @property
     def proposals(self) -> list[Proposal]:
-        return [o.proposal for o in self.outcomes if o.proposal is not None]
+        return [o.proposal for o in self.outcomes if o.proposal is not None] + self.exits
 
     @property
     def executable(self) -> list[Proposal]:
@@ -148,7 +158,146 @@ class Agent:
             if record and outcome.proposal is not None:
                 self.audit.record_proposal(outcome.proposal)
 
-        return AnalysisResult(outcomes=outcomes, activity=activity)
+        exits = [
+            p
+            for p in self.exit_proposals(state, activity=activity, kill_state=kill_state)
+            if p.symbol in targets
+        ]
+        if record:
+            for proposal in exits:
+                self.audit.record_proposal(proposal, exit_annotations(proposal))
+
+        return AnalysisResult(outcomes=outcomes, activity=activity, exits=exits)
+
+    def exit_proposals(
+        self,
+        state: MarketState,
+        *,
+        activity: DailyActivity | None = None,
+        kill_state=None,
+        now: datetime | None = None,
+    ) -> list[Proposal]:
+        """A sell for each symbol with agent lots held ``exit_after_bars`` or longer.
+
+        It sells the lots that are due, capped at what the account holds. When
+        the holdings snapshot is older than the lots, a sell is still proposed,
+        and ``sell_coverage`` blocks it and says what it saw: re-ingesting
+        positions is the fix, and silence would hide the exit.
+        """
+        bars = self.config.strategy.exit_after_bars
+        if bars <= 0:
+            return []
+        now = now or utcnow()
+        hold = timedelta(minutes=bars * self.config.strategy.bar_interval_minutes)
+        lots = open_lots(self.audit)
+        due = due_lots(lots, now=now, hold=hold)
+        if not due:
+            return []
+        activity = activity or self.audit.daily_activity()
+        kill_state = kill_state or self.kill_switch.state()
+
+        proposals = []
+        for symbol, ready in sorted(due.items()):
+            quote = state.quote_for(symbol)
+            if quote is None:
+                continue  # the next analysis with a quote proposes it
+            held = state.positions.get(symbol)
+            held_quantity = held.quantity if held else ZERO
+            last_fill = max(lot.filled_at for lot in lots[symbol])
+            if held_quantity <= ZERO and state.positions_as_of and state.positions_as_of > last_fill:
+                continue  # a snapshot taken after the buy holds none: sold elsewhere
+            constraints = state.constraints_for(symbol)
+            due_quantity = sum((lot.quantity for lot in ready), ZERO)
+            quantity = min(due_quantity, held_quantity) if held_quantity > ZERO else due_quantity
+            quantity = quantize_to_increment(quantity, constraints.quantity_increment)
+            if quantity <= ZERO:
+                continue
+            proposals.append(
+                self._exit_proposal(
+                    symbol, quantity, ready, quote, constraints, state, activity, kill_state,
+                    hours=hold.total_seconds() / 3600,
+                )
+            )
+        return proposals
+
+    def _exit_proposal(
+        self,
+        symbol: str,
+        quantity: Decimal,
+        lots: list[Any],
+        quote: Quote,
+        constraints: PairConstraints,
+        state: MarketState,
+        activity: DailyActivity,
+        kill_state,
+        *,
+        hours: float,
+    ) -> Proposal:
+        reference_price = quote.bid if quote.bid > ZERO else quote.mark
+        since = min(lot.filled_at for lot in lots)
+        reason = f"time exit: bought {since:%Y-%m-%d %H:%M} UTC, held past {hours:g}h"
+        sizing = SizingResult(
+            symbol=symbol,
+            side=Side.SELL,
+            quantity=quantity,
+            notional=round_money(quantity * reference_price),
+            reference_price=reference_price,
+            detail={
+                "exit": EXIT_TIME,
+                "entry_proposal_ids": list(dict.fromkeys(lot.proposal_id for lot in lots)),
+                "held_since": since.isoformat(),
+            },
+        )
+        view = CompositeView(
+            symbol=symbol,
+            regime=Regime.UNKNOWN,
+            score=0.0,
+            confidence=0.0,
+            direction=Direction.SHORT,
+            signals=[],
+            weights={},
+            notes=[reason],
+        )
+        order_type = OrderType.MARKET if constraints.market_orders_only else OrderType.LIMIT
+        plan = ExecutionPlan(
+            style=STYLE_PROMPT,
+            tranches=[
+                Tranche(
+                    index=0,
+                    quantity=quantity,
+                    target_price=snap_price(reference_price, Side.SELL, constraints),
+                    order_type=order_type,
+                )
+            ],
+            rationale=f"{reason}: sell promptly at the bid, one order",
+        )
+        context = RiskContext(
+            config=self.config,
+            quote=quote,
+            constraints=constraints,
+            activity=activity,
+            kill_switch=kill_state,
+            positions=state.positions,
+            portfolio_value=state.portfolio_value,
+            order_type=order_type,
+        )
+        decision = self.risk_engine.evaluate(view, sizing, context, exit_reason="time exit")
+        created_at = utcnow()
+        return Proposal(
+            proposal_id=Proposal.make_id(symbol, Side.SELL, quantity, created_at),
+            symbol=symbol,
+            side=Side.SELL,
+            quantity=quantity,
+            reference_price=reference_price,
+            notional=sizing.notional,
+            created_at=created_at,
+            view=view,
+            plan=plan,
+            risk=decision,
+            status=proposal_status_for(decision.passed),
+            sizing_detail=sizing.detail,
+            spread_pct=quote.spread_pct,
+        )
 
     def _analyze_symbol(
         self,
@@ -261,6 +410,7 @@ class Agent:
             risk=decision,
             status=proposal_status_for(decision.passed),
             sizing_detail=sizing.detail,
+            spread_pct=quote.spread_pct,
         )
 
         return SymbolOutcome(
@@ -279,6 +429,21 @@ class Agent:
         if direction is Direction.SHORT and quote.bid > ZERO:
             return quote.bid
         return quote.mark
+
+
+def exit_annotations(proposal: Proposal) -> dict[str, Any]:
+    """The audit-log fields that mark a proposal as a time exit.
+
+    ``exit`` keeps it out of the hit rate, and ``trigger_reason`` is what the
+    dashboard shows as the reason for it.
+    """
+    detail = proposal.sizing_detail
+    return {
+        "exit": detail.get("exit", EXIT_TIME),
+        "entry_proposal_ids": detail.get("entry_proposal_ids", []),
+        "trigger_reason": proposal.view.notes[0] if proposal.view.notes else "time exit",
+        "escalated": False,
+    }
 
 
 def positions_by_symbol(positions: Sequence[Position]) -> dict[str, Position]:

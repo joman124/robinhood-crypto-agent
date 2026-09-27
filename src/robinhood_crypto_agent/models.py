@@ -454,6 +454,9 @@ class Proposal(JsonMixin):
     risk: RiskDecision
     status: ProposalStatus
     sizing_detail: dict[str, Any] = field(default_factory=dict)
+    #: The quote's bid/ask spread as a percentage of the mark, when proposed.
+    #: Outcome scoring charges half of it as the exit leg's cost.
+    spread_pct: Decimal | None = None
 
     @staticmethod
     def make_id(symbol: str, side: Side, quantity: Decimal, created_at: datetime) -> str:

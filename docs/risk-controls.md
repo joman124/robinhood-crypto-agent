@@ -44,7 +44,7 @@ whittled away one edit at a time.
 | `execution_mode` | mode is not `propose_only` |
 | `kill_switch` | the switch is engaged |
 | `watchlist` | the symbol is not on the allowlist |
-| `sell_side_disabled` | selling, while `disable_sell_side` is set (owner-toggled, 2026-09-25: every sell had lost or gone flat) |
+| `sell_side_disabled` | selling, while `disable_sell_side` is set (owner-toggled: on 2026-09-25 after every sell had lost or gone flat, off again 2026-09-26) |
 | `pair_tradable` | untradable, or globally halted (regional halt → warning) |
 | `order_type_supported` | a limit order on a `market_orders_only` pair |
 | `quote_freshness` | the reference quote is older than the cap |
@@ -65,6 +65,15 @@ Two details worth calling out:
 a sell can return ~5% less. `per_trade_notional` checks the worst case after
 that collar, not the nominal — so a cap that passes still holds if the price
 moves on the way in.
+
+**Exits.** A time exit (`exit_after_bars`, `config/strategy.yaml`) sells a
+lot the agent bought once it has been held that long. Five rules do not apply
+to it, because each would block closing a position rather than limit risk:
+`sell_side_disabled`, `signal_confidence`, `signal_strength`,
+`per_trade_notional` and `daily_notional`. Each still runs, and passes saying
+"not applied to a time exit" and what it would have found. Every other rule
+binds an exit as it binds a trade, the kill switch and `sell_coverage`
+included.
 
 **Warnings vs blocks.** A missing portfolio value makes `concentration`
 *unenforceable*, so it reports a non-blocking warning saying exactly that

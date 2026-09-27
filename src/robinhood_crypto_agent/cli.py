@@ -36,12 +36,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Sequence
 
+from . import backtest as backtest_mod
 from . import dashboard as dashboard_mod
 from . import reports
 from . import runner as runner_mod
 from .agent import Agent, MarketState
 from .audit import AuditLog, day_from
-from .bootstrap import fetch_coinbase_candles
+from .bootstrap import fetch_coinbase_candles, fetch_coinbase_history
 from .config import AgentConfig, load_config
 from .errors import AgentError
 from .execution.gate import ApprovalGate
@@ -58,7 +59,7 @@ from .mcp.parse import (
     parse_quotes,
     unwrap_results,
 )
-from .models import Candle, PairConstraints, parse_timestamp
+from .models import Candle, PairConstraints, parse_timestamp, utcnow
 from .numeric import format_decimal, round_money, to_decimal
 from .outcomes import DEFAULT_HORIZON_BARS, DEFAULT_HURDLE_PCT
 from .robinhood import API_KEY_ENV as ROBINHOOD_KEY_ENV
@@ -424,12 +425,21 @@ def _crypto_buying_power(row: dict[str, Any]) -> Decimal | None:
     return to_decimal(raw, field="crypto_buying_power") if raw is not None else None
 
 
-def cmd_import_history(args: argparse.Namespace) -> int:
-    config, state, store, audit = _context(args)
-    payload = _read_json(args.file)
-    rows = payload if isinstance(payload, list) else unwrap_results(payload)
-    symbol = canonical(args.symbol)
+#: Quotes per bar the strategy treats as fully sampled (strategy/base.py).
+FULL_BAR_OBSERVATIONS = 4
 
+
+def candles_from_rows(
+    payload: Any, symbol: str, interval_minutes: int, *, observations: int = 1
+) -> list[Candle]:
+    """Bars from start/open/high/low/close objects (or the *_price spellings).
+
+    ``observations`` is how many quotes each bar stands for. import-history
+    keeps 1, so its bars never read as better sampled than they were proven
+    to be; a backtest reading complete exchange candles passes
+    ``FULL_BAR_OBSERVATIONS``, as the bootstrap does.
+    """
+    rows = payload if isinstance(payload, list) else unwrap_results(payload)
     candles: list[Candle] = []
     for row in rows:
         try:
@@ -444,7 +454,7 @@ def cmd_import_history(args: argparse.Namespace) -> int:
         end = (
             parse_timestamp(str(end_raw))
             if end_raw
-            else start + timedelta(minutes=args.interval)
+            else start + timedelta(minutes=interval_minutes)
         )
         candles.append(
             Candle(
@@ -455,16 +465,21 @@ def cmd_import_history(args: argparse.Namespace) -> int:
                 high=high,
                 low=low,
                 close=close,
-                observations=1,
+                observations=observations,
             )
         )
-
     if not candles:
         raise AgentError(
             "no usable bars found. Expected objects with start/open/high/low/close "
             "(or begins_at/open_price/high_price/low_price/close_price)."
         )
+    return sorted(candles, key=lambda c: c.start)
 
+
+def cmd_import_history(args: argparse.Namespace) -> int:
+    config, state, store, audit = _context(args)
+    symbol = canonical(args.symbol)
+    candles = candles_from_rows(_read_json(args.file), symbol, args.interval)
     written = store.import_candles(candles)
     print(
         f"imported {len(candles)} bar(s) for {symbol} as {written} synthetic "
@@ -488,6 +503,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         constraints=state.pairs(),
         positions=state.positions(),
         portfolio_value=state.portfolio_value(),
+        positions_as_of=runner_mod.positions_as_of(state),
     )
     if not market.quotes:
         raise AgentError(
@@ -1000,6 +1016,134 @@ def describe_ingested_balance(state: StateCache) -> str:
     )
 
 
+#: How long fetched backtest history is reused before it is fetched again.
+BACKTEST_CACHE_HOURS = 6
+
+
+def backtest_history(
+    config: AgentConfig, symbol: str, *, days: int, refresh: bool = False
+) -> list[Candle]:
+    """``days`` of Coinbase bars, cached under data/backtest/.
+
+    Kept out of the price store on purpose: months of bars there would slow
+    every read the live loop makes, and the loop needs only the recent ones.
+    """
+    interval = config.strategy.bar_interval_minutes
+    path = config.data_dir / "backtest" / f"{canonical(symbol)}-{interval}m.json"
+    cached = runner_mod.read_json(path)
+    if cached is not None and not refresh:
+        try:
+            fetched_at = parse_timestamp(str(cached["fetched_at"]))
+            fresh = (
+                int(cached.get("days", 0)) >= days
+                and (utcnow() - fetched_at).total_seconds()
+                < BACKTEST_CACHE_HOURS * 3600
+            )
+        except (KeyError, ValueError, TypeError):
+            fresh = False
+        if fresh:
+            bars = candles_from_rows(
+                cached.get("bars") or [], symbol, interval, observations=FULL_BAR_OBSERVATIONS
+            )
+            oldest = utcnow() - timedelta(days=days)
+            return [c for c in bars if c.start >= oldest]
+    candles = fetch_coinbase_history(symbol, interval_minutes=interval, days=days)
+    if not candles:
+        raise AgentError(f"Coinbase returned no {interval}-minute bars for {symbol}")
+    runner_mod.write_json_atomic(
+        path,
+        {
+            "fetched_at": utcnow().isoformat(),
+            "days": days,
+            "bars": [
+                {
+                    "start": c.start.isoformat(),
+                    "open": format_decimal(c.open),
+                    "high": format_decimal(c.high),
+                    "low": format_decimal(c.low),
+                    "close": format_decimal(c.close),
+                }
+                for c in candles
+            ],
+        },
+    )
+    return candles
+
+
+def cmd_backtest(args: argparse.Namespace) -> int:
+    config = load_config(args.config_dir, data_dir=args.data_dir)
+    symbols = (
+        [canonical(s) for s in args.symbols.split(",") if s.strip()]
+        if args.symbols
+        else list(config.watchlist)
+    )
+    try:
+        steps = backtest_mod.parse_ladder(args.ladder)
+    except (ValueError, ArithmeticError) as exc:
+        raise AgentError(f"--ladder: {exc}") from exc
+    round_trip = to_decimal(args.spread_pct, field="spread-pct")
+    strategies = [s.strip() for s in args.strategies.split(",") if s.strip()]
+    unknown = sorted(set(strategies) - set(backtest_mod.STRATEGY_NAMES))
+    if unknown:
+        raise AgentError(
+            f"unknown strategies {unknown}; choose from {list(backtest_mod.STRATEGY_NAMES)}"
+        )
+
+    series: dict[str, list[Candle]] = {}
+    if args.bars_file:
+        if len(symbols) != 1:
+            raise AgentError("--bars-file replays one symbol: pass exactly one in --symbols")
+        series[symbols[0]] = candles_from_rows(
+            _read_json(args.bars_file),
+            symbols[0],
+            config.strategy.bar_interval_minutes,
+            observations=FULL_BAR_OBSERVATIONS,
+        )
+    else:
+        for symbol in symbols:
+            try:
+                series[symbol] = backtest_history(
+                    config, symbol, days=args.days, refresh=args.refresh
+                )
+            except AgentError as exc:
+                print(f"  ! {symbol}: {exc}", file=sys.stderr)
+    series = {symbol: bars for symbol, bars in series.items() if bars}
+    if not series:
+        raise AgentError("no history to backtest: every symbol failed to load")
+
+    base: dict[str, list[backtest_mod.Result]] = {}
+    stressed: dict[str, list[backtest_mod.Result]] = {}
+    for symbol, candles in series.items():
+        views = backtest_mod.signal_views(candles, config) if "signal" in strategies else None
+        for runs, cost in ((base, round_trip), (stressed, round_trip * backtest_mod.STRESS_FACTOR)):
+            runs[symbol] = backtest_mod.run_all(
+                candles,
+                config,
+                strategies=strategies,
+                steps=steps,
+                round_trip_pct=cost,
+                views=views,
+            )
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    symbol: [backtest_mod.summary(r) for r in results]
+                    for symbol, results in base.items()
+                },
+                indent=2,
+            )
+        )
+        return EXIT_OK
+    print(
+        backtest_mod.render_report(
+            base, stressed, steps=steps, round_trip_pct=round_trip, config=config
+        )
+    )
+    return EXIT_OK
+
+
 def _keep_awake() -> bool:
     """Ask Windows not to sleep while this process runs (reverts when it exits)."""
     if sys.platform != "win32":
@@ -1141,6 +1285,30 @@ def build_parser() -> argparse.ArgumentParser:
         "bootstrap-history", help="import recent bars from Coinbase so indicators work at once"
     )
     bootstrap.set_defaults(func=cmd_bootstrap_history)
+
+    backtest = sub.add_parser(
+        "backtest",
+        help="replay the dip/rip ladder, the signal strategy and buy-and-hold on history",
+    )
+    backtest.add_argument("--symbols", default=None, help="comma-separated; default the watchlist")
+    backtest.add_argument("--days", type=int, default=90, help="history to fetch (default 90)")
+    backtest.add_argument(
+        "--strategies", default="ladder,signal,hold", help="any of ladder, signal, hold"
+    )
+    backtest.add_argument(
+        "--ladder", default="5:5,10:10,20:20", help="percent:dollars steps (default 5:5,10:10,20:20)"
+    )
+    backtest.add_argument(
+        "--spread-pct", default=str(backtest_mod.DEFAULT_ROUND_TRIP_PCT),
+        help="round trip charged on every trade, percent (default 1.9)",
+    )
+    backtest.add_argument("--refresh", action="store_true", help="refetch instead of the cache")
+    backtest.add_argument(
+        "--bars-file", default=None,
+        help="replay these bars (JSON, as import-history takes) instead of fetching",
+    )
+    backtest.add_argument("--json", action="store_true", help="numbers as JSON")
+    backtest.set_defaults(func=cmd_backtest)
 
     keygen = sub.add_parser(
         "keygen", help="make the Robinhood API key pair; the private half goes into .env"

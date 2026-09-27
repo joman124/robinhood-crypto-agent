@@ -129,6 +129,9 @@ class AuditLog:
                 "score": proposal.view.score,
                 "confidence": proposal.view.confidence,
                 "regime": proposal.view.regime.value,
+                "spread_pct": (
+                    format_decimal(proposal.spread_pct) if proposal.spread_pct is not None else None
+                ),
                 "proposal": proposal.to_dict(),
             },
         )

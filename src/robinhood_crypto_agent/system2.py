@@ -368,8 +368,10 @@ def render_candidate(proposal: Proposal, news: Sequence[NewsItem], bar_minutes: 
         *([_headline(item) for item in headlines] or ["(none in the window)"]),
         "</headlines>",
         "",
-        f"Now: {utcnow().strftime('%Y-%m-%d %H:%M UTC')}. Scoring: a win is a close at least "
-        f"{DEFAULT_HURDLE_PCT}% in the trade's favor versus the reference price, "
-        f"{DEFAULT_HORIZON_BARS} bars of {bar_minutes} minutes after the proposal.",
+        f"Now: {utcnow().strftime('%Y-%m-%d %H:%M UTC')}. Scoring is on the whole round trip: "
+        "in at the reference price, out at the far side of the book (half a spread past "
+        f"the mark) {DEFAULT_HORIZON_BARS} bars of {bar_minutes} minutes after the proposal. "
+        f"A win makes more than {DEFAULT_HURDLE_PCT}% after that; anything that loses money "
+        "after it is a loss.",
     ]
     return "\n".join(lines)
