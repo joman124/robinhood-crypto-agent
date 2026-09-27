@@ -249,3 +249,47 @@ gate, sized within `config/risk_limits.yaml`. If it fails, the honest
 conclusion is that none of these rules earns back a 1.9% round trip at this
 size.
 
+
+### The breakout, tested
+
+On 2026-09-27, on real Coinbase bars for BTC, ETH, SOL and XRP, one $500
+account at the default size (1% risk per trade, 10% cap per coin):
+
+| | 180d | 365d | 730d |
+|---|---|---|---|
+| breakout return (stressed) | +5.2% (+4.3%) | −0.0% (−1.2%) | +30.6% (+26.9%) |
+| breakout max drawdown | −4.6% | −8.6% | −16.2% |
+| closed trades, expectancy | 6, −0.65R | 10, −0.96R | 31, **+0.67R** |
+| hold return | +25.8% | −38.4% | +36.2% |
+| hold max drawdown | −30.3% | −63.7% | −64.9% |
+
+Over 730 days its winners averaged +3.62R and its losers −0.95R, with 35%
+of closed trades winning and 14% of the account in coins on average. XRP
+supplied $87 of its $153. Without XRP it made +12.2% at +0.11R. In the 90-day
+rolling windows it made money in 8 of 22 and beat hold in 12. Its median
+window lost 2.0%, its worst 4.8% (hold's worst lost 37.9%), and its best made
+31.1%. In the 180- and 365-day runs every closed trade lost, and the four
+positions still open at the end held the gains.
+
+Against the bar:
+
+1. **Edge: passes.** It had 31 closed trades at +0.67R, and the stressed
+   run made +26.9%.
+2. **Risk: passes.** Its drawdown was −16.2% against hold's −64.9%, and its
+   return over drawdown 1.89 against 0.56.
+3. **The bad year: passes.** It made −0.0% while hold lost 38.4%.
+4. **Consistency: fails.** It made money in 8 of 22 windows, not more than
+   half, though its worst window (−4.8%) passes.
+5. **Breadth: passes.** Without XRP it still made +12.2%.
+
+**It does not clear the bar, so it does not trade live.** It is still the
+first rule here with a positive expectancy after costs, and its risk profile
+is far better than hold's. Two cautions go with that:
+
+- **31 trades is a small sample.** A few large winners carry the average, so
+  +0.67R is suggestive, not proven.
+- **XRP carries it.** Without XRP the edge per trade (+0.11R) is below the
+  +0.2R the bar asks for.
+
+The next evidence is the same rule, unchanged, over more history (runbook,
+"Backtesting").
