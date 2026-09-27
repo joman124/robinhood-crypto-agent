@@ -17,6 +17,12 @@ Three strategies on the same bars:
       at 5% over it, $10 at 10% over, and everything left at 20% over. Each
       step fires once per cycle.
 
+    With a trend filter (``--trend-days N``) a ladder buys only on a bar that
+    closed above the average of the last N days of closes; below it, it buys
+    nothing. Sells are unchanged, so a coin already held still exits by the
+    ladder's own rules. The average is warmed up on N days of bars fetched
+    before the window, so the window itself is the same as without the filter.
+
 ``signal``
     This agent's own System 1: the composite view each bar, buying only what
     would clear the risk floors *and* the escalation trigger, sized as live,
@@ -38,10 +44,10 @@ nearly every trade at a profit while holding a large loss it never sold.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from .config import AgentConfig
 from .models import Candle, CompositeView, Direction, PairConstraints, Position, Side
@@ -255,14 +261,46 @@ def _finish(strategy: str, candles: Sequence[Candle], book: Book, round_trip: De
     )
 
 
+def above_trend(candles: Sequence[Candle], bars: int) -> dict[datetime, bool]:
+    """Per bar start: did it close above the average of the last ``bars`` closes?
+
+    The average includes the bar itself, and a bar with fewer than ``bars``
+    closes behind it has no entry -- the filter reads that as "not above", so
+    nothing is bought before the average exists.
+    """
+    if bars <= 0:
+        raise ValueError("the trend average needs at least one bar")
+    out: dict[datetime, bool] = {}
+    closes: list[Decimal] = []
+    total = ZERO
+    for candle in candles:
+        closes.append(candle.close)
+        total += candle.close
+        if len(closes) > bars:
+            total -= closes[-bars - 1]
+        if len(closes) >= bars:
+            out[candle.start] = candle.close > total / Decimal(bars)
+    return out
+
+
+def trend_bars(days: int, bar_interval_minutes: int) -> int:
+    """How many bars make ``days`` of history."""
+    return max(1, days * 24 * 60 // bar_interval_minutes)
+
+
 def run_ladder(
     candles: Sequence[Candle],
     *,
     steps: Sequence[tuple[Decimal, Decimal]] = DEFAULT_LADDER,
     mode: str = "lot",
     round_trip_pct: Decimal = DEFAULT_ROUND_TRIP_PCT,
+    trend: Mapping[datetime, bool] | None = None,
 ) -> Result:
-    """The dip/rip ladder; see the module docstring for the exact rules."""
+    """The dip/rip ladder; see the module docstring for the exact rules.
+
+    ``trend`` (from :func:`above_trend`) blocks every buy on a bar that did not
+    close above its average. ``None`` is no filter.
+    """
     if mode not in LADDER_MODES:
         raise ValueError(f"ladder mode must be one of {LADDER_MODES}, got {mode!r}")
     book = Book(round_trip_pct / Decimal(2))
@@ -296,8 +334,9 @@ def run_ladder(
                     book.sell(candle.end, close, book.held if last_step else dollars / bid)
                     sold.add(level)
 
+        buying = trend is None or trend.get(candle.start, False)
         for level, (pct, dollars) in enumerate(steps):
-            if level in bought:
+            if level in bought or not buying:
                 continue
             if close <= anchor * (Decimal(1) - pct / Decimal(100)):
                 book.buy(candle.end, index, close, dollars, step=level)
@@ -477,14 +516,23 @@ def run_all(
     steps: Sequence[tuple[Decimal, Decimal]] = DEFAULT_LADDER,
     round_trip_pct: Decimal = DEFAULT_ROUND_TRIP_PCT,
     views: Sequence[CompositeView | None] | None = None,
+    trend: Mapping[datetime, bool] | None = None,
+    trend_days: int = 0,
 ) -> list[Result]:
-    """Every requested strategy on one symbol's bars; the ladder in both modes."""
+    """Every requested strategy on one symbol's bars; the ladder in both modes,
+    and again under the trend filter when ``trend`` is given."""
     results: list[Result] = []
     if "ladder" in strategies:
         for mode in LADDER_MODES:
             results.append(
                 run_ladder(candles, steps=steps, mode=mode, round_trip_pct=round_trip_pct)
             )
+        if trend is not None:
+            for mode in LADDER_MODES:
+                filtered = run_ladder(
+                    candles, steps=steps, mode=mode, round_trip_pct=round_trip_pct, trend=trend
+                )
+                results.append(replace(filtered, strategy=f"{filtered.strategy} +{trend_days}d"))
     if "signal" in strategies:
         results.append(run_signal(candles, config, round_trip_pct=round_trip_pct, views=views))
     if "hold" in strategies:
@@ -545,7 +593,7 @@ def pool(results: Sequence[Result]) -> list[Pooled]:
 
 
 _HEADER = (
-    f"  {'strategy':<16}{'trades':>7}{'win closed':>12}{'win +open':>11}"
+    f"  {'strategy':<22}{'trades':>7}{'win closed':>12}{'win +open':>11}"
     f"{'total P&L':>11}{'on capital':>12}{'worst dd':>10}{'tied up':>9}"
     f"{'open P&L':>10}{'stressed':>11}"
 )
@@ -558,7 +606,7 @@ def _trades(row: Result | Pooled) -> int:
 def _row(name: str, row: Result | Pooled, stressed: Result | Pooled) -> str:
     on_capital = row.total / row.max_capital * Decimal(100) if row.max_capital > ZERO else None
     return (
-        f"  {name:<16}{_trades(row):>7}"
+        f"  {name:<22}{_trades(row):>7}"
         f"{rate(row.closed_win_rate):>12}{rate(row.win_rate_with_open):>11}"
         f"{money(row.total):>11}{pct(on_capital):>12}{money(row.max_drawdown):>10}"
         f"{money(row.max_capital):>9}{money(row.unrealized):>10}{money(stressed.total):>11}"
@@ -572,6 +620,7 @@ def render_report(
     steps: Sequence[tuple[Decimal, Decimal]],
     round_trip_pct: Decimal,
     config: AgentConfig,
+    trend_days: int = 0,
 ) -> str:
     """The comparison, per symbol and pooled, with what to read first."""
     everything = [r for results in base.values() for r in results]
@@ -590,6 +639,14 @@ def render_report(
         f"'stressed' re-runs at {round_trip_pct * STRESS_FACTOR}%.",
         f"Ladder steps {ladder}. Signal = System 1 with the "
         f"{config.strategy.exit_after_bars}-bar exit; no System 2, no news.",
+        *(
+            [
+                f"'+{trend_days}d' rows: the same ladders, buying only on a bar that closed "
+                f"above its {trend_days}-day average. Sells are unchanged."
+            ]
+            if trend_days
+            else []
+        ),
         "",
         "Read total P&L, worst drawdown and 'win +open' first. 'win closed' ignores",
         "positions never sold, which is where a ladder keeps its losses.",
