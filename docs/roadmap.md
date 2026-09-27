@@ -37,6 +37,12 @@ windows.
 
 ## Next
 
+0. **The trend ladder failed its bar** on real BTC and ETH bars, 2026-09-27
+   (`strategy.md`, "The trend exit, tested"). Approve none of its proposals.
+   Its successor candidate, the **breakout**, is built and backtest-only:
+   run it on BTC, ETH, SOL and XRP and hold it to the bar in `strategy.md`,
+   "The bar it has to clear". Only if it clears all five does it get a live
+   implementation.
 1. **Run the backtest on real bars** (runbook, "Backtesting"):
    `rhca backtest --days 180`, `--days 365` and `--days 730 --roll-window 90`.
    Hold `ladder (anchor) +50d exit` to the bar in

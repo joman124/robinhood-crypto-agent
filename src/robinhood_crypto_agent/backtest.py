@@ -31,6 +31,9 @@ nearly every trade at a profit while holding a large loss it never sold.
 **Rolling windows** (``--roll-window``) re-run every strategy over many
 windows of the same length, each starting flat, so one lucky or unlucky start
 date cannot carry the verdict.
+
+The breakout candidate sizes each trade from one account's equity, so it is
+backtested across all the coins at once, in ``portfolio_backtest``.
 """
 
 from __future__ import annotations
