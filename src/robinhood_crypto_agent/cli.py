@@ -1088,6 +1088,13 @@ def cmd_backtest(args: argparse.Namespace) -> int:
             f"unknown strategies {unknown}; choose from {list(backtest_mod.STRATEGY_NAMES)}"
         )
 
+    trend_days = args.trend_days
+    if trend_days < 0:
+        raise AgentError("--trend-days must be 0 (off) or a number of days")
+    interval = config.strategy.bar_interval_minutes
+
+    # With a trend filter, fetch trend_days more history than the window and
+    # use it only to warm up the average: the window traded stays the same.
     series: dict[str, list[Candle]] = {}
     if args.bars_file:
         if len(symbols) != 1:
@@ -1095,20 +1102,33 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         series[symbols[0]] = candles_from_rows(
             _read_json(args.bars_file),
             symbols[0],
-            config.strategy.bar_interval_minutes,
+            interval,
             observations=FULL_BAR_OBSERVATIONS,
         )
     else:
         for symbol in symbols:
             try:
                 series[symbol] = backtest_history(
-                    config, symbol, days=args.days, refresh=args.refresh
+                    config, symbol, days=args.days + trend_days, refresh=args.refresh
                 )
             except AgentError as exc:
                 print(f"  ! {symbol}: {exc}", file=sys.stderr)
     series = {symbol: bars for symbol, bars in series.items() if bars}
     if not series:
         raise AgentError("no history to backtest: every symbol failed to load")
+
+    trends: dict[str, dict[Any, bool] | None] = {}
+    for symbol, bars in list(series.items()):
+        if trend_days:
+            trends[symbol] = backtest_mod.above_trend(
+                bars, backtest_mod.trend_bars(trend_days, interval)
+            )
+        else:
+            trends[symbol] = None
+        if not args.bars_file:
+            # A bars file is replayed whole; the filter just waits for its average.
+            start = bars[-1].end - timedelta(days=args.days)
+            series[symbol] = [c for c in bars if c.start >= start]
 
     base: dict[str, list[backtest_mod.Result]] = {}
     stressed: dict[str, list[backtest_mod.Result]] = {}
@@ -1122,6 +1142,8 @@ def cmd_backtest(args: argparse.Namespace) -> int:
                 steps=steps,
                 round_trip_pct=cost,
                 views=views,
+                trend=trends[symbol],
+                trend_days=trend_days,
             )
 
     if args.json:
@@ -1137,7 +1159,12 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         return EXIT_OK
     print(
         backtest_mod.render_report(
-            base, stressed, steps=steps, round_trip_pct=round_trip, config=config
+            base,
+            stressed,
+            steps=steps,
+            round_trip_pct=round_trip,
+            config=config,
+            trend_days=trend_days,
         )
     )
     return EXIT_OK
@@ -1300,6 +1327,10 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument(
         "--spread-pct", default=str(backtest_mod.DEFAULT_ROUND_TRIP_PCT),
         help="round trip charged on every trade, percent (default 1.9)",
+    )
+    backtest.add_argument(
+        "--trend-days", type=int, default=0,
+        help="also run the ladders buying only above this many days' average (0 = off)",
     )
     backtest.add_argument("--refresh", action="store_true", help="refetch instead of the cache")
     backtest.add_argument(

@@ -312,7 +312,13 @@ PC; the cloud sandbox cannot reach Coinbase:
 .venv\Scripts\rhca backtest --days 180                 # the whole watchlist
 .venv\Scripts\rhca backtest --symbols BTC-USD --days 365
 .venv\Scripts\rhca backtest --ladder 5:5,10:10,20:20,40:40   # extend the ladder
+.venv\Scripts\rhca backtest --days 365 --strategies ladder,hold --trend-days 50
 ```
+
+`--trend-days 50` adds a filtered copy of each ladder, marked `+50d`. It buys
+only on a bar that closed above its 50-day average; sells are unchanged. The 50
+days of warm-up are fetched before the window, so the window matches a run
+without the flag.
 
 It compares, on the same bars:
 

@@ -224,3 +224,67 @@ def test_the_cli_replays_a_bars_file(tmp_path, capsys):
         "signal",
         "hold",
     }
+
+
+class TestTrendFilter:
+    def test_the_average_includes_the_bar_and_waits_until_it_exists(self):
+        candles = make_candles([10, 12, 11, 9, 14])
+        above = backtest.above_trend(candles, 3)
+        # no entry until 3 closes exist; then close vs mean of the last 3
+        assert list(above.values()) == [11 > 11, 9 > Decimal("32") / 3, 14 > Decimal("34") / 3]
+        assert candles[0].start not in above and candles[1].start not in above
+
+    def test_bars_for_a_number_of_days(self):
+        assert backtest.trend_bars(50, 60) == 1200
+        assert backtest.trend_bars(1, 15) == 96
+
+    def test_no_buy_on_a_bar_below_its_average(self):
+        """A steady decline sits below its average on every bar: nothing is bought."""
+        candles = make_candles(declining(400))
+        trend = backtest.above_trend(candles, 48)
+        assert not any(trend.values())
+        assert backtest.run_ladder(candles, mode="lot").buys == 3
+        assert backtest.run_ladder(candles, mode="lot", trend=trend).buys == 0
+
+    def test_sells_are_unchanged_by_the_filter(self):
+        """A lot bought while above the average still sells by the ladder's rules."""
+        candles = make_candles([100, 101, 102, 103, 104, 98, 110, 111])
+        trend = {c.start: True for c in candles[:6]}  # above until the buy, below after
+        result = backtest.run_ladder(candles, mode="lot", trend=trend)
+        assert result.buys == 1 and result.sells == 1
+
+    def test_run_all_adds_filtered_ladders_alongside(self, config):
+        candles = make_candles(oscillating(120))
+        results = backtest.run_all(
+            candles,
+            config,
+            strategies=("ladder", "hold"),
+            trend=backtest.above_trend(candles, 24),
+            trend_days=1,
+        )
+        assert [r.strategy for r in results] == [
+            "ladder (lot)",
+            "ladder (anchor)",
+            "ladder (lot) +1d",
+            "ladder (anchor) +1d",
+            "hold",
+        ]
+
+
+def test_the_cli_fetches_warmup_and_trades_the_same_window(config, monkeypatch, capsys, tmp_path):
+    """The filter's history comes before the window; the window itself is unchanged."""
+    bars = make_candles(oscillating(24 * 12), anchor=T0)  # 12 days of hourly bars
+    requested = []
+
+    def fake_history(cfg, symbol, *, days, refresh=False):
+        requested.append(days)
+        return bars
+
+    monkeypatch.setattr("robinhood_crypto_agent.cli.backtest_history", fake_history)
+    args = ["--data-dir", str(tmp_path / "data"), "backtest", "--symbols", "BTC-USD"]
+    assert main([*args, "--days", "10", "--trend-days", "2", "--strategies", "ladder,hold"]) == 0
+    out = capsys.readouterr().out
+    assert requested == [12]  # 10 days traded + 2 of warm-up
+    assert "BTC-USD (240 bars)" in out  # only the 10-day window is traded
+    assert "ladder (anchor) +2d" in out
+    assert "buying only on a bar that closed above its 2-day average" in out
