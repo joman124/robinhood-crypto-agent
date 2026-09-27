@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import pytest
 
-from robinhood_crypto_agent.audit import AuditLog
+from robinhood_crypto_agent.audit import KIND_PROPOSAL, AuditLog
 from robinhood_crypto_agent.config import AgentConfig
 from robinhood_crypto_agent.dashboard import (
     PROPOSAL_FIELDS,
@@ -211,6 +211,29 @@ class TestPayloadShape:
         assert row["notes"] == ["dip: closed 95.00, 5.0% under the anchor 100.00"]
         assert row["signals"] == [] and row["score"] is None
         assert row["outcome"] is None
+
+    def test_the_ladder_sends_realized_pnl_but_not_what_it_holds(self, config):
+        audit = AuditLog(config.audit_path)
+        for pid, side, rule in (("b0", "buy", "dip"), ("s0", "sell", "take_profit")):
+            detail = {"rule": rule, "step": 0, "anchor": "100"}
+            audit.append(
+                KIND_PROPOSAL,
+                {
+                    "proposal_id": pid, "symbol": "BTC-USD", "side": side, "strategy": "ladder",
+                    "proposal": {"sizing_detail": {"ladder": detail}},
+                },
+            )
+        fills = (("b0", Side.BUY, "0.2", "19.00"), ("s0", Side.SELL, "0.1", "11.00"))
+        for pid, side, qty, notional in fills:
+            audit.record_execution(
+                ExecutionRecord(
+                    proposal_id=pid, symbol="BTC-USD", side=side, recorded_at=utcnow(),
+                    requested_quantity=Decimal(qty), filled_quantity=Decimal(qty),
+                    notional=Decimal(notional), order_id=f"o-{pid}", state="filled",
+                )
+            )
+        # 0.1 x (110 - 95) realized. The 0.1 still held, and its $9.50 cost, stay here.
+        assert build_payload(config, audit=audit)["ladder_realized_pnl"] == {"BTC-USD": "1.50"}
 
     def test_limit_keeps_the_most_recent(self, config):
         audit = AuditLog(config.audit_path)

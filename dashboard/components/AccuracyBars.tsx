@@ -3,7 +3,7 @@
 import { useState } from "react";
 
 import { STATUS, statusLabel } from "@/lib/format";
-import type { Stats } from "@/lib/types";
+import type { Payload, Stats } from "@/lib/types";
 
 type Group = { key: string; title: string; groups: Record<string, Stats> | undefined; label?: (k: string) => string };
 
@@ -18,12 +18,7 @@ type Group = { key: string; title: string; groups: Record<string, Stats> | undef
  * A grouping with a single row has nothing to compare, so it collapses to one
  * line of text instead of a lone bar.
  */
-export function AccuracyBars({ stats }: { stats: {
-  by_status?: Record<string, Stats>;
-  by_regime: Record<string, Stats>;
-  by_symbol: Record<string, Stats>;
-  by_side: Record<string, Stats>;
-} }) {
+export function AccuracyBars({ stats }: { stats: Payload["stats"] }) {
   const all: Group[] = [
     { key: "status", title: "Pipeline stage", groups: stats.by_status, label: statusLabel },
     { key: "regime", title: "Regime", groups: stats.by_regime },
@@ -47,7 +42,7 @@ export function AccuracyBars({ stats }: { stats: {
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>Accuracy by</h2>
+        <h2>System 1 accuracy by</h2>
         <div className="segmented" role="tablist" aria-label="Group accuracy by">
           {tabs.map((t) => (
             <button
@@ -63,13 +58,17 @@ export function AccuracyBars({ stats }: { stats: {
         </div>
       </div>
 
-      {group.key === "status" && (
-        <p className="muted small">
-          The shadow run&apos;s question: does each stage earn its place? Compare{" "}
-          <em>Proposed</em> against <em>Passed by System 2</em>, and escalated stages against{" "}
-          <em>Held back</em>.
-        </p>
-      )}
+      <p className="muted small">
+        The retired System 1&apos;s records only. The trend ladder is not hit-rate scored; it is
+        measured on realized P&amp;L.
+        {group.key === "status" && (
+          <>
+            {" "}Its shadow run asked whether each stage earned its place: compare{" "}
+            <em>Proposed</em> against <em>Passed by System 2</em>, and escalated stages against{" "}
+            <em>Held back</em>.
+          </>
+        )}
+      </p>
 
       {rows.length === 1 ? (
         <p className="single-row">

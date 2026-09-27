@@ -13,6 +13,9 @@ What is deliberately **not** in the payload
 Account numbers, buying power, portfolio value, position sizes and order ids. The dashboard's job is to show what the agent *suggested* and whether
 those suggestions were any good. It does not need to know how much money is
 behind them, and a dashboard that never receives that data cannot leak it.
+
+The ladder's realized P&L per symbol is sent, as today's realized P&L already
+is: it is how the ladder is measured. What it holds, and what that cost, is not.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from .config import AgentConfig
 from .decisions import Decision, decision_from_dict
 from .errors import AgentError
 from .execution.kill_switch import KillSwitch
+from .ledger import ladder_positions
 from .models import ProposalStatus, utcnow
 from .numeric import abs_pct_drift, format_decimal, round_money, to_decimal
 from .outcomes import (
@@ -179,6 +183,10 @@ def build_payload(
             "executed_notional": str(round_money(activity.executed_notional)),
             "realized_pnl": str(round_money(activity.realized_pnl)),
             "proposals": activity.proposal_count,
+        },
+        "ladder_realized_pnl": {
+            symbol: str(round_money(position.realized_pnl))
+            for symbol, position in ladder_positions(audit).items()
         },
         "limits": {
             "price_drift_tolerance_pct": str(config.risk.price_drift_tolerance_pct),

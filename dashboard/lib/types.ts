@@ -24,11 +24,14 @@ export interface Outcome {
   exit_cost_pct?: string;
   proposed_at: string;
   resolved_at: string | null;
-  regime: string;
-  score: number;
-  confidence: number;
+  // System 1's. Only its records are hit-rate scored, but don't rely on them.
+  regime?: string;
+  score?: number;
+  confidence?: number;
   reason: string;
 }
+
+export type LadderRule = "dip" | "take_profit" | "trend_exit";
 
 export type ProposalStatus =
   | "proposed"
@@ -70,13 +73,20 @@ export interface Proposal {
   status: ProposalStatus | string | null;
   risk_passed: boolean | null;
   risk_failures: string[] | null;
-  score: number | null;
-  confidence: number | null;
-  regime: string | null;
   proposed_at: string | null;
   /** False when the risk engine blocked it — such a proposal has no Accept. */
   actionable: boolean;
+  /** Always null for a ladder proposal: the ladder is measured on P&L, not hit rate. */
   outcome: Outcome | null;
+  /** "ladder" for the trend ladder's proposals; absent on the retired System 1's. */
+  strategy?: string | null;
+  rule?: LadderRule | string | null;
+  /** 0-based ladder step; null for the trend exit. */
+  step?: number | null;
+  // The retired System 1's. Null or absent on ladder proposals.
+  score?: number | null;
+  confidence?: number | null;
+  regime?: string | null;
   // Payload v2. Optional so a v1 push still renders.
   trigger_reason?: string | null;
   system2_decision?: string | null;
@@ -96,7 +106,6 @@ export interface Heartbeat {
   last_cycle_at: string | null;
   cycles: number | null;
   counts: Record<string, number>;
-  escalations_today: number | null;
   services: Record<string, boolean>;
   last_error: { task: string | null; at: string | null } | null;
   stale_after_seconds: number;
@@ -134,9 +143,9 @@ export interface Payload {
   proposals: Proposal[];
   stats: {
     overall: Stats;
-    by_regime: Record<string, Stats>;
-    by_symbol: Record<string, Stats>;
-    by_side: Record<string, Stats>;
+    by_regime?: Record<string, Stats>;
+    by_symbol?: Record<string, Stats>;
+    by_side?: Record<string, Stats>;
     by_status?: Record<string, Stats>;
   };
   today: {
@@ -145,6 +154,8 @@ export interface Payload {
     realized_pnl: string;
     proposals: number;
   };
+  /** The ladder's realized P&L per symbol, from recorded fills. Absent before 2026-09-27. */
+  ladder_realized_pnl?: Record<string, string>;
   limits?: { price_drift_tolerance_pct: string };
   market?: Record<string, { mark: string; observed_at: string }>;
   kill_switch?: { engaged: boolean; reason: string | null; engaged_at: string | null };

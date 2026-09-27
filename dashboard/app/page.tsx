@@ -6,7 +6,7 @@ import { ProposalLog } from "@/components/ProposalLog";
 import { SignInForm, SignOutButton } from "@/components/SignIn";
 import { StatTile } from "@/components/StatTile";
 import { StatusAlerts, StatusStrip } from "@/components/StatusStrip";
-import { money, pct, signedPct } from "@/lib/format";
+import { isLadder, money, pct, signedPct } from "@/lib/format";
 import { canDecide, isAuthenticated, passwordConfigured } from "@/lib/session";
 import { getDecisions, getPayload, storageMode } from "@/lib/store";
 
@@ -33,7 +33,11 @@ export default async function Page() {
   const scoring = payload?.scoring;
   const today = payload?.today;
   const decidedIds = new Set(decisions.map((d) => d.proposal_id));
-  const awaiting = (payload?.proposals ?? []).filter((p) => p.actionable && !decidedIds.has(p.proposal_id));
+  const proposals = payload?.proposals ?? [];
+  const awaiting = proposals.filter((p) => p.actionable && !decidedIds.has(p.proposal_id));
+  const ladderCount = proposals.filter(isLadder).length;
+  const ladderPnl = Object.entries(payload?.ladder_realized_pnl ?? {});
+  const ladderTotal = ladderPnl.reduce((sum, [, v]) => sum + Number(v), 0);
   const doc = (path: string) => `${repo}/blob/main/${path}`;
 
   return (
@@ -86,8 +90,20 @@ export default async function Page() {
 
         {stats && (
           <div className="tiles">
+            {payload?.ladder_realized_pnl && (
+              <StatTile
+                label="Ladder P&L"
+                value={ladderPnl.length ? money(ladderTotal.toFixed(2)) : "—"}
+                unknown={ladderPnl.length === 0}
+                note={
+                  ladderPnl.length
+                    ? `realized · ${ladderPnl.map(([symbol, v]) => `${symbol} ${money(v)}`).join(" · ")}`
+                    : "no ladder fills recorded yet"
+                }
+              />
+            )}
             <StatTile
-              label="Hit rate"
+              label="System 1 hit rate"
               value={pct(stats.win_rate)}
               unknown={stats.win_rate === null}
               note={
@@ -97,7 +113,7 @@ export default async function Page() {
               }
             />
             <StatTile
-              label="Average move"
+              label="System 1 average move"
               value={stats.average_move_pct !== null ? signedPct(stats.average_move_pct) : "—"}
               unknown={stats.average_move_pct === null}
               note={
@@ -108,8 +124,8 @@ export default async function Page() {
             />
             <StatTile
               label="Proposals"
-              value={String(stats.total)}
-              note={`${stats.resolved} resolved · ${stats.pending} inside the horizon`}
+              value={String(proposals.length)}
+              note={`${ladderCount} ladder · ${proposals.length - ladderCount} System 1 · ${stats.resolved} scored`}
             />
             {today && (
               <StatTile
@@ -141,9 +157,13 @@ export default async function Page() {
 
         <footer className="footer">
           <p>
+            The trend ladder is measured on realized P&amp;L from its recorded fills: a dip buy
+            waits days for its sell, so a fixed-horizon hit rate would grade it on a question it
+            never asked. The hit rate and accuracy panels cover the retired System 1&apos;s records
+            only.{" "}
             {scoring && (
               <>
-                An outcome is scored {scoring.horizon_bars} bars (
+                Each of those was scored {scoring.horizon_bars} bars (
                 {(scoring.horizon_bars * scoring.bar_interval_minutes) / 60}h) after the proposal,
                 as the whole round trip: in at the proposal&apos;s price, out at the far side of the
                 book. It is a win only if it made more than {scoring.hurdle_pct}% after that, and a
@@ -151,8 +171,8 @@ export default async function Page() {
               </>
             )}
             Hit rate is wins over wins + losses. Flat outcomes are excluded, an unresolved proposal
-            is never a loss, and every candidate is scored, including ones you declined and ones the
-            pipeline held back.
+            is never a loss, and every candidate was scored, including ones you declined and ones
+            the pipeline held back.
           </p>
           <nav className="footer-links">
             <a href={doc("docs/risk-controls.md")} target="_blank" rel="noreferrer">

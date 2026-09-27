@@ -3,19 +3,13 @@ import type { Heartbeat } from "@/lib/types";
 
 const SERVICES: [string, string][] = [
   ["robinhood", "Robinhood quotes"],
-  ["jev", "Jev news labels"],
-  ["system2", "System 2 (Sonnet 5)"],
-  ["market_data", "Crypto.com market data"],
   ["dashboard", "Dashboard sync"],
 ];
 
 const COUNTS: [string, string][] = [
-  ["quotes", "quote polls"],
-  ["news", "headlines"],
-  ["labeled", "labeled by Jev"],
-  ["candidates", "candidates"],
-  ["escalations", "escalated"],
-  ["proposed", "proposed"],
+  ["quotes", "quotes read"],
+  ["candidates", "proposals logged"],
+  ["proposed", "passing risk"],
   ["errors", "errors"],
 ];
 
@@ -52,10 +46,7 @@ export function Pipeline({ beat }: { beat: Heartbeat | null | undefined }) {
           </div>
         ))}
       </div>
-      <p className="muted small">
-        Counts are for the current run. {beat.escalations_today ?? 0} escalation(s) to System 2
-        today.
-      </p>
+      <p className="muted small">Counts are for the current run.</p>
 
       <ul className="services" aria-label="Services">
         {SERVICES.map(([key, label]) => {

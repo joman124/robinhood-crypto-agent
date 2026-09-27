@@ -3,7 +3,7 @@
  * Pure functions only, so server and client components render identical text.
  */
 
-import type { Payload, Proposal } from "./types";
+import type { Payload, Proposal, Verdict } from "./types";
 
 export const DASH = "—";
 
@@ -65,8 +65,9 @@ export function secondsSince(iso: string | null | undefined, now: number): numbe
 export const STATUS: Record<string, { label: string; help: string }> = {
   proposed: {
     label: "Proposed",
-    help: "Passed every risk rule and the trigger, and System 2 proposed it.",
+    help: "Passed every risk rule.",
   },
+  // The rest are System 1's, retired 2026-09-27. Its records still carry them.
   declined_by_system2: {
     label: "Passed by System 2",
     help: "Escalated, and Claude Sonnet 5 passed on it (or failed to answer, which counts as a pass).",
@@ -109,6 +110,22 @@ export function ruleLabel(rule: string): string {
   return rule.replace(/_/g, " ");
 }
 
+export function isLadder(p: Proposal): boolean {
+  return p.strategy === "ladder";
+}
+
+/** "Dip, step 1", "Take profit, step 2", "Trend exit". Steps arrive 0-based. */
+export function ladderLabel(p: Proposal): string {
+  const rule = ruleLabel(p.rule || "ladder");
+  const name = rule[0].toUpperCase() + rule.slice(1);
+  return p.step == null ? name : `${name}, step ${p.step + 1}`;
+}
+
+/** The outcome, or null for a ladder proposal, which is measured on P&L and never scored. */
+export function verdictOf(p: Proposal): Verdict | null {
+  return p.outcome?.verdict ?? (isLadder(p) ? null : "pending");
+}
+
 /**
  * Why Accept is unavailable, or null when it is available. Mirrors what the
  * agent's gate would refuse, so the page never offers what it would reject.
@@ -139,6 +156,9 @@ export function toCsv(rows: Proposal[]): string {
     ["symbol", (p) => p.symbol],
     ["side", (p) => p.side],
     ["status", (p) => p.status],
+    ["strategy", (p) => p.strategy],
+    ["rule", (p) => p.rule],
+    ["step", (p) => p.step],
     ["notional", (p) => p.notional],
     ["reference_price", (p) => p.reference_price],
     ["score", (p) => p.score],
@@ -147,7 +167,7 @@ export function toCsv(rows: Proposal[]): string {
     ["risk_passed", (p) => p.risk_passed],
     ["risk_failures", (p) => (p.risk_failures ?? []).join(" ")],
     ["system2_decision", (p) => p.system2_decision],
-    ["verdict", (p) => p.outcome?.verdict ?? "pending"],
+    ["verdict", (p) => verdictOf(p)],
     ["signed_move_pct", (p) => p.outcome?.signed_move_pct],
     ["resolved_at", (p) => p.outcome?.resolved_at],
   ];
