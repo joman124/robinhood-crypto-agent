@@ -6,7 +6,19 @@ import { DecisionControls } from "@/components/DecisionControls";
 import { RelTime } from "@/components/Live";
 import { ProposalDetail } from "@/components/ProposalDetail";
 import { StatusChip, VerdictChip } from "@/components/Verdict";
-import { STATUS, acceptBlocker, money, pct, score, signedPct, statusLabel, toCsv } from "@/lib/format";
+import {
+  STATUS,
+  acceptBlocker,
+  isLadder,
+  ladderLabel,
+  money,
+  pct,
+  score,
+  signedPct,
+  statusLabel,
+  toCsv,
+  verdictOf,
+} from "@/lib/format";
 import type { Decision, Payload, Proposal } from "@/lib/types";
 
 const PAGE_SIZE = 25;
@@ -60,11 +72,12 @@ export function ProposalLog({
     (p) =>
       (!stage || (p.status ?? "proposed") === stage) &&
       (!pair || p.symbol === pair) &&
-      (!verdict || (p.outcome?.verdict ?? "pending") === verdict) &&
+      (!verdict || verdictOf(p) === verdict) &&
       (!q ||
         p.proposal_id.startsWith(q) ||
         p.symbol.toLowerCase().includes(q) ||
         (p.trigger_reason ?? "").toLowerCase().includes(q) ||
+        (isLadder(p) && ladderLabel(p).toLowerCase().includes(q)) ||
         (p.risk_failures ?? []).some((r) => r.includes(q))),
   );
   const pages = Math.max(1, Math.ceil(shown.length / PAGE_SIZE));
@@ -184,8 +197,8 @@ export function ProposalLog({
                 <th>Proposed</th>
                 <th>Pair</th>
                 <th className="num">Notional</th>
-                <th title="Composite score from −1 (short) to +1 (long), then confidence: how much of the configured signal weight reported.">
-                  Signal <span aria-hidden="true">ⓘ</span>
+                <th title="The ladder rule and step that fired. For the retired System 1's records: composite score from −1 (short) to +1 (long), then confidence.">
+                  Rule <span aria-hidden="true">ⓘ</span>
                 </th>
                 <th>Stage</th>
                 <th>Risk</th>
@@ -248,6 +261,7 @@ function Row({
   onOpen: () => void;
 }) {
   const failures = p.risk_failures ?? [];
+  const verdict = verdictOf(p);
   return (
     <tr onClick={onOpen} className="clickable">
       <td data-label="Proposed">
@@ -270,10 +284,16 @@ function Row({
       <td data-label="Notional" className="num">
         {money(p.notional)}
       </td>
-      <td data-label="Signal" className="num">
-        {score(p.score)}
-        <span className="muted"> · {pct(p.confidence)}</span>
-      </td>
+      {isLadder(p) ? (
+        <td data-label="Rule" title={p.trigger_reason ?? undefined}>
+          {ladderLabel(p)}
+        </td>
+      ) : (
+        <td data-label="Rule" className="num">
+          {score(p.score)}
+          <span className="muted"> · {pct(p.confidence)}</span>
+        </td>
+      )}
       <td data-label="Stage">
         <StatusChip status={p.status} />
       </td>
@@ -291,7 +311,13 @@ function Row({
         )}
       </td>
       <td data-label="Outcome">
-        <VerdictChip verdict={p.outcome?.verdict ?? "pending"} title={p.outcome?.reason} />
+        {verdict ? (
+          <VerdictChip verdict={verdict} title={p.outcome?.reason} />
+        ) : (
+          <span className="muted small" title="The ladder is measured on realized P&L, not hit rate.">
+            not scored
+          </span>
+        )}
         {p.outcome?.signed_move_pct != null && <div className="pid">{signedPct(p.outcome.signed_move_pct)}</div>}
       </td>
       <td data-label="Your call" onClick={(e) => e.stopPropagation()}>

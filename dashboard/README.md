@@ -3,14 +3,10 @@
 A web view of every trade the agent has suggested, whether those suggestions
 turned out to be good, and a place to accept or decline the ones waiting on you.
 
-> **Since 2026-09-27 the agent trades the trend ladder** (`docs/strategy.md`),
-> and this frontend has not caught up. A ladder proposal arrives with `rule`
-> (`dip`, `take_profit`, `trend_exit`), `step` and its reason in `notes` and
-> `trigger_reason`. It carries no signals, score, confidence or System 2
-> verdict, so those show as blank, and it is not hit-rate scored: the ladder
-> waits days for its sells, so its measure is P&L (`rhca status`). The
-> panels below that describe signals, System 2 and accuracy by stage now
-> describe only the retired System 1's records.
+The agent trades the **trend ladder** (`docs/strategy.md`). Its proposals are
+measured on realized P&L, not hit rate: a dip buy waits days for its sell. The
+hit-rate panels still render the retired System 1's records (composite
+signals, regime, System 2), and say so.
 
 ## What is on the page
 
@@ -18,20 +14,25 @@ turned out to be good, and a place to accept or decline the ones waiting on you.
   switch, the execution mode, and how old the last sync is. Banners explain
   anything that changes what the numbers mean: an engaged kill switch, a stale
   sync, read-only mode, in-memory storage.
-- **Headline numbers.** Hit rate, average move, proposal count, and today's
-  proposals, executions, traded dollars and realized P&L.
+- **Headline numbers.** The ladder's realized P&L per pair, System 1's hit
+  rate and average move, the proposal count, and today's proposals,
+  executions, traded dollars and realized P&L.
 - **The proposal log.** "Needs your call" by default, with Decided and All tabs,
   search, stage/pair/outcome filters, pagination, CSV export, and a card layout
-  on phones. Accept is greyed out, with the reason, whenever the agent's gate
-  would refuse it: risk-blocked, a record rather than a proposal, the kill
-  switch, or price drift past `price_drift_tolerance_pct` as of the last sync.
+  on phones. A ladder row shows its rule and step ("Dip, step 1"); a System 1
+  row shows its composite score and confidence. Accept is greyed out, with the
+  reason, whenever the agent's gate would refuse it: risk-blocked, a record
+  rather than a proposal, the kill switch, or price drift past
+  `price_drift_tolerance_pct` as of the last sync.
 - **The detail drawer** (click any row; `#p=<id>` links straight to one). The
   decision with an optional note and whether the agent has picked it up; the
-  trade, plan and drift; trigger and System 2 verdicts; every signal on a
-  −1…+1 track with its weight and rationale; all 17 risk rules; the outcome;
-  any execution; and the `rhca` commands to copy into the terminal.
-- **Hit rate over time**, the **shadow loop** heartbeat (counts, services, last
-  error task), and **accuracy by** pipeline stage, regime, pair or side.
+  trade, plan, drift, and the ladder rule with its reason; every risk rule;
+  the outcome; any execution; and the `rhca` commands to copy into the
+  terminal. A System 1 record also shows its regime, composite, trigger,
+  System 2 verdict and every signal on a −1…+1 track.
+- **System 1 hit rate over time**, the **shadow loop** heartbeat (counts,
+  services, last error task), and **System 1 accuracy by** pipeline stage,
+  regime, pair or side.
 
 The page re-fetches every minute while the tab is visible.
 
@@ -58,7 +59,9 @@ Two consequences worth stating plainly:
   behind it. Risk rules whose message would quote the account (sizing, the
   dollar caps, open positions, concentration, sell coverage) arrive as a
   pass/fail verdict with no text, System 2's written rationale never arrives,
-  and neither does the text of the loop's last error.
+  and neither does the text of the loop's last error. The ladder sends its
+  realized P&L per pair, as today's realized P&L already is, but not what it
+  holds or what that cost.
 
 ## Deploying to Vercel
 

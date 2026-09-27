@@ -5,7 +5,19 @@ import { useEffect, useRef, useState } from "react";
 import { DecisionControls } from "@/components/DecisionControls";
 import { RelTime } from "@/components/Live";
 import { StatusChip, VerdictChip } from "@/components/Verdict";
-import { DASH, RULES, acceptBlocker, money, pct, price, ruleLabel, score, signedPct } from "@/lib/format";
+import {
+  DASH,
+  RULES,
+  acceptBlocker,
+  isLadder,
+  ladderLabel,
+  money,
+  pct,
+  price,
+  ruleLabel,
+  score,
+  signedPct,
+} from "@/lib/format";
 import type { Decision, Payload, Proposal } from "@/lib/types";
 
 function Copy({ text, label = "copy" }: { text: string; label?: string }) {
@@ -90,6 +102,7 @@ export function ProposalDetail({
   const tolerance = payload?.limits?.price_drift_tolerance_pct;
   const findings = p?.risk_findings ?? [];
   const failed = findings.filter((f) => !f.passed);
+  const ladder = p ? isLadder(p) : false;
 
   return (
     <dialog
@@ -140,6 +153,7 @@ export function ProposalDetail({
             <h3>Trade</h3>
             <dl className="facts">
               <Fact label="Stage"><StatusChip status={p.status} /></Fact>
+              {ladder && <Fact label="Rule">{ladderLabel(p)}</Fact>}
               <Fact label="Notional">{money(p.notional)}</Fact>
               <Fact label="Quantity">{p.quantity ?? DASH}</Fact>
               <Fact label="Reference price">{price(p.reference_price)}</Fact>
@@ -154,10 +168,12 @@ export function ProposalDetail({
               <Fact label="Plan">
                 {p.plan ? `${p.plan.style} · ${p.plan.tranches} tranche${p.plan.tranches === 1 ? "" : "s"}` : DASH}
               </Fact>
-              <Fact label="Regime">{p.regime ?? DASH}</Fact>
-              <Fact label="Composite">
-                {score(p.score)} · {pct(p.confidence)} confidence
-              </Fact>
+              {p.regime != null && <Fact label="Regime">{p.regime}</Fact>}
+              {p.score != null && (
+                <Fact label="Composite">
+                  {score(p.score)} · {pct(p.confidence)} confidence
+                </Fact>
+              )}
             </dl>
             {p.plan?.rationale && <p className="muted small">{p.plan.rationale}</p>}
             {(p.notes ?? []).map((n) => (
@@ -165,7 +181,8 @@ export function ProposalDetail({
             ))}
           </section>
 
-          {(p.trigger_reason || p.system2_decision) && (
+          {/* System 1's escalation trigger. A ladder proposal's trigger is its reason, in the notes above. */}
+          {!ladder && (p.trigger_reason || p.system2_decision) && (
             <section>
               <h3>Pipeline</h3>
               <dl className="facts">
@@ -250,6 +267,11 @@ export function ProposalDetail({
                   {p.outcome.horizon_bars} bars · {p.outcome.hurdle_pct}%
                 </Fact>
               </dl>
+            ) : ladder ? (
+              <p className="muted small">
+                Not hit-rate scored. A ladder buy waits days for its sell, so the ladder is measured
+                on realized P&amp;L (<code>rhca status</code>) instead.
+              </p>
             ) : (
               <p className="muted small">Not scorable yet: there is no price history after it.</p>
             )}

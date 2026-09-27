@@ -56,7 +56,7 @@ export function HitRateTrend({ proposals }: { proposals: Proposal[] }) {
   if (!drawable) {
     return (
       <section className="panel">
-        <h2>Hit rate over time</h2>
+        <h2>System 1 hit rate over time</h2>
         <p className="muted">
           Needs at least two resolved wins or losses. {points.length === 1 ? "One so far." : ""}
         </p>
@@ -92,7 +92,7 @@ export function HitRateTrend({ proposals }: { proposals: Proposal[] }) {
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>Hit rate over time</h2>
+        <h2>System 1 hit rate over time</h2>
         <span className="muted small">
           cumulative · {last.wins}W / {last.losses}L after {points.length} decisive outcomes
         </span>
