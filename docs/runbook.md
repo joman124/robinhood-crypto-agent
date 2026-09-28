@@ -328,7 +328,19 @@ the median, worst and best return on capital. It shows whether a result
 holds across start dates or rests on one lucky one.
 
 **The bar the agent's rule has to clear** before its first live proposal is
-approved is in [`strategy.md`](./strategy.md#validating-it). A backtest
+approved is in [`strategy.md`](./strategy.md#validating-it).
+
+**The breakout** (`strategy.md`, "The breakout candidate") runs by default
+as one account across every symbol, after the per-coin report. To test it on
+the four coins it was designed for:
+
+```powershell
+.venv\Scripts\rhca backtest --symbols BTC-USD,ETH-USD,SOL-USD,XRP-USD --days 730 --roll-window 90
+```
+
+Read its expectancy (mean R per closed trade, after costs) first, then its
+max drawdown against hold's. Its bar is in `strategy.md`, "The bar it has to
+clear". `--strategies breakout` runs it alone, without the ladder's tables. A backtest
 authorizes nothing. It doesn't change a limit or the approval gate, and it
 says nothing about the next trade.
 

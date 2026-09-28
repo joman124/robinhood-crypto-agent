@@ -133,9 +133,10 @@ rhca plan-order <proposal-id>
 rhca approve <proposal-id> --approval "execute <proposal-id>" --quote fresh.json
 rhca record-execution <proposal-id> --tranche 0 -f response.json
 
-# Replay the ladder, the trend baseline and buy-and-hold on Coinbase bars,
-# over the whole window and over rolling 90-day windows
+# Replay the ladder, the breakout candidate and their baselines on Coinbase
+# bars, over the whole window and over rolling 90-day windows
 rhca backtest --days 730 --roll-window 90
+rhca backtest --symbols BTC-USD,ETH-USD,SOL-USD,XRP-USD --days 730 --strategies breakout
 
 # Push proposals + outcomes to the dashboard, pull back your accept/decline
 rhca dashboard-sync --url https://your-project.vercel.app --token "$TOKEN"
@@ -162,6 +163,7 @@ src/robinhood_crypto_agent/
 ├── robinhood.py        # read-only Crypto Trading API client (no order methods)
 ├── bootstrap.py        # Coinbase candles for a fresh checkout
 ├── backtest.py         # rhca backtest: the ladder vs its baselines
+├── portfolio_backtest.py # the breakout candidate, as one account across coins
 ├── net.py              # the one HTTP helper
 ├── agent.py            # the analysis pipeline: bars + ledger -> ladder -> proposals
 ├── ledger.py           # the ladder's holdings and cycle, from recorded fills
@@ -179,7 +181,7 @@ src/robinhood_crypto_agent/
 ├── dashboard.py        # the payload the dashboard renders
 ├── mcp/                # the RobinHood tool contract and response parsers
 ├── store/              # price history and cached account state
-├── strategy/           # the trend ladder: one pure rule, live and backtest
+├── strategy/           # the trend ladder (live) and the breakout (backtest only)
 └── execution/          # order payloads, approval gate, kill switch
 
 dashboard/              # Next.js app, deployable to Vercel

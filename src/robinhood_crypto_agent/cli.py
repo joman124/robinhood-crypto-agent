@@ -37,6 +37,7 @@ from typing import Any, Sequence
 
 from . import backtest as backtest_mod
 from . import dashboard as dashboard_mod
+from . import portfolio_backtest as portfolio_mod
 from . import reports
 from . import runner as runner_mod
 from .agent import Agent, MarketState
@@ -66,6 +67,7 @@ from .robinhood import RobinhoodClient, generate_key_pair
 from .serde import proposal_from_dict
 from .store import PriceStore, StateCache
 from .store.state import SECTION_CRYPTO_BUYING_POWER
+from .strategy.breakout import Breakout
 from .strategy.ladder import describe_steps
 from .symbols import canonical
 
@@ -1069,6 +1071,11 @@ def describe_ingested_balance(state: StateCache) -> str:
     )
 
 
+BREAKOUT = "breakout"
+#: What --strategies accepts: the per-coin strategies, and the breakout, which
+#: runs as one account across every symbol.
+BACKTEST_STRATEGIES = (*backtest_mod.STRATEGY_NAMES, BREAKOUT)
+
 #: How long fetched backtest history is reused before it is fetched again.
 BACKTEST_CACHE_HOURS = 6
 
@@ -1138,12 +1145,29 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         raise AgentError(f"--ladder: {exc}") from exc
     round_trip = to_decimal(args.spread_pct, field="spread-pct")
     strategies = [s.strip() for s in args.strategies.split(",") if s.strip()]
-    unknown = sorted(set(strategies) - set(backtest_mod.STRATEGY_NAMES))
+    unknown = sorted(set(strategies) - set(BACKTEST_STRATEGIES))
     if unknown:
         raise AgentError(
-            f"unknown strategies {unknown}; choose from {list(backtest_mod.STRATEGY_NAMES)} "
+            f"unknown strategies {unknown}; choose from {list(BACKTEST_STRATEGIES)} "
             "(System 1's 'signal' was retired with it)"
         )
+    per_coin = [s for s in strategies if s in backtest_mod.STRATEGY_NAMES]
+    rule = None
+    if BREAKOUT in strategies:
+        try:
+            rule = Breakout(
+                risk_pct=to_decimal(args.risk_pct, field="risk-pct"),
+                max_weight_pct=(
+                    to_decimal(args.max_weight_pct, field="max-weight-pct")
+                    if args.max_weight_pct is not None
+                    else config.risk.max_position_pct_of_portfolio
+                ),
+            )
+        except ValueError as exc:
+            raise AgentError(f"breakout: {exc}") from exc
+    capital = to_decimal(args.capital, field="capital")
+    if capital <= 0:
+        raise AgentError("--capital must be positive")
 
     trend_days = config.strategy.trend_days if args.trend_days is None else args.trend_days
     if trend_days < 0:
@@ -1151,9 +1175,11 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     if args.roll_window < 0 or args.roll_step <= 0:
         raise AgentError("--roll-window must be 0 (off) or days, and --roll-step positive")
     interval = config.strategy.bar_interval_minutes
+    # Days of history fetched before the window, only to warm up averages: the
+    # ladder's trend average, and the breakout's 100-day one.
+    warmup_days = max(trend_days, rule.warmup_days + 2 if rule else 0)
 
-    # With a trend filter, fetch trend_days more history than the window and
-    # use it only to warm up the average: the window traded stays the same.
+    # The window traded stays the same whatever the warm-up.
     series: dict[str, list[Candle]] = {}
     if args.bars_file:
         if len(symbols) != 1:
@@ -1168,7 +1194,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         for symbol in symbols:
             try:
                 series[symbol] = backtest_history(
-                    config, symbol, days=args.days + trend_days, refresh=args.refresh
+                    config, symbol, days=args.days + warmup_days, refresh=args.refresh
                 )
             except AgentError as exc:
                 print(f"  ! {symbol}: {exc}", file=sys.stderr)
@@ -1176,6 +1202,12 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     if not series:
         raise AgentError("no history to backtest: every symbol failed to load")
 
+    full = dict(series)  # warm-up included, for the breakout's daily indicators
+    window_start = (
+        None
+        if args.bars_file
+        else max(bars[-1].end for bars in series.values()) - timedelta(days=args.days)
+    )
     trends: dict[str, dict[Any, bool] | None] = {}
     for symbol, bars in list(series.items()):
         if trend_days:
@@ -1191,53 +1223,81 @@ def cmd_backtest(args: argparse.Namespace) -> int:
 
     base: dict[str, list[backtest_mod.Result]] = {}
     stressed: dict[str, list[backtest_mod.Result]] = {}
-    for symbol, candles in series.items():
+    for symbol, candles in series.items() if per_coin else ():
         for runs, cost in ((base, round_trip), (stressed, round_trip * backtest_mod.STRESS_FACTOR)):
             runs[symbol] = backtest_mod.run_all(
                 candles,
-                strategies=strategies,
+                strategies=per_coin,
                 steps=steps,
                 round_trip_pct=cost,
                 trend=trends[symbol],
                 trend_days=trend_days,
             )
 
+    breakout = None
+    if rule is not None:
+        prepared = portfolio_mod.prepare(full, rule)
+        breakout = portfolio_mod.evaluate(
+            prepared,
+            rule,
+            capital=capital,
+            round_trip_pct=round_trip,
+            start=window_start,
+            min_trade=config.risk.min_notional_per_trade_usd,
+        )
+
     if args.json:
+        payload: dict[str, Any] = {
+            symbol: [backtest_mod.summary(r) for r in results] for symbol, results in base.items()
+        }
+        if breakout is not None:
+            payload[BREAKOUT] = portfolio_mod.summary(breakout)
+        print(json.dumps(payload, indent=2))
+        return EXIT_OK
+    if per_coin:
         print(
-            json.dumps(
-                {
-                    symbol: [backtest_mod.summary(r) for r in results]
-                    for symbol, results in base.items()
-                },
-                indent=2,
+            backtest_mod.render_report(
+                base,
+                stressed,
+                steps=steps,
+                round_trip_pct=round_trip,
+                config=config,
+                trend_days=trend_days,
             )
         )
-        return EXIT_OK
-    print(
-        backtest_mod.render_report(
-            base,
-            stressed,
-            steps=steps,
-            round_trip_pct=round_trip,
-            config=config,
-            trend_days=trend_days,
-        )
-    )
+    if breakout is not None and rule is not None:
+        if per_coin:
+            print()
+        print(portfolio_mod.render(breakout, rule))
     if args.roll_window:
         window = timedelta(days=args.roll_window)
         step = timedelta(days=args.roll_step)
-        windows = backtest_mod.run_rolling(
-            series,
-            trends,
-            window=window,
-            step=step,
-            strategies=strategies,
-            steps=steps,
-            round_trip_pct=round_trip,
-            trend_days=trend_days,
-        )
-        print()
-        print(backtest_mod.render_rolling(windows, window=window, step=step))
+        if per_coin:
+            windows = backtest_mod.run_rolling(
+                series,
+                trends,
+                window=window,
+                step=step,
+                strategies=per_coin,
+                steps=steps,
+                round_trip_pct=round_trip,
+                trend_days=trend_days,
+            )
+            print()
+            print(backtest_mod.render_rolling(windows, window=window, step=step))
+        if rule is not None:
+            rolling = portfolio_mod.run_rolling(
+                series,
+                prepared,
+                rule,
+                window=window,
+                step=step,
+                capital=capital,
+                round_trip_pct=round_trip,
+                min_trade=config.risk.min_notional_per_trade_usd,
+            )
+            print()
+            print(portfolio_mod.render_rolling(rolling, window=window, step=step))
     return EXIT_OK
 
 
@@ -1373,12 +1433,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     backtest = sub.add_parser(
         "backtest",
-        help="replay the trend ladder, the trend baseline and buy-and-hold on history",
+        help="replay the trend ladder, the breakout, and their baselines on history",
     )
     backtest.add_argument("--symbols", default=None, help="comma-separated; default the watchlist")
     backtest.add_argument("--days", type=int, default=90, help="history to fetch (default 90)")
     backtest.add_argument(
-        "--strategies", default="ladder,trend,hold", help="any of ladder, trend, hold"
+        "--strategies",
+        default="ladder,trend,hold,breakout",
+        help="any of ladder, trend, hold, breakout",
     )
     backtest.add_argument(
         "--ladder",
@@ -1400,6 +1462,18 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument(
         "--roll-step", type=int, default=30,
         help="days between rolling windows' starts (default 30)",
+    )
+    backtest.add_argument(
+        "--capital", default=str(portfolio_mod.DEFAULT_CAPITAL),
+        help="the breakout's starting account, dollars (default 500)",
+    )
+    backtest.add_argument(
+        "--risk-pct", default="1",
+        help="the breakout's risk per trade, percent of the account (default 1)",
+    )
+    backtest.add_argument(
+        "--max-weight-pct", default=None,
+        help="the breakout's cap per coin, percent (default: risk_limits.yaml's, 10)",
     )
     backtest.add_argument("--refresh", action="store_true", help="refetch instead of the cache")
     backtest.add_argument(
