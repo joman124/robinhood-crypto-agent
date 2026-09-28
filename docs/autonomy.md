@@ -25,7 +25,7 @@ already runs unattended:
 
 | Component | Unattended today? | Why |
 |---|---|---|
-| The trend ladder, sizing | Yes | A pure rule over bars and recorded fills |
+| The split, sizing | Yes | A pure rule over daily closes and recorded fills |
 | The 14 risk rules | Yes | Evaluated from state, not input |
 | Kill switch | **Better than yes** | A file — engageable from cron, survives a crash |
 | Price-drift re-check | Yes | Compares a fresh quote to the proposal |
@@ -44,7 +44,7 @@ not rework the pipeline, and it must not weaken anything above.
 An `AutoPolicy` standing in for the human, requiring *all* of:
 
 - `risk.passed` is true — **with no override path**, see the invariants below
-- the ladder's rule on an `auto_rules` list (say, sells before buys)
+- the split's rule on an `auto_rules` list (say, stops before entries)
 - notional within a separate, much smaller `auto_max_notional_per_trade`
 - symbol on a separate `auto_watchlist` (a subset of the manual one)
 - today's auto-executed trade count below an auto-specific cap
@@ -68,7 +68,7 @@ there are two options, and they are not equivalent:
   argument in `docs/architecture.md`.
 
 **Decision, 2026-09-21.** The owner chose the second shape: a direct client
-feeds the real-time loop (now the trend ladder; see
+feeds the real-time loop (now the split; see
 [`roadmap.md`](./roadmap.md)). It is built *read-only* first: `robinhood.py`
 holds credentials but has no order or cancel method. So today the blast radius
 of a bug is still a bad proposal, and `rhca run` is the shadow-mode evidence
@@ -93,12 +93,16 @@ track of its own position must not place the next order.
 ## The evidence, and how to get it
 
 Promoting on an unmeasured strategy would be automating an unknown. For the
-trend ladder there are two measures, and both are P&L rather than a hit rate,
-because a dip buy waits days or weeks for its sell:
+split there are three measures, all P&L rather than a hit rate, because a
+breakout is held until its stop and a tranche for good:
 
-- **Before it trades:** `rhca backtest`, over whole windows and rolling ones,
-  held to the bar in [`strategy.md`](./strategy.md#validating-it). It replays
-  the same code the live loop runs.
+- **Before it trades:** `rhca backtest --strategies split`, over whole windows
+  and rolling ones, held to the bar in
+  [`strategy.md`](./strategy.md#the-bar-it-has-to-clear). It replays the same
+  rules the live loop runs. (The owner took it live at 4 of 5 on 2026-09-28,
+  with every order still approved by id; promoting it past that is another
+  decision entirely.)
+- **Beside it:** the forward test, `rhca shadow`, held to its own bar.
 - **Once it trades:** the ledger's realized P&L per coin (`rhca status`), from
   the fills recorded in the audit log. The live record should look like the
   backtest over the same weeks; a gap between them is the thing to explain

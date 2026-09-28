@@ -7,6 +7,8 @@ split``:
 - **lump**: the sleeve's money goes in on the first day, split evenly across
   the coins. This is the ``hold (equal weight)`` baseline.
 - **dca**: one tranche of each coin every week until all ten are bought.
+  A sleeve too small for ten tranches at the minimum trade buys fewer,
+  minimum-sized ones (see :meth:`Accumulate.tranches_for`); so does ``dip``.
 - **dip** ("buy low"): one tranche at most once a week, and only on a daily
   close *under* the coin's 200-day average. While a coin trades above its
   average nothing is bought and the cash waits, however long that is.
@@ -65,6 +67,15 @@ class Accumulate:
     def tranche_count(self) -> int:
         return 1 if self.mode == LUMP else self.tranches
 
+    def tranches_for(self, share: Decimal, min_trade: Decimal) -> int:
+        """How many buys a coin's ``share`` is split into: ``tranche_count``,
+        or -- when that would make each one smaller than the minimum trade --
+        as many minimum-sized ones as fit, and at least one."""
+        count = self.tranche_count
+        if min_trade > ZERO and share / count < min_trade:
+            count = max(1, int(share // min_trade))
+        return count
+
     def due(
         self,
         *,
@@ -80,10 +91,12 @@ class Accumulate:
             return average is not None and close < average
         return True
 
-    def describe(self) -> str:
+    def describe(self, tranches: int | None = None) -> str:
+        """``tranches``: the count :meth:`tranches_for` settled on, if not ``tranches``."""
         if self.mode == LUMP:
             return "Buy every coin's share on the first day, and hold it."
-        cadence = f"one of {self.tranches} equal tranches of each coin at most every {self.every_days} days"
+        count = tranches or self.tranches
+        cadence = f"one of {count} equal tranches of each coin at most every {self.every_days} days"
         if self.mode == DCA:
             return f"Buy {cadence}, whatever the price, and hold them."
         return (

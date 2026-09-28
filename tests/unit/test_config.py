@@ -119,7 +119,8 @@ def test_shipped_config_loads_and_is_within_ceilings():
     """The configuration committed to this repo must actually be valid."""
     config = load_config("config")
     assert config.execution_mode is ExecutionMode.PROPOSE_ONLY
-    assert config.watchlist == ("BTC-USD", "ETH-USD")
+    assert config.watchlist == ("BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD")
+    assert config.risk.max_position_pct_of_portfolio == 20  # the owner's, 2026-09-28
     config.risk.validate()
     config.strategy.validate()
     assert config.strategy.trend_days == 50 and config.strategy.trend_exit

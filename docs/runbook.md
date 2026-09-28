@@ -2,9 +2,10 @@
 
 ## Shadow run (`rhca run`)
 
-The real-time loop: Robinhood quotes in, hourly bars built from them, and the
-trend ladder ([`strategy.md`](./strategy.md)) run on BTC and ETH at every
-closed hour. What the ladder wants is logged as a proposal for you to approve.
+The real-time loop: Robinhood quotes in, Coinbase's daily closes, and the
+split ([`strategy.md`](./strategy.md#the-split-live)) run on every watchlist
+coin (BTC, ETH, SOL, XRP) after each UTC daily close. What the split wants is
+logged as a proposal for you to approve.
 **It cannot place an order** — the Robinhood client has no order method. It
 runs on this PC, in a terminal you leave open.
 
@@ -150,29 +151,30 @@ Once it has run, replace the invented REST payloads in
 ### 5. Watch it
 
 ```powershell
-.venv\Scripts\rhca status                 # loop RUNNING/NOT RUNNING, the ladder per coin, keys
+.venv\Scripts\rhca status                 # loop RUNNING/NOT RUNNING, both sleeves, keys
 .venv\Scripts\rhca audit --kind proposal  # every proposal, with its rule and trigger_reason
 ```
 
-Each closed hour, the loop logs what the ladder wants, once per bar, for as
-long as it still wants it:
+After each UTC daily close, the loop logs what the split wants, afresh each
+hour, for as long as it still wants it:
 
-| Rule | What it proposes |
-|---|---|
-| `dip` | Buy a step's dollars: the close is that step's percent under the anchor, above the 50-day average. |
-| `take_profit` | Sell a step's dollars worth (everything, at the last step): the close is that far over the anchor. |
-| `trend_exit` | Sell everything the ladder holds: the close is at or under the 50-day average. |
+| Sleeve | Rule | What it proposes |
+|---|---|---|
+| `short-term` | `entry` | Buy: the close is over the prior 20-day high and the 100-day average. Sized so the stop risks 1% of the sleeve, at most $25; trimmed to the 20% per-coin limit. |
+| `short-term` | `stop` | Sell all the sleeve holds of the coin: the close is 3 x ATR(20) under its highest close since entry. |
+| `long-term` | `tranche` | Buy one $6.25 tranche: the close is under the 200-day average, a week or more after the last. Never sold. |
 
 Each proposal is either `proposed` (passed all 14 risk rules) or
 `rejected_by_risk`. A `proposed` row is still only a proposal. Acting on it is
 the normal flow below: a human names the id, `rhca approve` re-checks
 everything, and Claude Code places the order through MCP.
 
-`rhca status` shows each coin's ladder: what it holds and what that cost, the
-steps bought this cycle, the anchor, and the realized P&L from the fills you
-recorded. That is the number to watch. `rhca accuracy` still reports the
-retired System 1's six-hour hit rate, for the record; the ladder's proposals
-are not scored there, because a dip buy waits days for its sell.
+`rhca status` shows each sleeve: its cash, what it holds of each coin and
+what that cost, the entry close of each short-term position, the tranches
+bought, and the realized P&L from the fills you recorded. That is the number
+to watch. `rhca accuracy` still reports the retired System 1's six-hour hit
+rate, for the record; the split's proposals are not scored there, because a
+breakout is held until its stop and a tranche for good.
 
 ## First run on a funded account
 
@@ -257,20 +259,25 @@ For a `STAGED` plan, repeat `approve` / `place` / `record-execution` per
 tranche, incrementing `--tranche`. An unfilled tranche is expected — do not
 chase it.
 
-### The ladder's sells
+### The split's stops
 
-A `take_profit` or `trend_exit` proposal is a `proposed` sell like any other
-on the dashboard. Take it through the same steps: `plan-order`, preview,
-`approve` by its id, place, `record-execution`, and record the fill. Then
-re-ingest positions and portfolio.
+A `stop` proposal is a `proposed` sell like any other on the dashboard. Take
+it through the same steps: `plan-order`, preview, `approve` by its id, place,
+`record-execution`, and record the fill. Then re-ingest positions and
+portfolio. It sells only what the short-term sleeve holds; the long-term
+sleeve's tranches of the same coin stay.
 
-The ladder knows what it holds only from the fills you record. An unrecorded
-buy is never sold, and an unrecorded sell leaves the ladder thinking it still
-holds the coin. A step with an order recorded but not yet filled or canceled
-is not proposed again, and while a sell order is open no other sell is
-proposed. Record the final state from `get_crypto_orders` either way. If a
-sell is blocked by `sell_coverage`, the holdings snapshot predates the buy:
-re-ingest positions.
+The split knows what each sleeve holds only from the fills you record. An
+unrecorded buy is never sold, and an unrecorded sell leaves the sleeve
+thinking it still holds the coin. An order recorded but not yet filled or
+canceled holds its place -- no second entry, stop or tranche while it works --
+and an open buy's dollars stay out of the sleeve's cash. Record the final
+state from `get_crypto_orders` either way. If a sell is blocked by
+`sell_coverage`, the holdings snapshot predates the buy: re-ingest positions.
+
+The rule decides once a day. A proposal approved hours after the close may
+have drifted past the tolerance: `rhca analyze` makes a fresh one at the
+current quote, for the same decision.
 
 ### Close the day
 ```bash
@@ -293,7 +300,7 @@ the cloud sandbox cannot reach Coinbase:
 ```
 
 The symbols, the steps and the trend window default to the watchlist and
-`config/strategy.yaml` (BTC and ETH, `5:5,10:10,20:20`, 50 days). The 50 days
+`config/strategy.yaml` (BTC, ETH, SOL and XRP, `5:5,10:10,20:20`, 50 days). The 50 days
 of warm-up for the average are fetched before the window, so the window
 itself is exactly `--days` long. `--trend-days 0` drops every trend row.
 
@@ -305,7 +312,7 @@ It compares, on the same bars:
   +10%, everything left at +20%.
 - **… +50d**: the same, buying only on a close above the 50-day average.
 - **… +50d exit**: that, and selling everything on a close at or under it.
-  **`ladder (anchor) +50d exit` is the rule the agent trades.**
+  This was the rule the agent traded until 2026-09-28; it now trades the split.
 - **trend +50d**: $100 held while the close is above the average, nothing at
   or under it.
 - **hold**: $100 bought on the first bar.
@@ -344,17 +351,20 @@ clear". `--strategies breakout` runs it alone, without the ladder's tables. A ba
 authorizes nothing. It doesn't change a limit or the approval gate, and it
 says nothing about the next trade.
 
-**The split** (`strategy.md`, "The split") runs half the account long-term
-and half in the breakout:
+**The split** (`strategy.md`, "The split") -- the rule the agent trades --
+runs part of the account long-term and the rest in the breakout: by default
+the forward test's split (`config/shadow.yaml`: 50% long-term), with no coin
+over the per-coin limit in `config/risk_limits.yaml` (20%):
 
 ```powershell
-.venv\Scripts\rhca backtest --symbols BTC-USD,ETH-USD,SOL-USD,XRP-USD --days 1460 --roll-window 90 --strategies split
+.venv\Scripts\rhca backtest --days 1460 --roll-window 90 --strategies split
 ```
 
 It shows the long-term sleeve bought three ways (buy low, weekly DCA, lump
 sum), the breakout sleeve, the split, and the whole account in the breakout
-or in hold. `--long-mode`, `--long-pct` and `--long-symbols` change the
-long-term sleeve.
+or in hold, and how often the per-coin limit trimmed or turned away a buy.
+`--long-mode`, `--long-pct` and `--long-symbols` change the long-term sleeve;
+`--coin-cap-pct` the limit.
 
 ## Forward test (`rhca shadow`)
 

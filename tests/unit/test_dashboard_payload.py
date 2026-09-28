@@ -212,15 +212,16 @@ class TestPayloadShape:
         assert row["signals"] == [] and row["score"] is None
         assert row["outcome"] is None
 
-    def test_the_ladder_sends_realized_pnl_but_not_what_it_holds(self, config):
+    def test_the_split_sends_realized_pnl_but_not_what_it_holds(self, config):
         audit = AuditLog(config.audit_path)
-        for pid, side, rule in (("b0", "buy", "dip"), ("s0", "sell", "take_profit")):
-            detail = {"rule": rule, "step": 0, "anchor": "100"}
+        for pid, side, rule in (("b0", "buy", "entry"), ("s0", "sell", "stop")):
+            detail = {"sleeve": "short-term", "rule": rule, "day": "2026-05-01T00:00:00+00:00"}
             audit.append(
                 KIND_PROPOSAL,
                 {
-                    "proposal_id": pid, "symbol": "BTC-USD", "side": side, "strategy": "ladder",
-                    "proposal": {"sizing_detail": {"ladder": detail}},
+                    "proposal_id": pid, "symbol": "BTC-USD", "side": side, "strategy": "split",
+                    "notional": "0", "reference_price": "0",
+                    "proposal": {"sizing_detail": {"split": detail}},
                 },
             )
         fills = (("b0", Side.BUY, "0.2", "19.00"), ("s0", Side.SELL, "0.1", "11.00"))
@@ -233,7 +234,9 @@ class TestPayloadShape:
                 )
             )
         # 0.1 x (110 - 95) realized. The 0.1 still held, and its $9.50 cost, stay here.
-        assert build_payload(config, audit=audit)["ladder_realized_pnl"] == {"BTC-USD": "1.50"}
+        payload = build_payload(config, audit=audit)
+        assert payload["split_realized_pnl"] == {"BTC-USD": "1.50"}
+        assert "ladder_realized_pnl" not in payload
 
     def test_limit_keeps_the_most_recent(self, config):
         audit = AuditLog(config.audit_path)

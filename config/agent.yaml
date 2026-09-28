@@ -17,9 +17,15 @@ execution_mode: propose_only
 # trend ladder. Over two years of backtests the ladder lost money on SOL, SHIB
 # and DOGE under every variant; BTC and ETH are also the deepest markets, which
 # is where docs/autonomy.md says unattended trading belongs.
+#
+# SOL and XRP added back by the owner, 2026-09-28, for the split, which trades
+# every coin listed here: the breakout on each, and the long-term sleeve's money
+# split evenly across them (docs/strategy.md, "The split").
 watchlist:
   - BTC-USD
   - ETH-USD
+  - SOL-USD
+  - XRP-USD
 
 # The NUMERIC rhs_account_number from get_accounts -- not the alphanumeric
 # account_number. Leave blank and set RHCA_RHS_ACCOUNT_NUMBER in the

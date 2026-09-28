@@ -347,10 +347,10 @@ def outcome_from_proposal_record(
     """Score a proposal straight from its audit-log record.
 
     ``None`` for a record that cannot be scored; for a time exit, which closed
-    a position rather than predicting; and for the ladder's proposals, whose
-    measure is P&L rather than a hit rate.
+    a position rather than predicting; and for the ladder's and the split's
+    proposals, whose measure is P&L rather than a hit rate.
     """
-    if record.get("exit") or record.get("strategy") == "ladder":
+    if record.get("exit") or record.get("strategy") in ("ladder", "split"):
         return None
     try:
         proposal_id = str(record["proposal_id"])

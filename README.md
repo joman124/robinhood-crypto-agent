@@ -1,11 +1,13 @@
 # robinhood-crypto-agent
 
-A crypto trading agent for Robinhood that trades one rule on BTC and ETH: the
-**trend ladder**. It buys dips in dollar steps while the price is above its
-50-day average, sells into strength, and sells everything when the price
-closes under that average. Fourteen risk rules check every proposal. Orders go
-only through [Claude Code](https://claude.com/claude-code) and the
-**RobinHood MCP server**, after a human approves each one by id.
+A crypto trading agent for Robinhood that trades one rule on its watchlist
+(BTC, ETH, SOL and XRP): **the split**. Half the account is bought and held
+long-term -- a tranche at a time, only on a close under the 200-day average --
+and half trades the **breakout**: it buys a daily close above the prior
+20-day high and the 100-day average, sized by risk, and sells on a trailing
+stop. Fourteen risk rules check every proposal. Orders go only through
+[Claude Code](https://claude.com/claude-code) and the **RobinHood MCP
+server**, after a human approves each one by id.
 
 > ⚠️ **This trades real money.** `place_crypto_order` places a real order
 > against a real account. There is no paper-trading endpoint to point at.
@@ -24,7 +26,7 @@ the risk limits, and the audit trail. It can *read* from Robinhood (see
      └───────┬──────────────────────────────────┬─────────────────-┘
              │ JSON responses                   │ proposals, payloads
              ▼                                  ▼
-   get_crypto_quotes ──► rhca ingest ──► price history ──► trend ladder
+   get_crypto_quotes ──► rhca ingest ──► daily closes  ──► the split   
    get_currency_pairs                                          │
    get_crypto_positions                                        ▼
    get_portfolio                                    sizing ──► risk engine
@@ -41,23 +43,22 @@ hands it a payload after a human has approved a **specific proposal by id**.
 ### The real-time loop: `rhca run` (shadow mode)
 
 ```
-Robinhood quotes ─► hourly bars ─► trend ladder ─► 14 risk rules ─► proposal
-                                        ▲                               │
-                 recorded fills ────────┘                               ▼
-                 (the ladder's state)                      audit log ─► dashboard
+Coinbase daily closes ─► the split ─► 14 risk rules ─► proposal (priced off
+                            ▲                               │   Robinhood's quote)
+     recorded fills ────────┘                               ▼
+     (each sleeve's state)                     audit log ─► dashboard
 ```
 
 `rhca run` polls Robinhood's Crypto Trading API with a **read-only** client (no
 order method exists), for quotes and trading pairs only. The balance and
 holdings it checks against are the Agentic account's, which Claude Code feeds
-in with `rhca ingest`. On each closed hour it runs the ladder, and logs what
-the ladder wants as a proposal for a human to approve. Setup and keys:
+in with `rhca ingest`. After each UTC daily close it runs the split, and logs
+what it wants as a proposal for a human to approve. Setup and keys:
 [`docs/runbook.md`](./docs/runbook.md#shadow-run-rhca-run).
 
-It also keeps the **forward test**: the split account -- $250 held long-term,
-$250 in the breakout -- on paper from 2026-09-28, recorded after each UTC
-daily close and reported by `rhca shadow`. It never proposes
-([`docs/strategy.md`](./docs/strategy.md#the-forward-test)).
+It also keeps the **forward test**: the same split on paper from 2026-09-28,
+recorded after each UTC daily close and reported by `rhca shadow`. It never
+proposes ([`docs/strategy.md`](./docs/strategy.md#the-forward-test)).
 
 ## What it does
 
@@ -65,15 +66,14 @@ daily close and reported by `rhca shadow`. It never proposes
   tool — only live quotes. So the agent records every quote it is given and
   aggregates bars from them. This is the central design constraint; see
   [`docs/data-constraints.md`](./docs/data-constraints.md).
-- **Trades one backtested rule.** The trend ladder
-  ([`docs/strategy.md`](./docs/strategy.md)): $5, $10 and $20 at 5%, 10% and
-  20% under the recent high, only above the 50-day average; sells mirror the
-  buys, and a close under the average sells everything. `rhca backtest`
-  replays the same code the live loop runs, and a test holds the two to the
-  same trades.
-- **Rebuilds its state from what filled.** The anchor, the steps taken and
-  what is held all come from the fills recorded in the audit log, so a restart
-  changes nothing and the ladder never sells a coin it did not buy.
+- **Trades one backtested rule.** The split
+  ([`docs/strategy.md`](./docs/strategy.md#the-split-long-term--short-term)):
+  $250 long-term in ten tranches a coin, $250 in the breakout, no coin over
+  20% of the account. `rhca backtest --strategies split` replays the same
+  rules, and a test holds the live path to the backtest's trades.
+- **Rebuilds its state from what filled.** Each sleeve's cash, holdings and
+  entry days come from the fills recorded in the audit log, so a restart
+  changes nothing and the split never sells a coin it did not buy.
 - **Refuses, loudly and specifically.** Fourteen risk rules run on every
   proposal — all of them, so the report names every blocker rather than the
   first. See [`docs/risk-controls.md`](./docs/risk-controls.md).
@@ -82,10 +82,10 @@ daily close and reported by `rhca shadow`. It never proposes
   Robinhood. See [`docs/architecture.md`](./docs/architecture.md#the-contract-layer).
 - **Logs everything, append-only.** Including proposals the risk engine
   blocked — that record is the evidence the controls do anything.
-- **Reports its P&L.** `rhca status` shows each coin's ladder position, cost
+- **Reports its P&L.** `rhca status` shows each sleeve's cash, holdings, cost
   and realized P&L from the recorded fills. (The six-hour hit rate in
-  `rhca accuracy` scored the retired System 1's predictions; the ladder waits
-  days for its sells, so it is measured on P&L instead.)
+  `rhca accuracy` scored the retired System 1's predictions; the split holds
+  for days or for good, so it is measured on P&L instead.)
 - **Has a web dashboard** ([`dashboard/`](./dashboard)) for reviewing proposals
   and accepting or declining — which records a decision the agent replays
   through the same approval gate, never an order.
@@ -138,12 +138,12 @@ rhca plan-order <proposal-id>
 rhca approve <proposal-id> --approval "execute <proposal-id>" --quote fresh.json
 rhca record-execution <proposal-id> --tranche 0 -f response.json
 
-# Replay the ladder, the breakout candidate and their baselines on Coinbase
+# Replay the retired ladder, the breakout and their baselines on Coinbase
 # bars, over the whole window and over rolling 90-day windows
 rhca backtest --days 730 --roll-window 90
 rhca backtest --symbols BTC-USD,ETH-USD,SOL-USD,XRP-USD --days 730 --strategies breakout
-# ... and the split: half held long-term, half in the breakout
-rhca backtest --symbols BTC-USD,ETH-USD,SOL-USD,XRP-USD --days 1460 --strategies split
+# ... and the split the agent trades: half held long-term, half in the breakout
+rhca backtest --days 1460 --roll-window 90 --strategies split
 
 # The forward test: the split on paper since 2026-09-28, against its bar
 rhca shadow
@@ -172,12 +172,13 @@ src/robinhood_crypto_agent/
 ├── runner.py           # rhca run: the real-time loop, shadow mode
 ├── robinhood.py        # read-only Crypto Trading API client (no order methods)
 ├── bootstrap.py        # Coinbase candles for a fresh checkout
-├── backtest.py         # rhca backtest: the ladder vs its baselines
+├── backtest.py         # rhca backtest: the retired ladder vs its baselines
 ├── portfolio_backtest.py # the breakout and the split, as one account across coins
 ├── shadow.py           # the forward test: the split on paper, one daily close at a time
 ├── net.py              # the one HTTP helper
-├── agent.py            # the analysis pipeline: bars + ledger -> ladder -> proposals
-├── ledger.py           # the ladder's holdings and cycle, from recorded fills
+├── agent.py            # the analysis pipeline: daily closes + ledger -> split -> proposals
+├── ledger.py           # each sleeve's cash and holdings, from recorded fills
+├── daily.py            # Coinbase daily closes, cached: what the split decides on
 ├── config.py           # config, clamped by hard code ceilings
 ├── models.py           # domain types
 ├── numeric.py          # Decimal helpers; no price ever becomes a float
@@ -192,7 +193,7 @@ src/robinhood_crypto_agent/
 ├── dashboard.py        # the payload the dashboard renders
 ├── mcp/                # the RobinHood tool contract and response parsers
 ├── store/              # price history and cached account state
-├── strategy/           # the trend ladder (live); the breakout and hodl (paper only)
+├── strategy/           # the split (live): breakout + hodl; the retired ladder
 └── execution/          # order payloads, approval gate, kill switch
 
 dashboard/              # Next.js app, deployable to Vercel
@@ -215,6 +216,6 @@ remaining-quantity accounting and the audit-log daily caps all already run
 without a human. Phase 2 swaps the authorization source; it does not rework the
 pipeline.
 
-**Next up.** Run `rhca backtest` on real bars and hold the trend ladder to the
-bar in [`docs/strategy.md`](./docs/strategy.md#validating-it) before
-approving its first live proposal. See [`docs/roadmap.md`](./docs/roadmap.md).
+**Next up.** The split is live, by the owner's decision on 2026-09-28: every
+proposal still waits for approval by id. The forward test's bar is read on
+2026-12-27. See [`docs/roadmap.md`](./docs/roadmap.md).

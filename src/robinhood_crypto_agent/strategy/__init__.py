@@ -1,4 +1,9 @@
-"""The trading rule: the trend ladder (``strategy.ladder``)."""
+"""The trading rules.
+
+The agent trades the split (``strategy.split``): the long-term sleeve
+(``strategy.hodl``) and the breakout (``strategy.breakout``). The retired trend
+ladder (``strategy.ladder``) stays for ``rhca backtest``'s comparison rows.
+"""
 
 from .ladder import (
     DEFAULT_STEPS,

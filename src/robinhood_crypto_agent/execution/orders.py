@@ -6,9 +6,9 @@ Nothing here places an order. These functions build the *arguments* for
 is what actually calls the tool, and it does so only after a human has approved
 a specific proposal by id.
 
-Every ladder proposal is one order, ``PROMPT``: a limit at the price the
-rule's step was priced at -- the ask for a buy, the bid for a sell -- which is
-what the backtest fills at. A ``market_orders_only`` pair gets a market order,
+Every split proposal is one order, ``PROMPT``: a limit at the price it was
+priced at -- the ask for a buy, the bid for a sell -- which is what the
+backtest fills at. A ``market_orders_only`` pair gets a market order,
 since a limit would be refused.
 
 Plans with several tranches (``STAGED``) are System 1's, and exist only in its

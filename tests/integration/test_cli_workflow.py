@@ -16,7 +16,9 @@ import yaml
 
 from robinhood_crypto_agent.audit import AuditLog
 from robinhood_crypto_agent.cli import EXIT_BLOCKED, EXIT_ERROR, EXIT_OK, main
+from robinhood_crypto_agent.daily import latest_close
 from robinhood_crypto_agent.execution.kill_switch import KillSwitch
+from tests.conftest import FakeCoinbaseDaily
 
 
 def envelope(results, **extra):
@@ -47,8 +49,9 @@ def workspace(tmp_path, monkeypatch):
             }
         )
     )
-    # A one-day trend average, so 80 bars are plenty.
-    (config_dir / "strategy.yaml").write_text(yaml.safe_dump({"strategy": {"trend_days": 1}}))
+    (config_dir / "strategy.yaml").write_text(
+        yaml.safe_dump({"strategy": {"split_capital": 500, "split_long_pct": 50}})
+    )
     data_dir = tmp_path / "data"
 
     now = datetime.now(timezone.utc)
@@ -70,6 +73,17 @@ def workspace(tmp_path, monkeypatch):
             }
         )
         price = close
+
+    # Coinbase's daily closes, as the split reads them: BTC climbs for months
+    # and closes 5% over its 20-day high on the last close -- a breakout --
+    # at the price quoted below. ETH goes nowhere.
+    climb = [price / 1.05 / 1.001 ** (239 - i) for i in range(239)]
+    monkeypatch.setattr(
+        "robinhood_crypto_agent.daily.fetch_coinbase_history",
+        FakeCoinbaseDaily(
+            {"BTC-USD": [*climb, price], "ETH-USD": [3000] * 240}, last=latest_close(now)
+        ),
+    )
 
     files = {
         "bars.json": bars,
@@ -173,8 +187,9 @@ def test_status_on_an_empty_workspace_reports_no_history(workspace, capsys):
     assert "propose_only" in out
     assert "kill switch: released" in out
     assert "no observations recorded" in out
-    assert "ladder         : anchor mode, steps -5%/$5, -10%/$10, -20%/$20" in out
-    assert "BTC-USD      : no ladder fill yet" in out
+    assert "split          : $250.00 long-term (buy low) + $250.00 short-term (breakout)" in out
+    assert "long-term    : cash $250.00 of $250.00" in out
+    assert "short-term   : cash $250.00 of $250.00" in out
 
 
 def test_analyze_without_quotes_fails_with_guidance(workspace, capsys):
@@ -187,7 +202,7 @@ def test_analyze_explains_symbols_it_skipped(workspace, capsys):
     workspace.run("analyze")
     out = capsys.readouterr().out
     assert "NO PROPOSAL" in out
-    assert "ETH-USD" in out and "no live quote" in out
+    assert "ETH-USD" in out and "short-term: no breakout" in out
 
 
 def test_full_happy_path(workspace, capsys):
@@ -245,11 +260,14 @@ def test_full_happy_path(workspace, capsys):
     assert activity.execution_count == 1
     assert activity.executed_notional > Decimal("0")
 
-    # The fill opens the ladder's cycle: status shows it, and the step is spent.
+    # The fill opens the short-term position: status shows it, and the entry
+    # is not proposed again -- the rule now watches its stop.
     assert workspace.run("status") == EXIT_OK
-    assert "steps bought: 1" in capsys.readouterr().out
+    status = capsys.readouterr().out
+    assert "short-term   : cash $2" in status and "BTC-USD    : holding" in status
     assert workspace.run("analyze") == EXIT_BLOCKED
-    assert "no order this bar" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "short-term: holding" in out and "stop at" in out
 
 
 def test_vague_approval_is_refused(workspace, capsys):

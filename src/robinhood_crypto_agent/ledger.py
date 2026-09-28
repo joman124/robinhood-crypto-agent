@@ -1,29 +1,25 @@
-"""What the ladder holds, read back from the audit log.
+"""What the split holds, read back from the audit log.
 
-The rule in :mod:`strategy.ladder` is stateless. Everything it needs to know --
-what is held, the cycle's anchor, which steps were bought and sold -- is
-rebuilt here from the audit log on every analysis, so it survives a restart
-and can never drift from the record of what actually filled.
+The split's rules (``strategy/split.py``) are stateless. What they need to
+know -- each sleeve's cash, what it holds of each coin, when the short-term
+position was entered, how many long-term tranches are bought -- is rebuilt
+here from the audit log on every analysis, so it survives a restart and can
+never drift from the record of what actually filled.
 
-Only the ladder's own orders count. An execution is the ladder's when the
-proposal it was recorded against carries ladder detail; a coin bought outside
-the agent, or by the retired System 1, is not in this ledger and is never
-proposed for sale.
+Only the split's own orders count. An execution is the split's when the
+proposal it was recorded against carries split detail. A coin bought outside
+the agent, by the retired trend ladder, or by System 1, is not in either
+sleeve and is never proposed for sale -- though it still counts toward the
+per-coin limit, which reads the whole account.
 
-A cycle
--------
-A cycle opens with the first ladder buy recorded after the position was
-empty, and takes the anchor that buy was proposed with. It closes when a
-recorded sell brings the ladder's holding back to zero. A buy order that
-never filled and has ended (canceled, rejected) does not keep a cycle open.
-
-Steps
------
-A step is *taken* once an order for it has filled any quantity, or is still
-open: recorded, and not yet reported filled or ended. So the loop never
-proposes a step twice while its first order is still working. Record the
-order's final state from ``get_crypto_orders`` to release a step whose order
-was canceled unfilled.
+Orders
+------
+An order *holds its place* once it has filled any quantity, or is still open:
+recorded, and not yet reported filled or ended. So the loop never proposes an
+entry, a stop or a tranche twice while the first order is still working.
+Record the order's final state from ``get_crypto_orders`` to release one that
+was canceled unfilled. An open buy's unfilled dollars are held out of the
+sleeve's cash until it ends.
 """
 
 from __future__ import annotations
@@ -39,105 +35,131 @@ from .models import Side, parse_timestamp
 from .numeric import ZERO, to_decimal
 from .symbols import canonical
 
-#: The ``strategy`` annotation on every proposal the ladder makes.
-STRATEGY_LADDER = "ladder"
+#: The ``strategy`` annotation on every proposal the split makes, and the key
+#: its detail sits under in ``sizing_detail``.
+STRATEGY_SPLIT = "split"
 
-#: States that moved nothing, so they neither open nor close a lot -- the same
-#: set the daily caps ignore. A canceled order keeps what it filled.
+LONG_TERM = "long-term"
+SHORT_TERM = "short-term"
+SLEEVES = (LONG_TERM, SHORT_TERM)
+
+#: What each order is: a breakout entry or stop, or a long-term tranche.
+RULE_ENTRY = "entry"
+RULE_STOP = "stop"
+RULE_TRANCHE = "tranche"
+
+#: States that moved nothing -- the same set the daily caps ignore. A canceled
+#: order keeps what it filled.
 DEAD_STATES = frozenset({"rejected", "failed", "voided"})
 #: States after which an order can fill nothing more.
 FINAL_STATES = DEAD_STATES | {"filled", "canceled", "cancelled"}
 
 
 @dataclass(frozen=True)
-class LadderInfo:
-    """The ladder detail a proposal was made with."""
+class SplitInfo:
+    """The split detail a proposal was made with."""
 
     symbol: str
     side: Side
+    sleeve: str
     rule: str
-    step: int | None
-    anchor: Decimal | None
+    #: The daily close the rule decided on.
+    day: datetime
+    #: What the proposal expected to spend (a buy) or receive (a sell).
+    notional: Decimal
+    reference_price: Decimal
 
 
-@dataclass(frozen=True)
-class OpenLot:
-    """Quantity a recorded ladder buy added and no recorded sell has closed yet."""
-
-    symbol: str
-    quantity: Decimal
-    filled_at: datetime
-    proposal_id: str
-    #: What each unit cost, from the fill's recorded notional; ``None`` when
-    #: the fill recorded no notional.
-    price: Decimal | None = None
-
-
-@dataclass(frozen=True)
-class LadderPosition:
-    """One symbol's ladder state, as the audit log has it."""
-
-    symbol: str
-    lots: tuple[OpenLot, ...] = ()
-    #: The open cycle's anchor, or ``None`` between cycles.
-    anchor: Decimal | None = None
-    cycle_started_at: datetime | None = None
-    bought: frozenset[int] = frozenset()
-    sold: frozenset[int] = frozenset()
-    #: A ladder sell order is recorded and still open.
-    open_sell: bool = False
-    #: When the last cycle closed. ``None`` if one never has.
-    flat_since: datetime | None = None
-    last_fill_at: datetime | None = None
-    #: Proceeds less FIFO cost over everything sold, where both are known.
-    realized_pnl: Decimal = ZERO
-
-    @property
-    def held(self) -> Decimal:
-        return sum((lot.quantity for lot in self.lots), ZERO)
-
-    @property
-    def in_cycle(self) -> bool:
-        return self.anchor is not None
-
-    @property
-    def cost(self) -> Decimal | None:
-        """What the open lots cost, or ``None`` if any fill lacks a notional."""
-        if any(lot.price is None for lot in self.lots):
-            return None
-        return sum((lot.quantity * lot.price for lot in self.lots if lot.price), ZERO)
-
-    @property
-    def entry_proposal_ids(self) -> list[str]:
-        return list(dict.fromkeys(lot.proposal_id for lot in self.lots))
-
-
-def ladder_info(record: dict[str, Any]) -> LadderInfo | None:
-    """The ladder detail on a proposal record, or ``None`` if it is not the ladder's."""
+def split_info(record: dict[str, Any]) -> SplitInfo | None:
+    """The split detail on a proposal record, or ``None`` if it is not the split's."""
     proposal = record.get("proposal") if isinstance(record.get("proposal"), dict) else {}
-    detail = (proposal.get("sizing_detail") or {}).get(STRATEGY_LADDER)
-    if record.get("strategy") != STRATEGY_LADDER or not isinstance(detail, dict):
+    detail = (proposal.get("sizing_detail") or {}).get(STRATEGY_SPLIT)
+    if record.get("strategy") != STRATEGY_SPLIT or not isinstance(detail, dict):
         return None
     try:
-        side = Side(str(record["side"]))
-        step = detail.get("step")
-        anchor = detail.get("anchor")
-        return LadderInfo(
+        sleeve = str(detail["sleeve"])
+        if sleeve not in SLEEVES:
+            return None
+        return SplitInfo(
             symbol=canonical(str(record["symbol"])),
-            side=side,
-            rule=str(detail.get("rule", "")),
-            step=int(step) if step is not None else None,
-            anchor=to_decimal(anchor, field="anchor") if anchor is not None else None,
+            side=Side(str(record["side"])),
+            sleeve=sleeve,
+            rule=str(detail["rule"]),
+            day=parse_timestamp(str(detail["day"])),
+            notional=to_decimal(record.get("notional", 0), field="notional"),
+            reference_price=to_decimal(record.get("reference_price", 0), field="reference_price"),
         )
     except (KeyError, ValueError, TypeError, AgentError):
         return None
 
 
 @dataclass
+class Holding:
+    """One sleeve's position in one coin."""
+
+    symbol: str
+    sleeve: str
+    quantity: Decimal = ZERO
+    #: What the quantity held cost, spread included (first in, first out).
+    cost: Decimal = ZERO
+    #: Short-term: the daily close the held position was entered on.
+    entry_day: datetime | None = None
+    #: Long-term: tranches filled or still open, and the latest one's day.
+    tranches: int = 0
+    last_buy_day: datetime | None = None
+    #: A buy or a sell of it is recorded and still open.
+    open_buy: bool = False
+    open_sell: bool = False
+    last_fill_at: datetime | None = None
+    #: Proceeds less cost over everything sold.
+    realized_pnl: Decimal = ZERO
+    _lots: list[tuple[Decimal, Decimal]] = field(default_factory=list, repr=False)
+
+    @property
+    def held(self) -> bool:
+        return self.quantity > ZERO
+
+
+@dataclass
+class Sleeve:
+    """One sleeve's money: what it started with, spent and got back."""
+
+    name: str
+    capital: Decimal
+    spent: Decimal = ZERO
+    received: Decimal = ZERO
+    #: Open buys' unfilled dollars, held out of the cash until they end.
+    committed: Decimal = ZERO
+    holdings: dict[str, Holding] = field(default_factory=dict)
+
+    @property
+    def cash(self) -> Decimal:
+        return self.capital - self.spent + self.received - self.committed
+
+    @property
+    def realized_pnl(self) -> Decimal:
+        return sum((h.realized_pnl for h in self.holdings.values()), ZERO)
+
+    def holding(self, symbol: str) -> Holding:
+        symbol = canonical(symbol)
+        return self.holdings.setdefault(symbol, Holding(symbol, self.name))
+
+
+@dataclass
+class SplitBook:
+    long: Sleeve
+    short: Sleeve
+
+    def sleeve(self, name: str) -> Sleeve:
+        return self.long if name == LONG_TERM else self.short
+
+
+@dataclass
 class _Order:
-    info: LadderInfo
+    info: SplitInfo
     state: str = ""
     filled: Decimal = ZERO
+    notional: Decimal = ZERO
 
     @property
     def open(self) -> bool:
@@ -148,139 +170,88 @@ class _Order:
         return self.filled > ZERO or self.open
 
 
-@dataclass
-class _Cycle:
-    anchor: Decimal | None
-    started_at: datetime
-    orders: list[str] = field(default_factory=list)
-
-
-class _Tracker:
-    """Replays one symbol's ladder executions in the order they were recorded."""
-
-    def __init__(self, symbol: str) -> None:
-        self.symbol = symbol
-        self.lots: list[OpenLot] = []
-        self.orders: dict[str, _Order] = {}
-        self.cycle: _Cycle | None = None
-        self.flat_since: datetime | None = None
-        self.last_fill_at: datetime | None = None
-        self.realized = ZERO
-
-    @property
-    def held(self) -> Decimal:
-        return sum((lot.quantity for lot in self.lots), ZERO)
-
-    def _cycle_alive(self) -> bool:
-        if self.cycle is None:
-            return False
-        return self.held > ZERO or any(self.orders[pid].open for pid in self.cycle.orders)
-
-    def apply(self, proposal_id: str, info: LadderInfo, record: dict[str, Any]) -> None:
-        state = str(record.get("state", "")).lower()
-        try:
-            at = parse_timestamp(str(record["recorded_at"]))
-            filled = to_decimal(record.get("filled_quantity", 0), field="filled_quantity")
-        except (KeyError, ValueError, AgentError):
-            return
-        if state in DEAD_STATES:
-            filled = ZERO
-
-        if info.side is Side.BUY and not self._cycle_alive():
-            self.cycle = _Cycle(anchor=info.anchor, started_at=at)
-        order = self.orders.setdefault(proposal_id, _Order(info))
-        order.state = state
-        order.filled += max(filled, ZERO)
-        if self.cycle is not None and proposal_id not in self.cycle.orders:
-            self.cycle.orders.append(proposal_id)
-        if filled <= ZERO:
-            return
-
-        self.last_fill_at = at
-        price = _unit_price(record, filled)
-        if info.side is Side.BUY:
-            self.lots.append(OpenLot(self.symbol, filled, at, proposal_id, price))
-            return
-        self._consume(filled, price)
-        if self.held <= ZERO:
-            self.lots = []
-            self.cycle = None
-            self.flat_since = at
-
-    def _consume(self, quantity: Decimal, price: Decimal | None) -> None:
-        """Close ``quantity`` against the oldest lots first."""
-        remaining = quantity
-        while self.lots and remaining > ZERO:
-            oldest = self.lots[0]
-            take = min(oldest.quantity, remaining)
-            if price is not None and oldest.price is not None:
-                self.realized += take * (price - oldest.price)
-            remaining -= take
-            if take >= oldest.quantity:
-                self.lots.pop(0)
-            else:
-                self.lots[0] = OpenLot(
-                    oldest.symbol,
-                    oldest.quantity - take,
-                    oldest.filled_at,
-                    oldest.proposal_id,
-                    oldest.price,
-                )
-
-    def position(self) -> LadderPosition:
-        alive = self._cycle_alive()
-        cycle = self.cycle if alive else None
-        orders = [self.orders[pid] for pid in cycle.orders] if cycle else []
-        return LadderPosition(
-            symbol=self.symbol,
-            lots=tuple(self.lots),
-            anchor=cycle.anchor if cycle else None,
-            cycle_started_at=cycle.started_at if cycle else None,
-            bought=frozenset(
-                o.info.step
-                for o in orders
-                if o.info.side is Side.BUY and o.info.step is not None and o.taken
-            ),
-            sold=frozenset(
-                o.info.step
-                for o in orders
-                if o.info.side is Side.SELL and o.info.step is not None and o.taken
-            ),
-            open_sell=any(o.info.side is Side.SELL and o.open for o in self.orders.values()),
-            flat_since=self.flat_since,
-            last_fill_at=self.last_fill_at,
-            realized_pnl=self.realized,
-        )
-
-
-def _unit_price(record: dict[str, Any], filled: Decimal) -> Decimal | None:
-    try:
-        notional = to_decimal(record.get("notional", 0), field="notional")
-    except (AgentError, ValueError, ArithmeticError):
-        return None
-    return notional / filled if notional > ZERO and filled > ZERO else None
-
-
-def ladder_positions(audit: AuditLog) -> dict[str, LadderPosition]:
-    """Every symbol the ladder has ever ordered, with its state now."""
-    info: dict[str, LadderInfo] = {}
-    trackers: dict[str, _Tracker] = {}
+def split_book(
+    audit: AuditLog, *, long_capital: Decimal, short_capital: Decimal
+) -> SplitBook:
+    """Both sleeves, as the recorded fills of the split's orders have them."""
+    book = SplitBook(Sleeve(LONG_TERM, long_capital), Sleeve(SHORT_TERM, short_capital))
+    infos: dict[str, SplitInfo] = {}
+    orders: dict[str, _Order] = {}
     for record in audit.events():
         kind = record.get("kind")
         if kind == KIND_PROPOSAL:
-            found = ladder_info(record)
+            found = split_info(record)
             if found is not None:
-                info[str(record.get("proposal_id"))] = found
+                infos[str(record.get("proposal_id"))] = found
         elif kind == KIND_EXECUTION:
             proposal_id = str(record.get("proposal_id", ""))
-            found = info.get(proposal_id)
-            if found is None:
-                continue  # not the ladder's order
-            tracker = trackers.setdefault(found.symbol, _Tracker(found.symbol))
-            tracker.apply(proposal_id, found, record)
-    return {symbol: tracker.position() for symbol, tracker in trackers.items()}
+            info = infos.get(proposal_id)
+            if info is not None:
+                order = orders.setdefault(proposal_id, _Order(info))
+                _apply(book, order, record)
+
+    for order in orders.values():
+        info = order.info
+        holding = book.sleeve(info.sleeve).holding(info.symbol)
+        if order.open:
+            if info.side is Side.BUY:
+                holding.open_buy = True
+                book.sleeve(info.sleeve).committed += max(info.notional - order.notional, ZERO)
+            else:
+                holding.open_sell = True
+        if info.rule == RULE_TRANCHE and order.taken:
+            holding.tranches += 1
+            if holding.last_buy_day is None or info.day > holding.last_buy_day:
+                holding.last_buy_day = info.day
+    return book
 
 
-def ladder_position(audit: AuditLog, symbol: str) -> LadderPosition:
-    symbol = canonical(symbol)
-    return ladder_positions(audit).get(symbol) or LadderPosition(symbol)
+def _apply(book: SplitBook, order: _Order, record: dict[str, Any]) -> None:
+    """One execution record, in the order it was recorded."""
+    info = order.info
+    state = str(record.get("state", "")).lower()
+    try:
+        at = parse_timestamp(str(record["recorded_at"]))
+        filled = to_decimal(record.get("filled_quantity", 0), field="filled_quantity")
+        notional = to_decimal(record.get("notional", 0), field="notional")
+    except (KeyError, ValueError, AgentError):
+        return
+    order.state = state
+    if state in DEAD_STATES or filled <= ZERO:
+        return
+    if notional <= ZERO:
+        # A fill recorded without its dollars: value it at the proposed price.
+        notional = filled * info.reference_price
+    order.filled += filled
+    order.notional += notional
+
+    sleeve = book.sleeve(info.sleeve)
+    holding = sleeve.holding(info.symbol)
+    holding.last_fill_at = at
+    if info.side is Side.BUY:
+        if not holding.held and info.sleeve == SHORT_TERM:
+            holding.entry_day = info.day
+        sleeve.spent += notional
+        holding.quantity += filled
+        holding.cost += notional
+        holding._lots.append((filled, notional / filled))
+        return
+
+    sleeve.received += notional
+    price = notional / filled
+    remaining = min(filled, holding.quantity)
+    while holding._lots and remaining > ZERO:
+        quantity, unit = holding._lots[0]
+        take = min(quantity, remaining)
+        holding.realized_pnl += take * (price - unit)
+        holding.cost -= take * unit
+        remaining -= take
+        if take >= quantity:
+            holding._lots.pop(0)
+        else:
+            holding._lots[0] = (quantity - take, unit)
+    holding.quantity = max(holding.quantity - filled, ZERO)
+    if not holding.held:
+        holding.cost = ZERO
+        holding._lots.clear()
+        holding.entry_day = None

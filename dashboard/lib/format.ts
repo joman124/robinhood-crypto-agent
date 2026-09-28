@@ -110,18 +110,25 @@ export function ruleLabel(rule: string): string {
   return rule.replace(/_/g, " ");
 }
 
+/** A rule measured on P&L -- the live split, or the retired ladder -- not on a hit rate. */
 export function isLadder(p: Proposal): boolean {
-  return p.strategy === "ladder";
+  return p.strategy === "ladder" || p.strategy === "split";
 }
 
-/** "Dip, step 1", "Take profit, step 2", "Trend exit". Steps arrive 0-based. */
+/** "Short-term entry", "Long-term tranche"; the ladder's "Dip, step 1", "Trend exit".
+ * Steps arrive 0-based. */
 export function ladderLabel(p: Proposal): string {
+  if (p.strategy === "split") {
+    const sleeve = p.sleeve || "split";
+    const label = `${sleeve} ${ruleLabel(p.rule || "")}`.trim();
+    return label[0].toUpperCase() + label.slice(1);
+  }
   const rule = ruleLabel(p.rule || "ladder");
   const name = rule[0].toUpperCase() + rule.slice(1);
   return p.step == null ? name : `${name}, step ${p.step + 1}`;
 }
 
-/** The outcome, or null for a ladder proposal, which is measured on P&L and never scored. */
+/** The outcome, or null for a split or ladder proposal, measured on P&L and never scored. */
 export function verdictOf(p: Proposal): Verdict | null {
   return p.outcome?.verdict ?? (isLadder(p) ? null : "pending");
 }

@@ -32,6 +32,7 @@ export interface Outcome {
 }
 
 export type LadderRule = "dip" | "take_profit" | "trend_exit";
+export type SplitRule = "entry" | "stop" | "tranche";
 
 export type ProposalStatus =
   | "proposed"
@@ -76,12 +77,15 @@ export interface Proposal {
   proposed_at: string | null;
   /** False when the risk engine blocked it — such a proposal has no Accept. */
   actionable: boolean;
-  /** Always null for a ladder proposal: the ladder is measured on P&L, not hit rate. */
+  /** Always null for a split or ladder proposal: both are measured on P&L, not hit rate. */
   outcome: Outcome | null;
-  /** "ladder" for the trend ladder's proposals; absent on the retired System 1's. */
+  /** "split" for the live rule's proposals, "ladder" for the retired trend
+   * ladder's; absent on the retired System 1's. */
   strategy?: string | null;
-  rule?: LadderRule | string | null;
-  /** 0-based ladder step; null for the trend exit. */
+  /** The split's sleeve: "long-term" or "short-term". */
+  sleeve?: string | null;
+  rule?: LadderRule | SplitRule | string | null;
+  /** 0-based ladder step; null for the trend exit and every split proposal. */
   step?: number | null;
   // The retired System 1's. Null or absent on ladder proposals.
   score?: number | null;
@@ -154,7 +158,9 @@ export interface Payload {
     realized_pnl: string;
     proposals: number;
   };
-  /** The ladder's realized P&L per symbol, from recorded fills. Absent before 2026-09-27. */
+  /** The split's realized P&L per symbol, both sleeves, from recorded fills. */
+  split_realized_pnl?: Record<string, string>;
+  /** The retired ladder's, on payloads pushed between 2026-09-27 and 2026-09-28. */
   ladder_realized_pnl?: Record<string, string>;
   limits?: { price_drift_tolerance_pct: string };
   market?: Record<string, { mark: string; observed_at: string }>;

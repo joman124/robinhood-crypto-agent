@@ -17,8 +17,8 @@ so nothing has to be retyped or paraphrased -- paraphrasing a tool response is
 how a fabricated fill ends up in an audit log.
 
 **``rhca run``, in shadow mode.** The real-time loop reads quotes and trading
-pairs from Robinhood's Crypto API with a read-only client and runs the trend
-ladder on every closed bar (see ``runner``). Balance and holdings are the
+pairs from Robinhood's Crypto API with a read-only client and runs the split
+on each closed UTC day (see ``runner``). Balance and holdings are the
 Agentic account's, as ``rhca ingest`` last cached them. It proposes; it cannot
 order. Its proposals go through the same ``rhca approve`` gate. It also keeps
 the forward test's paper account (``shadow``), which ``rhca shadow`` reports.
@@ -38,19 +38,21 @@ from typing import Any, Sequence
 
 from . import backtest as backtest_mod
 from . import dashboard as dashboard_mod
+from . import files as files_mod
 from . import portfolio_backtest as portfolio_mod
 from . import reports
 from . import runner as runner_mod
 from . import shadow as shadow_mod
-from .agent import Agent, MarketState
+from .agent import Agent, MarketState, split_rules
 from .audit import AuditLog, day_from
 from .bootstrap import fetch_coinbase_history
 from .config import AgentConfig, load_config
+from .daily import latest_close
 from .errors import AgentError
 from .execution.gate import ApprovalGate
 from .execution.kill_switch import REASON_DAILY_LOSS, REASON_MANUAL, KillSwitch
 from .execution.orders import build_plan_requests
-from .ledger import LadderPosition, ladder_positions
+from .ledger import Holding, split_book
 from .mcp.contract import CRYPTO_TOOLS, TOOL_CONTRACTS, validate_crypto_order_args
 from .mcp.parse import (
     parse_accounts,
@@ -72,7 +74,6 @@ from .store.state import SECTION_CRYPTO_BUYING_POWER
 from .strategy.breakout import Breakout
 from .strategy.hodl import MODES as LONG_MODES
 from .strategy.hodl import Accumulate
-from .strategy.ladder import describe_steps
 from .symbols import canonical
 
 EXIT_OK = 0
@@ -250,7 +251,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"  {age.describe()}")
     print()
 
-    heartbeat = runner_mod.read_json(config.heartbeat_path)
+    heartbeat = files_mod.read_json(config.heartbeat_path)
     for line in runner_mod.describe_heartbeat(
         heartbeat,
         stale_after_seconds=runner_mod.stale_after_seconds(config),
@@ -276,11 +277,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         )
     print()
 
-    for line in describe_ladder(config, audit, state):
+    for line in describe_split(config, audit, state):
         print(line)
     print()
 
-    for line in shadow_mod.describe_status(config, runner_mod.read_json(config.shadow_path)):
+    for line in shadow_mod.describe_status(config, files_mod.read_json(config.shadow_path)):
         print(line)
     print()
 
@@ -296,49 +297,58 @@ def cmd_status(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def describe_ladder(config: AgentConfig, audit: AuditLog, state: StateCache) -> list[str]:
-    """``rhca status`` lines for the ladder: the rule, then each coin's cycle
-    and P&L as the recorded fills have it."""
+def describe_split(config: AgentConfig, audit: AuditLog, state: StateCache) -> list[str]:
+    """``rhca status`` lines for the split: the rule, then each sleeve's cash,
+    holdings and P&L as the recorded fills have them."""
     settings = config.strategy
-    ladder = settings.ladder()
-    trend = (
-        f"buys only above the {settings.trend_days}-day average"
-        + (", sells everything at or under it" if ladder.trend_exit else "")
-        if settings.trend_days
-        else "no trend filter"
+    _, plan = split_rules(config)
+    book = split_book(
+        audit,
+        long_capital=settings.split_long_capital,
+        short_capital=settings.split_short_capital,
     )
-    lines = [f"ladder         : anchor mode, steps {describe_steps(ladder.steps)}; {trend}"]
-    positions = ladder_positions(audit)
     quotes = state.quotes()
-    for symbol in config.watchlist:
-        position = positions.get(symbol) or LadderPosition(symbol)
-        lines.append(f"  {symbol:13}: {_describe_position(position, quotes.get(symbol))}")
+    lines = [
+        f"split          : ${round_money(settings.split_long_capital)} long-term ({plan.label}) + "
+        f"${round_money(settings.split_short_capital)} short-term (breakout) on "
+        f"{', '.join(config.watchlist)}; no coin over "
+        f"{config.risk.max_position_pct_of_portfolio}% of the account"
+    ]
+    for sleeve in (book.long, book.short):
+        lines.append(
+            f"  {sleeve.name:13}: cash ${round_money(sleeve.cash)} of "
+            f"${round_money(sleeve.capital)}; realized {money_sign(sleeve.realized_pnl)}"
+        )
+        for symbol in config.watchlist:
+            holding = sleeve.holdings.get(symbol)
+            if holding is None:
+                continue
+            described = _describe_holding(holding, quotes.get(symbol))
+            if described:
+                lines.append(f"    {symbol:11}: {described}")
     return lines
 
 
-def _describe_position(position: LadderPosition, quote: Any) -> str:
-    realized = f"realized ${round_money(position.realized_pnl)}"
-    if position.held <= 0:
-        state = (
-            f"flat since {position.flat_since:%Y-%m-%d %H:%M} UTC"
-            if position.flat_since
-            else "no ladder fill yet"
-        )
-        if position.in_cycle:
-            state = "an order is open, nothing filled yet"
-        return f"{state}; {realized}"
-    parts = [f"holding {format_decimal(position.held)}"]
-    cost = position.cost
-    if cost is not None:
-        parts.append(f"cost ${round_money(cost)}")
+def _describe_holding(holding: Holding, quote: Any) -> str:
+    parts = []
+    if holding.held:
+        parts.append(f"holding {format_decimal(holding.quantity)}")
+        if holding.entry_day is not None:
+            parts.append(f"since the {holding.entry_day:%Y-%m-%d} close")
+        parts.append(f"cost ${round_money(holding.cost)}")
         if quote is not None:
-            value = position.held * quote.bid
-            parts.append(f"worth ${round_money(value)} at the bid ({money_sign(value - cost)})")
-    steps = ", ".join(str(s + 1) for s in sorted(position.bought)) or "none"
-    parts.append(f"steps bought: {steps}")
-    if position.anchor is not None:
-        parts.append(f"anchor {format_decimal(position.anchor)}")
-    parts.append(realized)
+            value = holding.quantity * quote.bid
+            parts.append(
+                f"worth ${round_money(value)} at the bid ({money_sign(value - holding.cost)})"
+            )
+    if holding.tranches:
+        parts.append(f"{holding.tranches} tranche(s) bought")
+    if holding.open_buy:
+        parts.append("a buy is open")
+    if holding.open_sell:
+        parts.append("a sell is open")
+    if holding.realized_pnl:
+        parts.append(f"realized {money_sign(holding.realized_pnl)}")
     return "; ".join(parts)
 
 
@@ -1010,6 +1020,25 @@ def import_recent_history(
     return imported, failures
 
 
+def warm_daily_bars(config: AgentConfig) -> tuple[str, list[str]]:
+    """Fetch the daily closes the split decides on, so the first pass has them.
+    A coin Coinbase will not serve is reported, not raised: ``run`` must start
+    anyway, and says why that coin gets no proposal."""
+    agent = Agent(config)
+    book = agent.book()
+    days = agent.history_days(book, latest_close(utcnow()))
+    last: list[str] = []
+    failures: list[str] = []
+    for symbol in config.watchlist:
+        try:
+            bars = agent.daily.get(symbol, days=days)
+        except AgentError as exc:
+            failures.append(f"{symbol}: {exc}")
+            continue
+        last.append(f"{symbol} through {bars[-1].start:%Y-%m-%d}")
+    return (", ".join(last) or "none"), failures
+
+
 def cmd_bootstrap_history(args: argparse.Namespace) -> int:
     config, state, store, audit = _context(args)
     imported, failures = import_recent_history(config, store)
@@ -1099,7 +1128,7 @@ def backtest_history(
     """
     interval = config.strategy.bar_interval_minutes
     path = config.data_dir / "backtest" / f"{canonical(symbol)}-{interval}m.json"
-    cached = runner_mod.read_json(path)
+    cached = files_mod.read_json(path)
     if cached is not None and not refresh:
         try:
             fetched_at = parse_timestamp(str(cached["fetched_at"]))
@@ -1119,7 +1148,7 @@ def backtest_history(
     candles = fetch_coinbase_history(symbol, interval_minutes=interval, days=days)
     if not candles:
         raise AgentError(f"Coinbase returned no {interval}-minute bars for {symbol}")
-    runner_mod.write_json_atomic(
+    files_mod.write_json_atomic(
         path,
         {
             "fetched_at": utcnow().isoformat(),
@@ -1164,12 +1193,15 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     rule = None
     if BREAKOUT in strategies or SPLIT in strategies:
         try:
+            # The rule's own 10% per coin unless asked otherwise: it was fixed
+            # with the rule, and the account-wide limit in risk_limits.yaml is
+            # a separate cap (the split's --coin-cap-pct).
             rule = Breakout(
                 risk_pct=to_decimal(args.risk_pct, field="risk-pct"),
-                max_weight_pct=(
-                    to_decimal(args.max_weight_pct, field="max-weight-pct")
+                **(
+                    {"max_weight_pct": to_decimal(args.max_weight_pct, field="max-weight-pct")}
                     if args.max_weight_pct is not None
-                    else config.risk.max_position_pct_of_portfolio
+                    else {}
                 ),
             )
         except ValueError as exc:
@@ -1177,9 +1209,9 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     capital = to_decimal(args.capital, field="capital")
     if capital <= 0:
         raise AgentError("--capital must be positive")
-    plan, long_pct, long_symbols = None, Decimal("50"), None
+    plan, long_pct, long_symbols, coin_cap = None, Decimal("50"), None, None
     if SPLIT in strategies:
-        plan, long_pct, long_symbols = split_settings(args, symbols, capital, config)
+        plan, long_pct, long_symbols, coin_cap = split_settings(args, symbols, capital, config)
 
     trend_days = config.strategy.trend_days if args.trend_days is None else args.trend_days
     if trend_days < 0:
@@ -1277,6 +1309,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
             start=window_start,
             min_trade=min_trade,
             long_symbols=long_symbols,
+            coin_cap_pct=coin_cap,
         )
 
     if args.json:
@@ -1352,6 +1385,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
                 round_trip_pct=round_trip,
                 min_trade=min_trade,
                 long_symbols=long_symbols,
+                coin_cap_pct=coin_cap,
             )
             print()
             print(portfolio_mod.render_rolling_split(rolling_split, window=window, step=step))
@@ -1360,13 +1394,20 @@ def cmd_backtest(args: argparse.Namespace) -> int:
 
 def split_settings(
     args: argparse.Namespace, symbols: Sequence[str], capital: Decimal, config: AgentConfig
-) -> tuple[Accumulate, Decimal, list[str] | None]:
-    """The split's long-term plan, its share of --capital, and its coins."""
+) -> tuple[Accumulate, Decimal, list[str] | None, Decimal]:
+    """The split's long-term plan, its share of --capital, its coins, and the
+    most of the whole account one coin may be. What is not given defaults to
+    the split the forward test runs (config/shadow.yaml)."""
+    shadow = config.shadow
     try:
-        plan = Accumulate(mode=args.long_mode)
+        plan = Accumulate(mode=args.long_mode or (shadow.long_mode if shadow else "dip"))
     except ValueError as exc:
         raise AgentError(f"--long-mode: {exc}") from exc
-    long_pct = to_decimal(args.long_pct, field="long-pct")
+    long_pct = (
+        to_decimal(args.long_pct, field="long-pct")
+        if args.long_pct is not None
+        else (shadow.long_pct if shadow else Decimal("50"))
+    )
     if not 0 < long_pct < 100:
         raise AgentError("--long-pct must be strictly between 0 and 100")
     long_symbols = None
@@ -1376,16 +1417,23 @@ def split_settings(
         if outside:
             raise AgentError(f"--long-symbols must be among --symbols; not {', '.join(outside)}")
     coins = len(long_symbols or symbols)
-    # The weekly rows buy in tranches; one under the minimum trade would be
-    # refused live, so it is refused here too.
-    tranche = capital * long_pct / 100 / coins / Accumulate().tranches
-    if tranche < config.risk.min_notional_per_trade_usd:
+    # A small share buys fewer, minimum-sized tranches; one too small for a
+    # single minimum trade could never buy at all.
+    share = capital * long_pct / 100 / coins
+    if share < config.risk.min_notional_per_trade_usd:
         raise AgentError(
-            f"the long-term sleeve's weekly tranche would be ${round_money(tranche)}, under the "
+            f"the long-term sleeve would hold ${round_money(share)} of each coin, under the "
             f"${config.risk.min_notional_per_trade_usd} minimum trade: raise --capital or "
             "--long-pct, or pass fewer --long-symbols"
         )
-    return plan, long_pct, long_symbols
+    coin_cap = (
+        to_decimal(args.coin_cap_pct, field="coin-cap-pct")
+        if args.coin_cap_pct is not None
+        else config.risk.max_position_pct_of_portfolio
+    )
+    if not 0 < coin_cap <= 100:
+        raise AgentError("--coin-cap-pct must be a percent in (0, 100]")
+    return plan, long_pct, long_symbols, coin_cap
 
 
 def cmd_shadow(args: argparse.Namespace) -> int:
@@ -1462,15 +1510,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     print(f"  agentic account  : {describe_ingested_balance(state)}")
     print(f"  watchlist        : {', '.join(config.watchlist)}")
-    ladder = config.strategy.ladder()
-    trend = (
-        f"buy only above the {config.strategy.trend_days}-day average"
-        + (", sell all at or under it" if ladder.trend_exit else "")
-        if ladder.trend_filter
-        else "no trend filter"
+    settings = config.strategy
+    _, plan = split_rules(config)
+    print(
+        f"  rule             : the split, on each UTC daily close -- "
+        f"${round_money(settings.split_long_capital)} long-term ({plan.label}), "
+        f"${round_money(settings.split_short_capital)} short-term (breakout)"
     )
-    print(f"  rule             : trend ladder, {describe_steps(ladder.steps)}; {trend}")
-    print("  risk             : 14 rules, then a human approves each proposal by id")
+    print(
+        f"  risk             : 14 rules, no coin over {config.risk.max_position_pct_of_portfolio}% "
+        "of the account; a human approves each proposal by id"
+    )
     print(f"  forward test     : {describe_forward_test(config)}")
     print(f"  dashboard sync   : {'on' if services.dashboard else 'off'}")
     # Bootstrapping here rather than asking for it beforehand: the trend
@@ -1482,9 +1532,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     else:
         imported, failures = import_recent_history(config, PriceStore(config.price_store_path))
         bars = sum(count for _, count, _ in imported)
-        note = f"{bars} bar(s) imported for {len(imported)} symbol(s)"
+        note = f"{bars} hourly bar(s) imported for {len(imported)} symbol(s)"
         print(f"  history          : {note}{f', {len(failures)} failed' if failures else ''}")
         for failure in failures:
+            print(f"    ! {failure}", file=sys.stderr)
+        daily, daily_failures = warm_daily_bars(config)
+        print(
+            f"  daily closes     : {daily}"
+            + (f", {len(daily_failures)} failed" if daily_failures else "")
+        )
+        for failure in daily_failures:
             print(f"    ! {failure}", file=sys.stderr)
     if args.keep_awake:
         print(f"  keep awake       : {'on' if _keep_awake() else 'unavailable on this OS'}")
@@ -1519,7 +1576,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser(
-        "run", help="the real-time loop in shadow mode: poll, run the ladder, record"
+        "run", help="the real-time loop in shadow mode: poll, run the split, propose, record"
     )
     run.add_argument("--once", action="store_true", help="one cycle of every task, then exit")
     run.add_argument("--minutes", type=float, default=None, help="stop after this long")
@@ -1587,19 +1644,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backtest.add_argument(
         "--max-weight-pct", default=None,
-        help="the breakout's cap per coin, percent (default: risk_limits.yaml's, 10)",
+        help="the breakout's cap per coin, percent of its account (default 10, the rule's own)",
     )
     backtest.add_argument(
-        "--long-pct", default="50",
-        help="split: the share of --capital held long-term, percent (default 50)",
+        "--long-pct", default=None,
+        help="split: the share of --capital held long-term, percent "
+        "(default: config/shadow.yaml's, else 50)",
     )
     backtest.add_argument(
-        "--long-mode", default="dip", choices=LONG_MODES,
-        help="split: how the long-term sleeve buys -- dip (buy low, the default), dca, lump",
+        "--long-mode", default=None, choices=LONG_MODES,
+        help="split: how the long-term sleeve buys -- dip (buy low), dca, lump "
+        "(default: config/shadow.yaml's, else dip)",
     )
     backtest.add_argument(
         "--long-symbols", default=None,
         help="split: the long-term sleeve's coins (default: every --symbols coin)",
+    )
+    backtest.add_argument(
+        "--coin-cap-pct", default=None,
+        help="split: the most of the whole account one coin may be, both sleeves together "
+        "(default: risk_limits.yaml's max_position_pct_of_portfolio)",
     )
     backtest.add_argument("--refresh", action="store_true", help="refetch instead of the cache")
     backtest.add_argument(

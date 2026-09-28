@@ -99,3 +99,43 @@ def quote() -> Quote:
         observed_at=utcnow(),
         previous_close=Decimal("79000"),
     )
+
+
+def daily_candles(closes, *, symbol: str = "BTC-USD", last: datetime) -> list[Candle]:
+    """UTC daily bars ending with the day that starts at ``last``, each with a
+    high and low 1% either side of its close."""
+    first = last - timedelta(days=len(closes) - 1)
+    out = []
+    for index, price in enumerate(closes):
+        close = Decimal(str(price))
+        start = first + timedelta(days=index)
+        out.append(
+            Candle(symbol, start, start + timedelta(days=1), close,
+                   close * Decimal("1.01"), close * Decimal("0.99"), close, 4)
+        )
+    return out
+
+
+class FakeCoinbaseDaily:
+    """Stands in for Coinbase's daily candles: fixed paths per coin, served up
+    to whatever day ``clock`` says has closed."""
+
+    def __init__(self, paths, *, last: datetime, clock=None, fail: bool = False):
+        self.bars = {s: daily_candles(c, symbol=s, last=last) for s, c in paths.items()}
+        self.clock = clock
+        self.fail = fail
+        self.calls: list[tuple[str, int]] = []
+
+    def __call__(self, symbol, *, interval_minutes, days):
+        from robinhood_crypto_agent.daily import latest_close
+        from robinhood_crypto_agent.errors import AgentError
+
+        assert interval_minutes == 24 * 60
+        self.calls.append((symbol, days))
+        if self.fail:
+            raise AgentError("Coinbase is unreachable")
+        bars = self.bars.get(symbol, [])
+        if self.clock is not None:
+            through = latest_close(self.clock())
+            bars = [b for b in bars if b.start <= through]
+        return bars

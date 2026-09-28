@@ -1,11 +1,14 @@
-"""Sizing: the ladder's dollars in, an order quantity the pair accepts out.
+"""Sizing: the rule's dollars in, an order quantity the pair accepts out.
 
-The ladder decides *how much* -- each step names its dollars -- so sizing only
-turns that into a quantity: divided by the price the order would cross,
-snapped *down* to the pair's increment, and checked against the pair's
+The split decides *how much* -- a breakout entry's dollars from its risk, a
+tranche's from its share, a stop's quantity from what the sleeve holds -- so
+sizing only turns that into a quantity: divided by the price the order would
+cross, snapped *down* to the pair's increment, and checked against the pair's
 minimums. It never grows an order, and it never silently shrinks one to fit a
-risk limit either: a step that breaks a limit is proposed at its real size and
-blocked by the risk engine, which says which limit and by how much.
+risk limit either: an order that breaks a limit is proposed at its real size
+and blocked by the risk engine, which says which limit and by how much. (The
+per-coin limit is the exception the rule itself honours: it trims a breakout
+entry to the room left, as its backtest does, and says so.)
 """
 
 from __future__ import annotations
