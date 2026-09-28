@@ -23,19 +23,20 @@ The decision path is testable offline. Every network client is injected
 ## The real-time loop (`rhca run`)
 
 ```
-quotes (Robinhood) ─► price store ─► closed hourly bars ─┐
-                                                          ├─► trend ladder ─► size ─► plan
-recorded fills (audit log) ─► ledger: held, anchor, steps ┘                            │
-                                                                          14 risk rules
-                                                                                       │
-                                               dashboard ◄── audit log ◄── proposal ◄──┘
+daily closes (Coinbase, daily.py) ─────────────────────┐
+                                                        ├─► the split ─► size ─► plan
+recorded fills (audit log) ─► ledger: both sleeves ─────┘                          │
+quotes (Robinhood) ─► price ─────────────────────────────────────────── 14 risk rules
+                                                                                    │
+                                            dashboard ◄── audit log ◄── proposal ◄──┘
 ```
 
-The rule (`strategy/ladder.py`) is a pure function of the last closed bar, its
-trend average, and the ladder's state. The state is not kept in memory: the
-ledger rebuilds it from the audit log on every pass, so a restart changes
-nothing, and the ladder only ever sells what its own recorded fills bought.
-`rhca backtest` drives the same function over history.
+The rule (`strategy/split.py`) is a pure function of each coin's last closed
+day -- its breakout indicators and 200-day average -- and the sleeves' state.
+The state is not kept in memory: the ledger rebuilds both sleeves from the
+audit log on every pass, so a restart changes nothing, and the split only ever
+sells what its own recorded fills bought. `rhca backtest --strategies split`
+replays the same rules, and a test runs the live path day by day against it.
 
 The loop also keeps the forward test (`shadow.py`, `config/shadow.yaml`):
 
@@ -52,8 +53,8 @@ has no proposal id: nothing reaches the approval gate from it.
 ## The pipeline
 
 ```
-ingest ──► price store ──► candles ──┐
-                                     ├─► ladder.decide ──► sizing ──► plan ──► risk
+daily closes ────────────────────────┐
+                                     ├─► split.decide ───► sizing ──► plan ──► risk
 audit log ──► ledger ────────────────┘                                          │
                                                    approval gate ◄── proposal ◄─┘
                                                          │
@@ -74,8 +75,10 @@ next step would buy or sell.
 | `mcp/parse.py` | Response parsers, written against live payload shapes |
 | `store/prices.py` | Append-only observations; bars derived on read |
 | `store/state.py` | Cached account/market snapshot, written atomically |
-| `strategy/ladder.py` | The trend ladder: one pure rule, shared by the loop and the backtest |
-| `ledger.py` | The ladder's holdings, cycle and P&L, rebuilt from recorded fills |
+| `strategy/split.py` | The split, live: one daily close's stops, entries and tranches, under the per-coin limit |
+| `strategy/ladder.py` | The retired trend ladder, kept for `rhca backtest`'s comparison rows |
+| `ledger.py` | Both sleeves' cash, holdings and P&L, rebuilt from recorded fills |
+| `daily.py` | Coinbase's closed daily bars, cached: what the split decides on |
 | `agent.py` | Bars + ledger → the rule → sized, planned, risk-checked proposals |
 | `sizing.py` | A step's dollars → a quantity the pair accepts, snapped down |
 | `risk.py` | 14 rules, all evaluated, each naming itself |
@@ -86,7 +89,7 @@ next step would buy or sell.
 | `robinhood.py` | Read-only, Ed25519-signed Crypto Trading API client — no order methods |
 | `runner.py` | `rhca run`: cadences, once-per-bar dedupe, heartbeat, per-task failure isolation |
 | `bootstrap.py` | Coinbase candles: the 52 days the trend average needs, at once |
-| `backtest.py` | `rhca backtest`: the ladder against its baselines, whole and in rolling windows |
+| `backtest.py` | `rhca backtest`: the retired ladder against its baselines, whole and in rolling windows |
 | `strategy/breakout.py` | The breakout: a daily trend rule, backtest and paper only |
 | `strategy/hodl.py` | The long-term sleeve: when to buy (buy low, weekly DCA, lump sum); never sells |
 | `portfolio_backtest.py` | The breakout and the split, each as one account across coins |

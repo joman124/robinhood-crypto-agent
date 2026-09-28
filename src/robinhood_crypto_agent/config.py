@@ -17,7 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from .errors import ConfigError
+from .errors import AgentError, ConfigError
 from .models import ExecutionMode, parse_timestamp
 from .numeric import ZERO, to_decimal
 from .strategy.hodl import DIP
@@ -121,11 +121,19 @@ class RiskLimits:
 
 @dataclass(frozen=True)
 class StrategyConfig:
-    """The trend ladder's settings (``strategy.ladder``), and the bar interval.
+    """The live rule's settings -- the split -- and the retired trend ladder's.
 
-    The agent trades the ladder in ``anchor`` mode; ``lot`` mode exists only as
-    a comparison row in ``rhca backtest``.
+    The agent trades the split (docs/strategy.md, "The split"): part of the
+    account bought and held (``strategy/hodl.py``), the rest trading the
+    breakout (``strategy/breakout.py``). The ladder's settings stay for
+    ``rhca backtest``'s comparison rows; nothing live reads them.
     """
+
+    #: The split: the money it trades, the share held long-term, and how that
+    #: share is bought.
+    split_capital: Decimal = Decimal("500")
+    split_long_pct: Decimal = Decimal("50")
+    split_long_mode: str = DIP
 
     bar_interval_minutes: int = 60
     #: (percent under the anchor, dollars) per step, in increasing order.
@@ -151,13 +159,19 @@ class StrategyConfig:
                 continue
             try:
                 coerced = _coerce_strategy(name, value)
-            except (ValueError, ArithmeticError, TypeError) as exc:
+            except (ValueError, ArithmeticError, TypeError, AgentError) as exc:
                 raise ConfigError(f"strategy setting {name}: {exc}") from exc
             config = replace(config, **{name: coerced})
         config.validate()
         return config
 
     def validate(self) -> None:
+        if self.split_capital <= ZERO:
+            raise ConfigError("split_capital must be positive")
+        if not ZERO < self.split_long_pct < Decimal(100):
+            raise ConfigError("split_long_pct must be strictly between 0 and 100")
+        if self.split_long_mode not in LONG_MODES:
+            raise ConfigError(f"split_long_mode must be one of {', '.join(LONG_MODES)}")
         if self.bar_interval_minutes < 1:
             raise ConfigError("bar_interval_minutes must be at least 1")
         if self.trend_days < 0:
@@ -167,8 +181,16 @@ class StrategyConfig:
         except ValueError as exc:
             raise ConfigError(str(exc)) from exc
 
+    @property
+    def split_long_capital(self) -> Decimal:
+        return self.split_capital * self.split_long_pct / Decimal(100)
+
+    @property
+    def split_short_capital(self) -> Decimal:
+        return self.split_capital - self.split_long_capital
+
     def ladder(self) -> Ladder:
-        """The rule the agent trades."""
+        """The retired trend ladder, as ``rhca backtest`` replays it."""
         filtered = self.trend_days > 0
         return Ladder(
             steps=self.steps,
@@ -194,6 +216,10 @@ class StrategyConfig:
 
 
 def _coerce_strategy(name: str, value: Any) -> Any:
+    if name in ("split_capital", "split_long_pct"):
+        return to_decimal(value, field=name)
+    if name == "split_long_mode":
+        return str(value)
     if name == "steps":
         if isinstance(value, (list, tuple)):
             value = ",".join(str(v) for v in value)

@@ -1,16 +1,17 @@
 """``rhca run``: the real-time loop, in shadow mode.
 
-    Robinhood quotes -> hourly bars -> the trend ladder + 14 risk rules -> proposal
-                                                                            |
-                                         logged, and synced to the dashboard
+    Coinbase daily closes + Robinhood quotes -> the split + 14 risk rules -> proposal
+                                                                               |
+                                            logged, and synced to the dashboard
 
     Coinbase daily closes -> the split account, on paper -> one shadow_day record
                              (the forward test, config/shadow.yaml; ``shadow.py``)
 
-Each minute the loop re-runs the ladder on the last closed bar. What it wants
--- a dip buy, a take-profit, the trend exit -- is logged once per bar as a
-proposal. A fresh one each bar keeps its price inside the approval gate's drift
-tolerance for as long as the rule still wants it.
+Each minute the loop re-runs the split on the last closed UTC day. What it
+wants -- a breakout entry or stop, a long-term tranche -- is logged as a
+proposal once an hour, priced off the quote then, for as long as the rule
+still wants it: a fresh one each hour keeps its price inside the approval
+gate's drift tolerance.
 
 "Shadow" means exactly one thing: there is no code path from here to an order.
 The Robinhood client is read-only, and a proposal is a row in the audit log
@@ -27,22 +28,22 @@ process.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import tempfile
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime
 from typing import Any, Callable
 
 from . import dashboard as dashboard_mod
 from . import shadow as shadow_mod
-from .agent import Agent, MarketState, ladder_annotations
+from .agent import Agent, MarketState, split_annotations
 from .audit import KIND_PROPOSAL, AuditLog
 from .config import AgentConfig
+from .daily import DailyBars
 from .errors import AgentError
+from .files import write_json_atomic
+from .ledger import STRATEGY_SPLIT
 from .models import Proposal, parse_timestamp, utcnow
 from .numeric import format_decimal, round_money
 from .robinhood import RobinhoodClient
@@ -61,7 +62,8 @@ class Services:
 
     robinhood: RobinhoodClient
     dashboard: tuple[str, str] | None = None
-    #: Daily bars for the forward test; ``None`` reads Coinbase's public candles.
+    #: Daily bars for the split and the forward test; ``None`` reads
+    #: Coinbase's public candles.
     daily_history: shadow_mod.Fetch | None = None
 
 
@@ -84,7 +86,12 @@ class Runner:
         self.store = PriceStore(config.price_store_path)
         self.audit = AuditLog(config.audit_path)
         self.cache = StateCache(config.data_dir / "market_state.json")
-        self.agent = Agent(config, store=self.store, audit=self.audit)
+        self.agent = Agent(
+            config,
+            store=self.store,
+            audit=self.audit,
+            daily=DailyBars(config.data_dir / "daily", fetch=services.daily_history),
+        )
         self._clock = clock
         self._sleep = sleep
 
@@ -188,21 +195,19 @@ class Runner:
             positions_as_of=positions_as_of(self.cache),
         )
         result = self.agent.analyze(market, record=False)
-        interval = self.config.strategy.bar_interval_minutes
-        closed_bar = floor_to_interval(utcnow(), interval) - timedelta(minutes=interval)
+        hour = floor_to_interval(utcnow(), 60)
         for proposal in result.proposals:
-            self._consider(proposal, closed_bar)
+            self._consider(proposal, hour)
 
-    def _consider(self, proposal: Proposal, closed_bar: datetime) -> None:
-        """Log what the ladder wants once per bar, until it is acted on.
+    def _consider(self, proposal: Proposal, hour: datetime) -> None:
+        """Log what the split wants once an hour, until it is acted on.
 
-        The rule decides on closed bars, so re-evaluating every minute must not
-        log the same order every minute. A new bar logs it afresh, priced off
-        the quote then.
+        Re-evaluating every minute must not log the same order every minute.
+        A new hour logs it afresh, priced off the quote then.
         """
-        annotations = ladder_annotations(proposal)
+        annotations = split_annotations(proposal)
         slot = proposal_slot(proposal.symbol, annotations)
-        key = f"{slot}|{closed_bar.isoformat()}"
+        key = f"{slot}|{hour.isoformat()}"
         if self._last_key.get(slot) == key:
             return
         self._last_key[slot] = key
@@ -259,12 +264,12 @@ class Runner:
     # -- state ---------------------------------------------------------------
 
     def _resume_from_audit(self) -> None:
-        """Rebuild the once-per-bar keys from the log, so a restart does not
-        re-log the current bar's proposals."""
+        """Rebuild the once-an-hour keys from the log, so a restart does not
+        re-log this hour's proposals."""
         self._last_key: dict[str, str] = {}
         for record in self.audit.events(kind=KIND_PROPOSAL):
             key = record.get("candidate_key")
-            if key and record.get("strategy") == "ladder":
+            if key and record.get("strategy") == STRATEGY_SPLIT:
                 self._last_key[str(key).rpartition("|")[0]] = str(key)
 
     def _write_heartbeat(self) -> None:
@@ -290,35 +295,13 @@ class Runner:
 
 
 def proposal_slot(symbol: str, annotations: dict[str, Any]) -> str:
-    """What dedupes per bar: one symbol's rule and step."""
-    return f"{symbol}|{annotations.get('rule')}|{annotations.get('step')}"
+    """What dedupes per hour: one coin, sleeve and rule."""
+    return f"{symbol}|{annotations.get('sleeve')}|{annotations.get('rule')}"
 
 
 def positions_as_of(cache: StateCache) -> datetime | None:
     """When the holdings snapshot was last ingested."""
     return next((a.updated_at for a in cache.ages() if a.name == SECTION_POSITIONS), None)
-
-
-def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    """Write-then-replace, so a reader never sees half a file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-
-
-def read_json(path: Path) -> dict[str, Any] | None:
-    """A JSON object from ``path``, or ``None`` when it is missing or unreadable."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
 
 
 def stale_after_seconds(config: AgentConfig) -> int:

@@ -1,31 +1,72 @@
-# Strategy: the trend ladder
+# Strategy: the split
 
-The agent trades one rule on its watchlist: BTC-USD and ETH-USD, and since
-2026-09-28 SOL-USD and XRP-USD, added for the split. The code is in
-`src/robinhood_crypto_agent/strategy/ladder.py`, and the settings are in
-`config/strategy.yaml`. `rhca backtest` replays the same function the live
-pipeline calls, so its `ladder (anchor) +50d exit` row is the evidence for
-exactly what the agent proposes. A test
-(`test_live_trades_exactly_what_the_backtest_trades`) feeds both paths the
-same bars and requires the same trades.
+The agent trades one rule on its watchlist (BTC, ETH, SOL and XRP): **the
+split**. Half the account is held long-term, bought a tranche at a time on
+closes under the 200-day average; half trades the breakout. The rules are in
+`src/robinhood_crypto_agent/strategy/` (`split.py`, `breakout.py`,
+`hodl.py`), and the settings in `config/strategy.yaml`. `rhca backtest
+--strategies split` replays the same rules, and a test
+(`test_live_trades_exactly_what_the_backtest_trades`) makes the live path
+decide day by day on the same bars and requires the same trades.
 
-It replaced System 1 on 2026-09-27: indicators, news labels, an escalation
-trigger and Claude Sonnet as a second opinion. Why is below, under
-[History](#history).
+It replaced the trend ladder on 2026-09-28, which had replaced System 1 the
+day before. How it got here is the rest of this document: the ladder, its
+failure, the breakout built from its critique, the split, and the forward
+test.
 
-**Status, 2026-09-27: it failed its own bar** on real BTC and ETH bars (see
-[The trend exit, tested](#the-trend-exit-tested)), and no proposal of it
-should be approved. Its successor candidate is the
-[breakout](#the-breakout-candidate), which is backtest-only until it passes.
+**Status, 2026-09-28: the split is live, by the owner's decision.** The
+breakout scored 4 of 5 on its bar ([Over four years](#over-four-years)); the
+owner chose, on the record, to trade it anyway, with the per-coin limit at
+20% and SOL and XRP on the watchlist ([What going live took](#what-going-live-took)).
+Every proposal is still approved by id before an order is placed. The forward
+test keeps the same split on paper beside it ([The forward test](#the-forward-test)).
 
-**Status, 2026-09-28:** the breakout scored 4 of 5 again over four years
-([Over four years](#over-four-years)). The owner's plan -- $100 held
-long-term, $400 in short-term trades, no coin over 20% of the account -- is
-now a backtest ([The split](#the-split-long-term--short-term)) and a paper
-account that `rhca run` keeps on live prices
-([The forward test](#the-forward-test)). Neither trades. SOL and XRP are on
-the watchlist again for it, so the ladder proposes on them too: approve none
-of its proposals.
+## The split, live
+
+After each UTC daily close, on Coinbase's daily bars (`daily.py`), `rhca run`
+and `rhca analyze` run the split for every watchlist coin at once -- the
+sleeves share their cash and the per-coin limit -- in the order the backtest
+does:
+
+1. **Short-term stops.** A position the short-term sleeve holds, closing more
+   than 3 x ATR(20) under its highest close since the entry close, is sold:
+   all of what the sleeve holds of it, never the long-term sleeve's.
+2. **Short-term entries.** A coin the sleeve does not hold, closing above its
+   prior 20-day high and its 100-day average, is bought: sized so the stop
+   would lose 1% of the sleeve's equity, at most 10% of the sleeve, at most
+   its cash.
+3. **Long-term tranches.** A coin with tranches left, a week or more after its
+   last, closing under its 200-day average, gets one tranche: its $62.50 share
+   in ten $6.25 buys. Tranches are never sold.
+
+No coin may be more than 20% of the whole account (`max_position_pct_of_portfolio`),
+counting everything the account holds of it. The short-term sleeve gets the
+room first: an entry is trimmed to the room left, or turned away under the $5
+minimum; a tranche that does not fit waits.
+
+Each order becomes one proposal, **`PROMPT`**: a limit at the ask for a buy,
+the bid for a sell, through the same sizing, 14 risk rules and approval gate
+as before. A stop is exempt from the per-trade and daily notional caps --
+selling only lowers exposure -- and from nothing else. `rhca run` logs what
+the rule wants afresh each hour, priced off the quote then, for as long as it
+still wants it; the day's decision stands until the next close.
+
+**The ledger** (`ledger.py`) rebuilds both sleeves from the fills recorded in
+the audit log: cash (capital, less what was spent, plus what was received,
+less what open buys have committed), what each holds of each coin, the close
+each short-term position was entered on, and the tranches bought. An order
+recorded and still open holds its place, so nothing is proposed twice while
+the first is working. A coin bought outside the split -- by hand, by the
+retired ladder or by System 1 -- is in neither sleeve and is never sold, but
+still counts toward the 20% limit.
+
+One small difference from the backtest: a stop's proceeds reach the sleeve's
+cash when its fill is recorded, not at the close it was decided on. With at
+most 10% of the sleeve in any coin, cash never runs short enough for that to
+change an entry.
+
+The retired trend ladder follows: the rule the agent traded from 2026-09-27
+to 2026-09-28, kept for its record and for `rhca backtest`'s comparison rows.
 
 ## The rule, on each closed hourly bar
 
@@ -354,10 +395,9 @@ On 2026-09-28 the owner asked whether the $500 account could run $250 on a
 long-term play ("buy low, HODL") and $250 on short-term trades.
 `rhca backtest --strategies split` answers it on history; the
 [forward test](#the-forward-test) answers it on live prices. After the 50:50
-result ([50:50, tested](#5050-tested)) the owner changed the plan the same
-day: **$100 long-term and $400 short-term**, so the short-term side always has
-money to trade, with the per-coin limit raised to 20% and SOL and XRP added
-to the watchlist.
+result ([50:50, tested](#5050-tested)) the owner looked at 20:80, kept 50:50,
+raised the per-coin limit to 20%, put SOL and XRP back on the watchlist, and
+took the split live the same day.
 
 ### The two sleeves
 
@@ -375,8 +415,8 @@ rebalanced.
     weeks.
   - **lump sum** (`lump`): everything on the first day -- the hold baseline.
 
-  A coin's share too small for ten tranches at the $5 minimum trade is bought
-  in as many $5 tranches as fit: at $100 over four coins, five of $5 each.
+  At $250 over four coins each tranche is $6.25. A share too small for ten
+  tranches at the $5 minimum trade is bought in as many $5 tranches as fit.
 - **Short-term** is the breakout, sized off its own sleeve: 1% of the
   sleeve at risk per trade, at most 10% of the sleeve in one coin. Not the
   trend ladder, which lost money over 365 and 730 days and failed its bar.
@@ -396,7 +436,7 @@ rebalanced.
 ```
 
 The coins default to the watchlist (BTC, ETH, SOL, XRP), and the split to
-the forward test's (`config/shadow.yaml`: 20% long-term, bought the buy-low
+the forward test's (`config/shadow.yaml`: 50% long-term, bought the buy-low
 way) under the per-coin limit in `config/risk_limits.yaml` (20%).
 
 The report shows the long-term sleeve bought all three ways, the breakout
@@ -407,7 +447,7 @@ it managed to buy: the rest is cash that never met its rule. The rolling
 windows show the split and each sleeve against hold.
 
 `--long-mode dca` or `lump` changes how the split's long-term sleeve buys;
-`--long-pct 50` puts 50% there instead of 20%; `--long-symbols
+`--long-pct 20` puts 20% there instead of 50%; `--long-symbols
 BTC-USD,ETH-USD` holds only those two long-term; `--coin-cap-pct 100` lifts
 the per-coin limit. The 200-day average's warm-up is fetched before the
 window.
@@ -432,35 +472,36 @@ median window made +0.9% (hold +5.3%), its worst lost 17.3% (hold 38.6%).
 
 82% of the gain was the long-term sleeve's, and with no rebalancing it grew
 to 70% of the account, so the account's drawdown became mostly its drawdown.
-That is why the owner cut the long-term share to 20%.
+At 20:80 the same arithmetic gives roughly +100% instead of +165%, with a
+smaller drawdown; the owner kept 50:50.
 
-### What running it for real would take
+### What going live took
 
-Nothing trades either sleeve today: neither has a live implementation, and
-the ladder is the only rule that proposes. A live split needs each of these,
-as a deliberate decision by the owner:
+The owner took the split live on 2026-09-28. Each of these was a deliberate
+decision of theirs:
 
-1. **The breakout clearing its bar**, or the owner choosing, on the record,
-   to trade it at 4 of 5.
-2. **Room under the concentration cap.** Done 2026-09-28:
-   `max_position_pct_of_portfolio` is 20%, $100 of any one coin in a $500
-   account, counting everything the account holds in it. At 20:80 a coin
-   starts with $25 long-term (5%) plus up to $40 from the breakout (8%). As
-   the long-term holdings grow they take more of that 20%, and the split
-   backtest counts every breakout entry it trims or turns away.
-3. **The watchlist.** Done 2026-09-28: BTC, ETH, SOL and XRP.
-4. **A live implementation of each sleeve**, behind the same 14 risk rules
-   and approve-by-id gate. The trade limits already fit: a long-term tranche
-   is $5 and a breakout entry at most $40, inside the $5 minimum and $50
-   maximum.
+1. **The breakout at 4 of 5.** It fails consistency: 17 of 37 rolling
+   windows made money, where more than half was the bar. The owner chose to
+   trade it anyway, on the record, rather than wait for the forward test.
+2. **Room under the per-coin limit.** `max_position_pct_of_portfolio` went
+   from 10% to 20%: $100 of one coin in a $500 account, counting everything
+   the account holds of it. A coin starts with at most $62.50 long-term
+   (12.5%) plus $25 from the breakout (5%); as the long-term holdings grow
+   they take more of the 20%, and the short-term sleeve gets what is left
+   first.
+3. **The watchlist.** BTC, ETH, SOL and XRP.
+4. **A live implementation** of both sleeves ([The split, live](#the-split-live)),
+   behind the same 14 risk rules and approve-by-id gate. The trade limits
+   fit: a tranche is $6.25 and a breakout entry at most $25, inside the $5
+   minimum and $50 maximum.
 
 ## The forward test
 
 `config/shadow.yaml` sets it up: from the 2026-09-28 daily close, `rhca run`
-keeps the split on paper -- $100 bought the buy-low way and $400 in the
-breakout, on BTC, ETH, SOL and XRP, with no coin over 20% of the account (the
-owner changed it from 50:50 the same day, before the first forward close).
-After each UTC daily close it replays the
+keeps the split on paper -- $250 bought the buy-low way and $250 in the
+breakout, on BTC, ETH, SOL and XRP, with no coin over 20% of the account --
+the same rules the agent trades live. After each UTC daily close it replays
+the
 paper account from the start on Coinbase's daily closes, and writes one
 `shadow_day` record to the audit log: the paper fills of that close, and
 Robinhood's bid and ask for each coin traded, read at that moment.
@@ -488,13 +529,12 @@ daily closes: the 2026-12-26 close, available on 2026-12-27.
    the round trip every backtest here charges.
 3. **In range.** Over those 90 closes the breakout sleeve returns at least
    −5.7%, with a max drawdown of at most 10.1%: no worse than its worst 90-day
-   window in the four-year backtest. The 20:80 change left this intact: the
-   breakout still sizes to its own 10% per coin, so its percentages are the
-   ones that backtest measured.
+   window in the four-year backtest. The breakout sizes to its own 10% per
+   coin, as in that backtest, so its percentages are comparable.
 
-Passing all three says the split behaved live as it did in its backtest, at
-Robinhood's real cost. It does not undo the breakout's consistency failure,
-and it authorizes nothing: trading the split with real money stays the
-owner's decision, with everything under
-[What running it for real would take](#what-running-it-for-real-would-take).
-Failing any check means stopping to find out why, before anything else.
+Passing all three says the split behaves live as it did in its backtest, at
+Robinhood's real cost. It does not undo the breakout's consistency failure.
+The owner took the split live without waiting for it, so the forward test is
+now the check beside the real account: the paper account is what the rules
+did; the ledger is what was approved and filled. Failing any check means
+stopping approving the split's proposals until the reason is found.

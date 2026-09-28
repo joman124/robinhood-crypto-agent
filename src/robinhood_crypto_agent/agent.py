@@ -1,19 +1,19 @@
 """The analysis pipeline: market state in, reviewable proposals out.
 
-One pass per watchlist symbol:
+    daily closes + the split's ledger -> strategy.split.decide -> size -> plan -> risk -> proposals
 
-    closed bars + the ladder's ledger -> Ladder.decide -> size -> plan -> risk -> proposals
-
-The rule is the trend ladder (``strategy.ladder``), the same one ``rhca
-backtest`` replays. It decides on the last *closed* bar, as the backtest does,
-and each order it wants becomes one proposal, priced off the live quote: the
-ask for a buy, the bid for a sell.
+The rule is the split (``strategy/split.py``): half the money bought and held
+the buy-low way, half trading the breakout -- the same rules ``rhca backtest
+--strategies split`` replays and the forward test keeps on paper. It decides
+on the last *closed* UTC day, on Coinbase's daily bars, and each order it
+wants becomes one proposal, priced off the live Robinhood quote: the ask for a
+buy, the bid for a sell.
 
 Every stage can decline, and a decline is reported rather than swallowed. A
-symbol with no history, no quote, or nothing to do this bar produces a
-:class:`SymbolOutcome` explaining itself -- including where the next buy and
-sell would trigger -- so "why is there no proposal for ETH?" always has an
-answer on the report.
+coin with no bars, no quote, or nothing to do today produces a
+:class:`SymbolOutcome` explaining itself -- where its stop is, what the
+breakout waits for, why a tranche waits -- so "why is there no proposal for
+ETH?" always has an answer.
 
 Risk-rejected proposals are still constructed and logged. The record of what
 the agent wanted to do and was stopped from doing is the evidence that the
@@ -25,13 +25,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from .audit import AuditLog, DailyActivity, proposal_status_for
 from .config import AgentConfig
+from .daily import DailyBars, latest_close
+from .errors import AgentError
 from .execution.kill_switch import KillSwitch
 from .execution.orders import single_order_plan
-from .ledger import STRATEGY_LADDER, LadderPosition, ladder_positions
+from .ledger import RULE_STOP, STRATEGY_SPLIT, SplitBook, split_book
 from .models import (
     OrderType,
     PairConstraints,
@@ -45,18 +47,18 @@ from .numeric import ZERO, format_decimal
 from .risk import RiskContext, RiskEngine
 from .sizing import SizingResult, size_buy, size_sell
 from .store import PriceStore
-from .strategy.ladder import (
-    REASON_DIP,
-    REASON_TAKE_PROFIT,
-    REASON_TREND_EXIT,
-    Order,
-    flat_anchor,
-    trend_average,
-)
+from .strategy.breakout import Breakout, day_views
+from .strategy.hodl import Accumulate, moving_averages
+from .strategy.split import CoinDay, Decision, SplitOrder, decide
 from .symbols import canonical
 
-#: How each sell reads in a risk finding that exempts it.
-EXIT_REASONS = {REASON_TAKE_PROFIT: "take-profit", REASON_TREND_EXIT: "trend exit"}
+#: How a stop reads in a risk finding that exempts it.
+EXIT_REASON = "breakout stop"
+
+
+def split_rules(config: AgentConfig) -> tuple[Breakout, Accumulate]:
+    """The two rules the agent trades, as backtested."""
+    return Breakout(), Accumulate(mode=config.strategy.split_long_mode)
 
 
 @dataclass
@@ -72,7 +74,7 @@ class MarketState:
     constraints: dict[str, PairConstraints] = field(default_factory=dict)
     positions: dict[str, Position] = field(default_factory=dict)
     portfolio_value: Decimal | None = None
-    #: When ``positions`` was last ingested. A snapshot newer than the ladder's
+    #: When ``positions`` was last ingested. A snapshot newer than a sleeve's
     #: last fill that holds none of the coin means it was sold outside the agent.
     positions_as_of: datetime | None = None
 
@@ -85,39 +87,17 @@ class MarketState:
         )
 
 
-@dataclass(frozen=True)
-class LadderSnapshot:
-    """What the rule saw on the bar it decided on."""
-
-    symbol: str
-    bar_start: datetime
-    close: Decimal
-    anchor: Decimal
-    held: Decimal
-    in_cycle: bool
-    bought: frozenset[int]
-    sold: frozenset[int]
-    trend_days: int
-    #: ``None`` with the filter off, or before the average exists.
-    trend_average: Decimal | None
-    #: Bars the average needs, and bars on hand.
-    trend_bars: int
-    bars: int
-
-    @property
-    def above(self) -> bool | None:
-        return None if self.trend_average is None else self.close > self.trend_average
-
-
 @dataclass
 class SymbolOutcome:
     """What the pipeline concluded for one symbol."""
 
     symbol: str
     proposals: list[Proposal]
+    #: Daily bars on hand.
     bars: int
-    snapshot: LadderSnapshot | None = None
-    #: Why there is no proposal: a missing input, or the ladder's state.
+    #: The coin's inputs on the close decided on, when it had them.
+    snapshot: CoinDay | None = None
+    #: Why there is no proposal: a missing input, or where each sleeve stands.
     skipped_reason: str | None = None
 
     @property
@@ -147,7 +127,7 @@ class AnalysisResult:
 
 
 class Agent:
-    """Runs the ladder over a configured watchlist."""
+    """Runs the split over the configured watchlist."""
 
     def __init__(
         self,
@@ -156,13 +136,25 @@ class Agent:
         store: PriceStore | None = None,
         audit: AuditLog | None = None,
         kill_switch: KillSwitch | None = None,
+        daily: DailyBars | None = None,
+        now: Callable[[], datetime] = utcnow,
     ) -> None:
         self.config = config
         self.store = store or PriceStore(config.price_store_path)
         self.audit = audit or AuditLog(config.audit_path)
         self.kill_switch = kill_switch or KillSwitch(config.kill_switch_path)
-        self.ladder = config.strategy.ladder()
+        self.daily = daily or DailyBars(config.data_dir / "daily", now=now)
+        self.now = now
+        self.rule, self.plan = split_rules(config)
         self.risk_engine = RiskEngine(config)
+
+    def book(self) -> SplitBook:
+        settings = self.config.strategy
+        return split_book(
+            self.audit,
+            long_capital=settings.split_long_capital,
+            short_capital=settings.split_short_capital,
+        )
 
     def analyze(
         self,
@@ -171,122 +163,153 @@ class Agent:
         symbols: Sequence[str] | None = None,
         record: bool = True,
     ) -> AnalysisResult:
-        """Evaluate each symbol and produce proposals."""
-        targets = [canonical(s) for s in (symbols or self.config.watchlist)]
+        """Decide on the last closed day, for every watchlist coin at once --
+        the sleeves share their cash and the per-coin limit -- and propose
+        what the rule wants for each coin in ``symbols``."""
+        watchlist = [canonical(s) for s in self.config.watchlist]
+        targets = [canonical(s) for s in (symbols or watchlist)]
         activity = self.audit.daily_activity()
         kill_state = self.kill_switch.state()
-        positions = ladder_positions(self.audit)
+        book = self.book()
+        through = latest_close(self.now())
 
-        outcomes: list[SymbolOutcome] = []
-        for symbol in targets:
-            position = positions.get(symbol) or LadderPosition(symbol)
-            outcome = self._analyze_symbol(symbol, state, position, activity, kill_state)
-            outcomes.append(outcome)
-            if record:
+        coins: dict[str, CoinDay] = {}
+        bar_counts: dict[str, int] = {}
+        problems: dict[str, str] = {}
+        for symbol in watchlist:
+            try:
+                coin, bars = self._coin_day(symbol, state, book, through)
+            except AgentError as exc:
+                problems[symbol] = f"no daily bars from Coinbase: {exc}"
+                continue
+            bar_counts[symbol] = bars
+            if coin is None:
+                problems[symbol] = (
+                    f"Coinbase has not published the {through:%Y-%m-%d} daily close yet; "
+                    "the split decides on it once it has"
+                )
+                continue
+            coins[symbol] = coin
+
+        decision = decide(
+            coins,
+            book,
+            self.rule,
+            self.plan,
+            min_trade=self.config.risk.min_notional_per_trade_usd,
+            coin_cap_pct=self.config.risk.max_position_pct_of_portfolio,
+            account_value=state.portfolio_value,
+            long_symbols=watchlist,
+        )
+
+        outcomes = [
+            self._outcome(symbol, state, book, decision, coins, bar_counts, problems,
+                          activity, kill_state)
+            for symbol in targets
+        ]
+        if record:
+            for outcome in outcomes:
                 for proposal in outcome.proposals:
-                    self.audit.record_proposal(proposal, ladder_annotations(proposal))
-
+                    self.audit.record_proposal(proposal, split_annotations(proposal))
         return AnalysisResult(outcomes=outcomes, activity=activity)
 
-    def _analyze_symbol(
+    # -- inputs ----------------------------------------------------------------
+
+    def history_days(self, book: SplitBook, through: datetime) -> int:
+        """Daily bars to fetch: the slowest average's history, and every day
+        since the oldest short-term entry still held."""
+        days = max(self.rule.warmup_days, self.plan.average_days) + 3
+        for holding in book.short.holdings.values():
+            if holding.held and holding.entry_day is not None:
+                days = max(days, (through - holding.entry_day).days + 3)
+        return days
+
+    def _coin_day(
+        self, symbol: str, state: MarketState, book: SplitBook, through: datetime
+    ) -> tuple[CoinDay | None, int]:
+        bars = [
+            b for b in self.daily.get(symbol, days=self.history_days(book, through))
+            if b.start <= through
+        ]
+        if not bars or bars[-1].start < through:
+            return None, len(bars)
+        last = bars[-1]
+        holding = book.short.holdings.get(symbol)
+        highest = None
+        if holding is not None and holding.held and holding.entry_day is not None:
+            since = [b.close for b in bars if holding.entry_day <= b.start <= last.start]
+            highest = max(since) if since else None
+        quote = state.quote_for(symbol)
+        bid = quote.bid if quote is not None and quote.bid > ZERO else last.close
+        account = state.positions.get(symbol)
+        mark = quote.mark if quote is not None and quote.mark > ZERO else last.close
+        coin = CoinDay(
+            symbol=symbol,
+            day=last.start,
+            close=last.close,
+            view=day_views(bars, self.rule).get(last.start),
+            average=moving_averages(bars, self.plan.average_days).get(last.start),
+            highest=highest,
+            bid=bid,
+            account_holding=account.quantity * mark if account is not None else ZERO,
+        )
+        return coin, len(bars)
+
+    # -- outputs ---------------------------------------------------------------
+
+    def _outcome(
         self,
         symbol: str,
         state: MarketState,
-        position: LadderPosition,
+        book: SplitBook,
+        decision: Decision,
+        coins: dict[str, CoinDay],
+        bar_counts: dict[str, int],
+        problems: dict[str, str],
         activity: DailyActivity,
-        kill_state,
+        kill_state: Any,
     ) -> SymbolOutcome:
-        settings = self.config.strategy
-        candles = self.store.candles(symbol, interval_minutes=settings.bar_interval_minutes)
+        bars = bar_counts.get(symbol, 0)
+        coin = coins.get(symbol)
 
-        def skip(reason: str, snapshot: LadderSnapshot | None = None) -> SymbolOutcome:
-            return SymbolOutcome(symbol, [], len(candles), snapshot, reason)
+        def skip(reason: str) -> SymbolOutcome:
+            return SymbolOutcome(symbol, [], bars, coin, reason)
 
         if not self.config.allows(symbol):
             return skip(f"{symbol} is not on the watchlist allowlist")
+        if symbol in problems:
+            return skip(problems[symbol])
         quote = state.quote_for(symbol)
-        if quote is None:
+        orders = [o for o in decision.orders if o.symbol == symbol]
+        if orders and quote is None:
             return skip(
-                f"no live quote for {symbol}; fetch get_crypto_quotes and ingest it "
-                "before analyzing"
+                f"the split wants {len(orders)} order(s) in {symbol}, but there is no live "
+                "quote to price them: fetch get_crypto_quotes and ingest it"
             )
-        if not candles:
-            return skip(
-                f"no price history for {symbol}. The MCP server has no crypto historicals "
-                "tool: `rhca bootstrap-history` imports Coinbase bars, and `rhca run` "
-                "records quotes as it goes."
-            )
-
-        last = candles[-1]
-        average = trend_average(candles, settings.trend_bars) if settings.trend_bars else None
-        if position.in_cycle:
-            anchor = position.anchor
-        else:
-            since = _latest(position.flat_since, settings.anchor_since)
-            anchor = flat_anchor(candles, since=since)
-            if anchor is None:
-                return skip(
-                    f"no closed bar since {since:%Y-%m-%d %H:%M} UTC, where the anchor "
-                    "starts; the first one sets it"
-                    if since
-                    else "no closed bar yet"
-                )
-        assert anchor is not None
-        snapshot = LadderSnapshot(
-            symbol=symbol,
-            bar_start=last.start,
-            close=last.close,
-            anchor=anchor,
-            held=position.held,
-            in_cycle=position.in_cycle,
-            bought=position.bought,
-            sold=position.sold,
-            trend_days=settings.trend_days,
-            trend_average=average,
-            trend_bars=settings.trend_bars,
-            bars=len(candles),
-        )
-
-        orders = self.ladder.decide(
-            anchor=anchor,
-            close=last.close,
-            above=snapshot.above,
-            held=position.held,
-            bought=position.bought,
-            sold=position.sold,
-        )
+        notes = list(decision.notes.get(symbol, []))
         proposals: list[Proposal] = []
-        notes: list[str] = []
         for order in orders:
-            if order.side is Side.SELL and position.open_sell:
-                notes.append(
-                    "a ladder sell order is still open; record its fill or its cancellation "
-                    "before another sell is proposed"
-                )
-                continue
-            proposal, note = self._proposal(
-                order, snapshot, position, quote, state, activity, kill_state
-            )
+            assert quote is not None
+            proposal, note = self._proposal(order, book, quote, state, activity, kill_state)
             if proposal is not None:
                 proposals.append(proposal)
             if note:
                 notes.append(note)
-
         if proposals:
-            return SymbolOutcome(symbol, proposals, len(candles), snapshot)
-        return skip("; ".join([*dict.fromkeys(notes), describe_snapshot(snapshot, self)]), snapshot)
+            return SymbolOutcome(symbol, proposals, bars, coin)
+        day = f"the {coin.day:%Y-%m-%d} close" if coin else "the last close"
+        return skip(f"nothing to do on {day}: " + "; ".join(dict.fromkeys(notes)))
 
     def _proposal(
         self,
-        order: Order,
-        snapshot: LadderSnapshot,
-        position: LadderPosition,
+        order: SplitOrder,
+        book: SplitBook,
         quote: Quote,
         state: MarketState,
         activity: DailyActivity,
-        kill_state,
+        kill_state: Any,
     ) -> tuple[Proposal | None, str | None]:
-        symbol = snapshot.symbol
+        symbol = order.symbol
         constraints = state.constraints_for(symbol)
         exit_reason = None
         if order.side is Side.BUY:
@@ -301,21 +324,21 @@ class Agent:
             )
         else:
             reference = quote.bid if quote.bid > ZERO else quote.mark
+            holding = book.short.holding(symbol)
             account = state.positions.get(symbol)
             account_quantity = account.quantity if account else ZERO
             if (
                 account_quantity <= ZERO
                 and state.positions_as_of is not None
-                and position.last_fill_at is not None
-                and state.positions_as_of > position.last_fill_at
+                and holding.last_fill_at is not None
+                and state.positions_as_of > holding.last_fill_at
             ):
                 return None, (
-                    f"the ladder's {format_decimal(position.held)} {symbol} is not in a "
-                    "holdings snapshot taken after its last fill: it was sold outside the agent"
+                    f"the short-term sleeve's {format_decimal(holding.quantity)} {symbol} is "
+                    "not in a holdings snapshot taken after its last fill: it was sold outside "
+                    "the agent"
                 )
-            wanted = position.held
-            if not order.everything and order.dollars is not None and reference > ZERO:
-                wanted = min(wanted, order.dollars / reference)
+            wanted = order.quantity or holding.quantity
             # Capped at the account's holding. When the snapshot predates the
             # fill it holds none, and sell_coverage blocks the proposal and
             # says so: re-ingesting positions is the fix.
@@ -323,12 +346,17 @@ class Agent:
             sizing = size_sell(
                 symbol, quantity=quantity, reference_price=reference, constraints=constraints
             )
-            exit_reason = EXIT_REASONS[order.reason]
+            if order.rule == RULE_STOP:
+                exit_reason = EXIT_REASON
 
-        reason = describe_order(order, snapshot, self)
         detail = {
             **sizing.detail,
-            STRATEGY_LADDER: ladder_detail(order, snapshot, position, self),
+            STRATEGY_SPLIT: {
+                "sleeve": order.sleeve,
+                "rule": order.rule,
+                "day": order.day.isoformat(),
+                **order.detail,
+            },
         }
         sizing = SizingResult(
             symbol=sizing.symbol,
@@ -343,7 +371,7 @@ class Agent:
             sizing,
             constraints=constraints,
             rationale=(
-                f"{order.reason.replace('_', ' ')}: one order at the "
+                f"{order.sleeve} {order.rule}: one order at the "
                 f"{'ask' if order.side is Side.BUY else 'bid'}, as the backtest fills it"
             ),
         )
@@ -367,7 +395,7 @@ class Agent:
             reference_price=sizing.reference_price,
             notional=sizing.notional,
             created_at=created_at,
-            reason=reason,
+            reason=order.reason,
             plan=plan,
             risk=decision,
             status=proposal_status_for(decision.passed),
@@ -377,134 +405,19 @@ class Agent:
         return proposal, None
 
 
-def _latest(*moments: datetime | None) -> datetime | None:
-    present = [m for m in moments if m is not None]
-    return max(present) if present else None
+def split_annotations(proposal: Proposal) -> dict[str, Any]:
+    """The audit-log fields that mark a proposal as the split's.
 
-
-def _price(value: Decimal) -> str:
-    return f"{value:,.2f}" if abs(value) >= 1 else format_decimal(value)
-
-
-def _pct_from(value: Decimal, anchor: Decimal) -> Decimal:
-    return (value / anchor - Decimal(1)) * Decimal(100)
-
-
-def _trend_phrase(snapshot: LadderSnapshot) -> str:
-    if not snapshot.trend_days:
-        return "no trend filter"
-    if snapshot.trend_average is None:
-        return (
-            f"its {snapshot.trend_days}-day average needs {snapshot.trend_bars} bars and "
-            f"{snapshot.bars} are on hand, so nothing is bought yet (rhca bootstrap-history)"
-        )
-    side = "above" if snapshot.above else "at or under"
-    return f"{side} its {snapshot.trend_days}-day average {_price(snapshot.trend_average)}"
-
-
-def describe_order(order: Order, snapshot: LadderSnapshot, agent: Agent) -> str:
-    """One line: which rule fired, on what numbers."""
-    ladder = agent.ladder
-    close, anchor = snapshot.close, snapshot.anchor
-    if order.reason == REASON_TREND_EXIT:
-        return (
-            f"trend exit: closed {_price(close)}, {_trend_phrase(snapshot)}; "
-            f"sell everything the ladder holds"
-        )
-    assert order.step is not None
-    pct, dollars = ladder.steps[order.step]
-    if order.reason == REASON_DIP:
-        return (
-            f"dip: closed {_price(close)}, {-_pct_from(close, anchor):.1f}% under the anchor "
-            f"{_price(anchor)}; step {order.step + 1} buys ${format_decimal(dollars)} at -{pct}%"
-            f" ({_trend_phrase(snapshot)})"
-        )
-    what = (
-        "sells everything left"
-        if order.everything
-        else f"sells ${format_decimal(dollars)} worth"
-    )
-    return (
-        f"take profit: closed {_price(close)}, {_pct_from(close, anchor):.1f}% over the "
-        f"anchor {_price(anchor)}; step {order.step + 1} {what} at +{pct}%"
-    )
-
-
-def describe_snapshot(snapshot: LadderSnapshot, agent: Agent) -> str:
-    """Nothing to do this bar: where the ladder stands, and what would move it."""
-    ladder = agent.ladder
-    close, anchor = snapshot.close, snapshot.anchor
-    parts = [
-        f"closed {_price(close)} ({_pct_from(close, anchor):+.1f}% from the anchor "
-        f"{_price(anchor)})"
-    ]
-    if snapshot.held > ZERO:
-        steps = ", ".join(str(s + 1) for s in sorted(snapshot.bought)) or "none"
-        parts.append(f"holding {format_decimal(snapshot.held)} (steps bought: {steps})")
-    else:
-        parts.append("holding none")
-    next_buy = next(
-        (i for i in range(len(ladder.steps)) if i not in snapshot.bought), None
-    )
-    if next_buy is not None:
-        parts.append(
-            f"step {next_buy + 1} buys at {_price(ladder.buy_level(anchor, next_buy))}"
-        )
-    if snapshot.held > ZERO:
-        next_sell = next(
-            (i for i in range(len(ladder.steps)) if i not in snapshot.sold), None
-        )
-        if next_sell is not None:
-            parts.append(
-                f"step {next_sell + 1} sells at {_price(ladder.sell_level(anchor, next_sell))}"
-            )
-    parts.append(_trend_phrase(snapshot))
-    return "no order this bar: " + "; ".join(parts)
-
-
-def ladder_detail(
-    order: Order, snapshot: LadderSnapshot, position: LadderPosition, agent: Agent
-) -> dict[str, Any]:
-    """The rule's state, stored on the proposal. The ledger reads ``step`` and
-    ``anchor`` back to rebuild the cycle once the order fills."""
-    ladder = agent.ladder
-    level = None
-    if order.step is not None:
-        level = (
-            ladder.buy_level(snapshot.anchor, order.step)
-            if order.side is Side.BUY
-            else ladder.sell_level(snapshot.anchor, order.step)
-        )
-    return {
-        "rule": order.reason,
-        "step": order.step,
-        "anchor": format_decimal(snapshot.anchor),
-        "close": format_decimal(snapshot.close),
-        "bar": snapshot.bar_start.isoformat(),
-        "level": format_decimal(level) if level is not None else None,
-        "dollars": format_decimal(order.dollars) if order.dollars is not None else None,
-        "everything": order.everything,
-        "trend_days": snapshot.trend_days,
-        "trend_average": (
-            format_decimal(snapshot.trend_average) if snapshot.trend_average is not None else None
-        ),
-        "held": format_decimal(position.held),
-        "entry_proposal_ids": position.entry_proposal_ids if order.side is Side.SELL else [],
-    }
-
-
-def ladder_annotations(proposal: Proposal) -> dict[str, Any]:
-    """The audit-log fields that mark a proposal as the ladder's.
-
-    ``strategy`` is what the ledger keys on, ``rule`` and ``step`` make the
-    log greppable, and ``trigger_reason`` is what the dashboard shows as the
-    reason for it.
+    ``strategy`` is what the ledger keys on; ``sleeve`` and ``rule`` make the
+    log greppable and dedupe the loop's proposals; ``trigger_reason`` is what
+    the dashboard shows as the reason for it.
     """
-    detail = proposal.sizing_detail.get(STRATEGY_LADDER) or {}
+    detail = proposal.sizing_detail.get(STRATEGY_SPLIT) or {}
     return {
-        "strategy": STRATEGY_LADDER,
+        "strategy": STRATEGY_SPLIT,
+        "sleeve": detail.get("sleeve"),
         "rule": detail.get("rule"),
-        "step": detail.get("step"),
+        "step": None,
         "trigger_reason": proposal.reason,
     }
 
@@ -521,3 +434,4 @@ def constraints_by_symbol(
     constraints: Sequence[PairConstraints],
 ) -> dict[str, PairConstraints]:
     return {canonical(c.symbol): c for c in constraints}
+

@@ -586,14 +586,10 @@ def _legend(
     lines.append(
         f"'hold' buys {money(HOLD_DOLLARS)} on the first bar. Sizes differ: compare 'on capital'."
     )
-    live = live_strategy_name(config)
-    if live in names:
-        lines.append(f"The agent trades '{live}' (config/strategy.yaml).")
-    else:
-        lines.append(
-            f"The agent trades '{live}' (config/strategy.yaml), which this run does not "
-            "include: its --trend-days differs."
-        )
+    lines.append(
+        "The agent no longer trades the ladder: since 2026-09-28 it trades the split "
+        "(--strategies split). These rows are the retired rule, for comparison."
+    )
     return lines
 
 

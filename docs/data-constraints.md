@@ -22,9 +22,16 @@ There is **no crypto equivalent**. The only crypto price tool is
 there is no way to ask the server "what did BTC do over the last 50 days?",
 and the trend ladder needs exactly that.
 
-This is not a gap that can be papered over. The ladder's trend average needs
-1,200 hourly closes (50 days), and its anchor is the highest close since the
-last cycle. Without history, it has nothing to compute.
+This is not a gap that can be papered over. The split decides on daily
+closes: the breakout's 100-day average and 20-day high, and the long-term
+sleeve's 200-day average. Without history, it has nothing to compute.
+
+**The split reads Coinbase's daily candles directly** (`daily.py`): one
+request covers 300 days, cached under `data/daily/` and refetched once each
+close. They are the same bars `rhca backtest` and the forward test read, so
+live, paper and backtest decide on identical closes; proposals are still
+priced off a live Robinhood quote. The quote-built history below is what the
+retired trend ladder decided on, and still feeds the dashboard's charts.
 
 ## What this agent does instead
 

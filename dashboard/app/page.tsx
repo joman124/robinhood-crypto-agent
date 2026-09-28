@@ -36,7 +36,9 @@ export default async function Page() {
   const proposals = payload?.proposals ?? [];
   const awaiting = proposals.filter((p) => p.actionable && !decidedIds.has(p.proposal_id));
   const ladderCount = proposals.filter(isLadder).length;
-  const ladderPnl = Object.entries(payload?.ladder_realized_pnl ?? {});
+  const splitCount = proposals.filter((p) => p.strategy === "split").length;
+  const pnlByCoin = payload?.split_realized_pnl ?? payload?.ladder_realized_pnl;
+  const ladderPnl = Object.entries(pnlByCoin ?? {});
   const ladderTotal = ladderPnl.reduce((sum, [, v]) => sum + Number(v), 0);
   const doc = (path: string) => `${repo}/blob/main/${path}`;
 
@@ -90,15 +92,15 @@ export default async function Page() {
 
         {stats && (
           <div className="tiles">
-            {payload?.ladder_realized_pnl && (
+            {pnlByCoin && (
               <StatTile
-                label="Ladder P&L"
+                label={payload?.split_realized_pnl ? "Split P&L" : "Ladder P&L"}
                 value={ladderPnl.length ? money(ladderTotal.toFixed(2)) : "—"}
                 unknown={ladderPnl.length === 0}
                 note={
                   ladderPnl.length
                     ? `realized · ${ladderPnl.map(([symbol, v]) => `${symbol} ${money(v)}`).join(" · ")}`
-                    : "no ladder fills recorded yet"
+                    : "no fills recorded yet"
                 }
               />
             )}
@@ -125,7 +127,7 @@ export default async function Page() {
             <StatTile
               label="Proposals"
               value={String(proposals.length)}
-              note={`${ladderCount} ladder · ${proposals.length - ladderCount} System 1 · ${stats.resolved} scored`}
+              note={`${splitCount} split · ${ladderCount - splitCount} ladder · ${proposals.length - ladderCount} System 1 · ${stats.resolved} scored`}
             />
             {today && (
               <StatTile
@@ -157,9 +159,9 @@ export default async function Page() {
 
         <footer className="footer">
           <p>
-            The trend ladder is measured on realized P&amp;L from its recorded fills: a dip buy
-            waits days for its sell, so a fixed-horizon hit rate would grade it on a question it
-            never asked. The hit rate and accuracy panels cover the retired System 1&apos;s records
+            The split is measured on realized P&amp;L from its recorded fills: a breakout is held
+            until its stop and a long-term tranche is never sold, so a fixed-horizon hit rate
+            would grade them on a question they never asked. So was the retired trend ladder. The hit rate and accuracy panels cover the retired System 1&apos;s records
             only.{" "}
             {scoring && (
               <>

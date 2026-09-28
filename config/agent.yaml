@@ -18,10 +18,9 @@ execution_mode: propose_only
 # and DOGE under every variant; BTC and ETH are also the deepest markets, which
 # is where docs/autonomy.md says unattended trading belongs.
 #
-# SOL and XRP added back by the owner, 2026-09-28, for the split (the breakout
-# and the long-term sleeve trade all four; docs/strategy.md, "The split").
-# `rhca run` runs the trend ladder on every coin listed here, so it proposes on
-# SOL and XRP too -- and the ladder failed its bar: approve none of it.
+# SOL and XRP added back by the owner, 2026-09-28, for the split, which trades
+# every coin listed here: the breakout on each, and the long-term sleeve's money
+# split evenly across them (docs/strategy.md, "The split").
 watchlist:
   - BTC-USD
   - ETH-USD

@@ -35,6 +35,7 @@ from .audit import KIND_SHADOW_DAY, AuditLog
 from .backtest import DEFAULT_ROUND_TRIP_PCT, money, pct
 from .bootstrap import fetch_coinbase_history
 from .config import AgentConfig, ShadowConfig
+from .daily import latest_close
 from .errors import AgentError
 from .models import Candle, Quote, parse_timestamp, utcnow
 from .numeric import ZERO, format_decimal, round_money, to_decimal
@@ -111,12 +112,6 @@ def setup(config: AgentConfig) -> dict[str, Any]:
         "long_symbols": list(shadow.long_symbols) if shadow.long_symbols else None,
         "coin_cap_pct": str(coin_cap_pct(config)),
     }
-
-
-def latest_close(now: datetime) -> datetime:
-    """The start of the last UTC day that has closed."""
-    today = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    return today - DAY
 
 
 def history_days(config: AgentConfig, *, now: datetime) -> int:

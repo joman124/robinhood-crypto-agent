@@ -14,8 +14,8 @@ Account numbers, buying power, portfolio value, position sizes and order ids. Th
 those suggestions were any good. It does not need to know how much money is
 behind them, and a dashboard that never receives that data cannot leak it.
 
-The ladder's realized P&L per symbol is sent, as today's realized P&L already
-is: it is how the ladder is measured. What it holds, and what that cost, is not.
+The split's realized P&L per symbol is sent, as today's realized P&L already
+is: it is how the split is measured. What it holds, and what that cost, is not.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from .config import AgentConfig
 from .decisions import Decision, decision_from_dict
 from .errors import AgentError
 from .execution.kill_switch import KillSwitch
-from .ledger import ladder_positions
+from .ledger import split_book
 from .models import ProposalStatus, utcnow
 from .numeric import abs_pct_drift, format_decimal, round_money, to_decimal
 from .outcomes import (
@@ -81,17 +81,33 @@ PROPOSAL_FIELDS = (
     "risk_passed",
     "risk_failures",
     "strategy",
+    "sleeve",
     "rule",
     "step",
     "trigger_reason",
-    # System 1's, retired 2026-09-27. Absent on the ladder's proposals; its
-    # own records in the log still carry them.
+    # System 1's, retired 2026-09-27. Absent on the ladder's and the split's
+    # proposals; its own records in the log still carry them.
     "score",
     "confidence",
     "regime",
     "system2_decision",
     "system2_confidence",
 )
+
+
+def _split_realized_pnl(config: AgentConfig, audit: AuditLog) -> dict[str, str]:
+    """Realized P&L per coin, both sleeves together, from the split's recorded fills."""
+    book = split_book(
+        audit,
+        long_capital=config.strategy.split_long_capital,
+        short_capital=config.strategy.split_short_capital,
+    )
+    totals: dict[str, Decimal] = {}
+    for sleeve in (book.long, book.short):
+        for symbol, holding in sleeve.holdings.items():
+            if holding.realized_pnl or holding.last_fill_at is not None:
+                totals[symbol] = totals.get(symbol, Decimal(0)) + holding.realized_pnl
+    return {symbol: str(round_money(total)) for symbol, total in sorted(totals.items())}
 
 
 def build_payload(
@@ -184,10 +200,7 @@ def build_payload(
             "realized_pnl": str(round_money(activity.realized_pnl)),
             "proposals": activity.proposal_count,
         },
-        "ladder_realized_pnl": {
-            symbol: str(round_money(position.realized_pnl))
-            for symbol, position in ladder_positions(audit).items()
-        },
+        "split_realized_pnl": _split_realized_pnl(config, audit),
         "limits": {
             "price_drift_tolerance_pct": str(config.risk.price_drift_tolerance_pct),
         },
@@ -304,7 +317,8 @@ def _executions_by_proposal(audit: AuditLog) -> dict[str, dict[str, Any]]:
 def _pipeline(config: AgentConfig) -> dict[str, Any] | None:
     """The shadow loop's heartbeat. The last error's text is withheld: an API
     error can echo back whatever the request carried."""
-    from .runner import read_json, stale_after_seconds  # runner imports this module
+    from .files import read_json
+    from .runner import stale_after_seconds  # runner imports this module
 
     beat = read_json(config.heartbeat_path)
     if beat is None:

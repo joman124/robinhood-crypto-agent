@@ -40,11 +40,11 @@ from .numeric import ZERO, round_money
 from .sizing import SizingResult
 from .symbols import canonical
 
-#: Rules a sell does not answer to, and why. Every sell the ladder makes closes
-#: (part of) a position it opened -- a take-profit or the trend exit -- so it
-#: only lowers exposure, and blocking it on a cap would leave the position
-#: open: the one outcome the sell exists to prevent. Every other rule still
-#: applies, the kill switch and sell coverage included.
+#: Rules a sell does not answer to, and why. Every sell the split makes is a
+#: breakout stop closing a position the sleeve opened, so it only lowers
+#: exposure, and blocking it on a cap would leave the position open: the one
+#: outcome the stop exists to prevent. Every other rule still applies, the
+#: kill switch and sell coverage included.
 EXIT_EXEMPT_RULES: dict[str, str] = {
     "per_trade_notional": "the cap limits new exposure; selling what was bought lowers it",
     "daily_notional": "the cap limits new exposure; selling what was bought lowers it",

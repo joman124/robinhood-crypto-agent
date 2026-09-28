@@ -1,11 +1,31 @@
-# The trading rule: the trend ladder. See docs/strategy.md.
+# The trading rule: the split. See docs/strategy.md, "The split".
 #
-# It replaced System 1 (indicators, news, the escalation trigger and System 2)
-# at the owner's request, 2026-09-27, after the backtests in docs/strategy.md.
-# `rhca backtest` replays exactly this rule, so its "ladder (anchor) +50d exit"
-# row is the evidence for what the agent proposes.
+# It replaced the trend ladder at the owner's instruction, 2026-09-28, the
+# owner choosing to trade it with the breakout at 4 of its 5 criteria. After
+# each UTC daily close, on Coinbase's daily bars, it proposes:
+#   - short-term: the breakout -- buy a close above its prior 20-day high and
+#     its 100-day average, sized so a stop 3 x ATR(20) under it risks 1% of the
+#     sleeve (at most 10% of the sleeve); sell on a close under that stop,
+#     trailed up from the highest close since entry;
+#   - long-term: ten equal tranches of each coin, one at most a week, bought
+#     the buy-low way (only on a close under the 200-day average), and held.
+# `rhca backtest --strategies split` replays exactly these rules, and the
+# forward test (config/shadow.yaml) keeps them on paper. Every proposal is
+# still approved by id before an order is placed.
 
 strategy:
+  # The money the split trades, and the share of it held long-term. The rest
+  # trades the breakout. Each sleeve keeps its own cash.
+  split_capital: 500
+  split_long_pct: 50
+
+  # How the long-term sleeve buys: dip (buy low), dca (weekly, whatever the
+  # price) or lump (all at once).
+  split_long_mode: dip
+
+  # -- The retired trend ladder, kept for `rhca backtest`'s comparison rows.
+  #    Nothing live reads these.
+
   # Bars are aggregated from ingested quotes, with Coinbase bars filling in
   # history -- see docs/data-constraints.md. The rule decides on closed bars.
   bar_interval_minutes: 60

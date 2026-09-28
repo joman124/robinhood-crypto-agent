@@ -339,9 +339,10 @@ class Proposal(JsonMixin):
     plan: ExecutionPlan
     risk: RiskDecision
     status: ProposalStatus
-    #: How it was sized, and under ``"ladder"`` the rule's state when it was
-    #: made: rule, step, anchor, close, trend average. The ledger rebuilds the
-    #: ladder's cycles from it.
+    #: How it was sized, and under ``"split"`` the rule's state when it was
+    #: made: sleeve, rule, the day decided on, and its indicators. The ledger
+    #: rebuilds the sleeves from it. (The retired ladder's records carry
+    #: ``"ladder"`` instead.)
     sizing_detail: dict[str, Any] = field(default_factory=dict)
     #: The quote's bid/ask spread as a percentage of the mark, when proposed.
     spread_pct: Decimal | None = None

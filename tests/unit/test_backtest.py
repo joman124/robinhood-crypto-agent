@@ -123,9 +123,9 @@ def test_the_report_leads_with_what_a_win_rate_hides(config):
     assert "trend +1d" in report and "hold" in report
     assert "Read total P&L, worst drawdown and 'win +open' first" in report
     assert "authorizes nothing" in report
-    # The config's own window is 50 days, so this run does not hold its row.
-    assert "The agent trades 'ladder (anchor) +50d exit'" in report
-    assert "which this run does not include" in report
+    # The ladder is the retired rule: the report says what the agent trades now.
+    assert "The agent no longer trades the ladder" in report
+    assert "--strategies split" in report
 
 
 class TestHistory:

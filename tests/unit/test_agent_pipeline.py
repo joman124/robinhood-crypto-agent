@@ -1,109 +1,106 @@
-"""The analysis pipeline: the trend ladder, live.
+"""The analysis pipeline: the split, decided live, on daily closes.
 
-A symbol always gets either proposals or a reason. The ladder's state comes
-from the fills recorded in the audit log, and the strongest claim here is the
-last test: fed the same bars, the live pipeline makes exactly the trades the
-backtest makes.
+What these pin down: each rule's order is proposed at the price the backtest
+fills at and sized the way the backtest sizes it; an order already working
+holds its place; the per-coin limit trims a breakout and makes a tranche
+wait, short-term first; every coin without an order says why; and -- the
+one that matters most -- that live proposals, filled, make exactly the trades
+``run_split`` makes on the same bars.
 """
 
+import random
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 
-from robinhood_crypto_agent import backtest
+from robinhood_crypto_agent import portfolio_backtest as pb
 from robinhood_crypto_agent.agent import Agent, MarketState
 from robinhood_crypto_agent.audit import KIND_PROPOSAL, AuditLog
-from robinhood_crypto_agent.config import AgentConfig, RiskLimits, StrategyConfig
+from robinhood_crypto_agent.config import AgentConfig, RiskLimits
+from robinhood_crypto_agent.daily import DailyBars
 from robinhood_crypto_agent.execution.kill_switch import KillSwitch
-from robinhood_crypto_agent.ledger import ladder_position
-from robinhood_crypto_agent.models import (
-    ExecutionRecord,
-    PairConstraints,
-    Position,
-    Proposal,
-    ProposalStatus,
-    Quote,
-    Side,
-    utcnow,
+from robinhood_crypto_agent.ledger import (
+    LONG_TERM,
+    RULE_ENTRY,
+    RULE_STOP,
+    RULE_TRANCHE,
+    SHORT_TERM,
+    Sleeve,
+    SplitBook,
 )
+from robinhood_crypto_agent.models import ExecutionRecord, Position, Quote, Side, utcnow
 from robinhood_crypto_agent.outcomes import outcome_from_proposal_record
-from robinhood_crypto_agent.store import PriceStore
-from tests.conftest import make_candles
+from robinhood_crypto_agent.strategy.breakout import Breakout, DayView, day_views
+from robinhood_crypto_agent.strategy.hodl import Accumulate
+from robinhood_crypto_agent.strategy.split import CoinDay, decide
+from tests.conftest import FakeCoinbaseDaily, daily_candles
 
 D = Decimal
-#: Half the spread each quote carries: bid and ask sit this far from the close.
-HALF = D("0.0025")
+DAY = timedelta(days=1)
+#: Decisions are made on the close of LAST, a few hours after it.
+LAST = datetime(2026, 5, 31, tzinfo=timezone.utc)
+NOW = LAST + DAY + timedelta(hours=6)
+HALF = D("0.0095")  # half the 1.9% round trip
 
-
-def piecewise(points):
-    """Closes interpolated linearly between (bar, price) points."""
-    out = []
-    for (i0, p0), (i1, p1) in zip(points, points[1:], strict=False):
-        out += [round(p0 + (p1 - p0) * (i - i0) / (i1 - i0), 4) for i in range(i0, i1)]
-    return out + [points[-1][1]]
-
-
-RISE = piecewise([(0, 100), (30, 130)])  # ends on its high, well above its average
-
-
-@pytest.fixture
-def config(tmp_path):
-    return AgentConfig(
-        watchlist=("BTC-USD", "ETH-USD"),
-        rhs_account_number="123456789",
-        data_dir=tmp_path / "data",
-        risk=RiskLimits(
-            min_notional_per_trade_usd=D("5"),
-            max_notional_per_trade_usd=D("50"),
-            max_daily_notional_usd=D("200"),
-            max_spread_pct=D("2"),
-        ),
-        # A one-day average (24 bars) keeps the series short.
-        strategy=StrategyConfig(trend_days=1),
-    )
+RISING = [50000 * 1.001**i for i in range(239)]
+BREAKOUT = RISING + [RISING[-1] * 1.05]  # a 5% close over its 20-day high
+FLAT = [3000] * 240
+DIP = [100] * 230 + [90] * 10  # ten closes under the 200-day average
+BASE = [50000 * 1.001**i for i in range(230)]
+ENTRY = BASE[-1] * 1.06
+STOP_PATH = BASE + [ENTRY, ENTRY * 1.01, ENTRY * 1.02, ENTRY * 1.03, ENTRY * 0.87]
 
 
 class Harness:
-    def __init__(self, config, prices=()):
-        self.config = config
-        self.store = PriceStore(config.price_store_path)
-        self.audit = AuditLog(config.audit_path)
-        self.agent = Agent(config, store=self.store, audit=self.audit)
-        self.candles = []
-        self.extend(prices)
+    def __init__(self, tmp_path, paths, *, risk=None, watchlist=("BTC-USD", "ETH-USD")):
+        self.now = NOW
+        self.coinbase = FakeCoinbaseDaily(paths, last=LAST, clock=lambda: self.now)
+        self.config = AgentConfig(
+            watchlist=watchlist,
+            rhs_account_number="123456789",
+            data_dir=tmp_path / "data",
+            risk=risk or RiskLimits(
+                min_notional_per_trade_usd=D(5),
+                max_spread_pct=D(2),
+                max_position_pct_of_portfolio=D(20),
+            ),
+        )
+        self.audit = AuditLog(self.config.audit_path)
 
-    def extend(self, prices):
-        start = self.candles[-1].end if self.candles else None
-        new = make_candles(prices, anchor=start)
-        self.store.import_candles(new)
-        self.candles += new
-        return self
-
-    def market(self, *, held=None, as_of=None, close=None):
-        close = D(str(close)) if close is not None else self.candles[-1].close
-        return MarketState(
-            quotes={
-                "BTC-USD": Quote(
-                    "BTC-USD", close * (1 - HALF), close * (1 + HALF), close, utcnow()
-                )
-            },
-            constraints={
-                "BTC-USD": PairConstraints(
-                    "BTC-USD", D("0.00000001"), price_increment=D("0.01")
-                )
-            },
-            positions={} if held is None else {"BTC-USD": Position("BTC-USD", D(str(held)))},
-            portfolio_value=D("100000"),
-            positions_as_of=as_of,
+    def agent(self):
+        clock = lambda: self.now  # noqa: E731
+        return Agent(
+            self.config,
+            audit=self.audit,
+            daily=DailyBars(self.config.data_dir / "daily", fetch=self.coinbase, now=clock),
+            now=clock,
         )
 
-    def analyze(self, **market):
-        return self.agent.analyze(self.market(**market), symbols=["BTC-USD"])
+    def closes(self, symbol):
+        return {b.start: b.close for b in self.coinbase.bars[symbol]}
 
-    def fill(self, proposal, *, quantity=None, state="filled"):
-        quantity = proposal.quantity if quantity is None else D(str(quantity))
+    def state(self, *, positions=None, portfolio=None, spread=HALF, **overrides):
+        day = self.now - DAY - timedelta(hours=self.now.hour)
+        quotes = {}
+        for symbol in self.config.watchlist:
+            close = self.closes(symbol).get(day.replace(hour=0))
+            if close is not None:
+                quotes[symbol] = Quote(symbol, close * (1 - spread), close * (1 + spread),
+                                       close, utcnow())
+        quotes.update(overrides)
+        return MarketState(
+            quotes=quotes,
+            positions={s: Position(s, q) for s, q in (positions or {}).items()},
+            portfolio_value=portfolio,
+        )
+
+    def analyze(self, **state):
+        return self.agent().analyze(self.state(**state))
+
+    def fill(self, proposal, *, state="filled"):
+        filled = proposal.quantity if state == "filled" else D(0)
         self.audit.record_execution(
             ExecutionRecord(
                 proposal_id=proposal.proposal_id,
@@ -111,239 +108,294 @@ class Harness:
                 side=proposal.side,
                 recorded_at=utcnow(),
                 requested_quantity=proposal.quantity,
-                filled_quantity=quantity,
-                notional=quantity * proposal.reference_price,
+                filled_quantity=filled,
+                notional=filled * proposal.reference_price,
                 order_id=f"ord-{proposal.proposal_id}",
                 state=state,
             )
         )
 
-    def held(self):
-        return ladder_position(self.audit, "BTC-USD").held
+
+def detail(proposal):
+    return proposal.sizing_detail["split"]
 
 
-def only(result) -> Proposal:
-    [proposal] = result.proposals
-    return proposal
+def only(result, symbol="BTC-USD"):
+    return [p for p in result.proposals if p.symbol == symbol]
 
 
-class TestBuys:
-    def test_a_dip_above_the_trend_proposes_its_step_at_the_ask(self, config):
-        h = Harness(config, RISE + [127, 123])  # 123 is 5.4% under the 130 anchor
-        proposal = only(h.analyze())
-        assert proposal.side is Side.BUY
-        assert proposal.reference_price == h.market().quotes["BTC-USD"].ask
-        assert proposal.notional == D("5.00")  # the $5 step
-        assert proposal.reason.startswith("dip: closed 123.00, 5.4% under the anchor 130.00")
-        assert proposal.risk.passed, [f.message for f in proposal.risk.blocking_failures]
-        assert proposal.plan.style == "PROMPT" and len(proposal.plan.tranches) == 1
-        detail = proposal.sizing_detail["ladder"]
-        assert (detail["rule"], detail["step"], detail["anchor"]) == ("dip", 0, "130")
+def reason(result, symbol):
+    [outcome] = [o for o in result.outcomes if o.symbol == symbol]
+    return outcome.skipped_reason or ""
 
-    def test_no_buy_at_or_under_the_trend_average(self, config):
-        h = Harness(config, RISE + [118, 106, 100])  # every step's depth, but falling
+
+class TestEntries:
+    def test_a_breakout_is_bought_at_the_ask_sized_by_risk_and_capped(self, tmp_path):
+        h = Harness(tmp_path, {"BTC-USD": BREAKOUT, "ETH-USD": FLAT})
+        result = h.analyze()
+        [buy] = only(result)
+        close = D(str(BREAKOUT[-1]))
+        assert buy.side is Side.BUY and buy.reference_price == close * (1 + HALF)
+        assert (detail(buy)["sleeve"], detail(buy)["rule"]) == (SHORT_TERM, RULE_ENTRY)
+        assert detail(buy)["day"] == LAST.isoformat()
+        # 1% of the $250 sleeve at risk asks for more than 10% of it: capped at $25.
+        assert buy.notional == pytest.approx(D(25), abs=D("0.01"))
+        assert buy.reason.startswith("breakout entry: closed")
+        assert buy.plan.tranches[0].target_price == pytest.approx(buy.reference_price, abs=D("0.01"))
+        assert buy.risk.passed
+
+    def test_no_breakout_no_entry_and_the_report_says_why(self, tmp_path):
+        h = Harness(tmp_path, {"BTC-USD": BREAKOUT, "ETH-USD": FLAT})
+        result = h.analyze()
+        assert only(result, "ETH-USD") == []
+        text = reason(result, "ETH-USD")
+        assert "short-term: no breakout" in text and "prior 20-day high" in text
+        assert "long-term: 0 of 10 tranches bought; waits for a close under" in text
+
+    def test_an_open_entry_order_holds_its_place(self, tmp_path):
+        h = Harness(tmp_path, {"BTC-USD": BREAKOUT, "ETH-USD": FLAT})
+        [buy] = only(h.analyze())
+        h.fill(buy, state="confirmed")  # placed, not filled yet
+        result = h.analyze()
+        assert only(result) == []
+        assert "an entry order is still open" in reason(result, "BTC-USD")
+        h.fill(buy, state="canceled")  # ended unfilled: the place is free again
+        assert len(only(h.analyze())) == 1
+
+
+class TestStops:
+    def entered(self, tmp_path):
+        h = Harness(tmp_path, {"BTC-USD": STOP_PATH, "ETH-USD": FLAT})
+        h.now = NOW - 4 * DAY  # the entry close
+        [buy] = only(h.analyze())
+        h.fill(buy)
+        return h, buy
+
+    def test_the_stop_sells_everything_the_sleeve_holds_at_the_bid(self, tmp_path):
+        h, buy = self.entered(tmp_path)
+        h.now = NOW
+        # A per-trade cap under the sale's size: a stop is exempt from it.
+        h.config = replace(h.config, risk=replace(h.config.risk, max_notional_per_trade_usd=D(10)))
+        result = h.analyze(positions={"BTC-USD": buy.quantity})
+        [sell] = only(result)
+        assert sell.side is Side.SELL and sell.quantity == buy.quantity
+        assert (detail(sell)["sleeve"], detail(sell)["rule"]) == (SHORT_TERM, RULE_STOP)
+        close = D(str(STOP_PATH[-1]))
+        assert sell.reference_price == close * (1 - HALF)
+        assert D(detail(sell)["highest"]) == D(str(STOP_PATH[-2]))
+        assert sell.reason.startswith("breakout stop: closed")
+        findings = {f.rule: f for f in sell.risk.findings}
+        assert findings["per_trade_notional"].passed
+        assert "not applied to a breakout stop" in findings["per_trade_notional"].message
+        assert sell.risk.passed
+
+    def test_while_above_the_stop_the_report_says_where_it_is(self, tmp_path):
+        h, buy = self.entered(tmp_path)
+        h.now = NOW - DAY
+        result = h.analyze(positions={"BTC-USD": buy.quantity})
+        assert only(result) == []
+        assert "short-term: holding" in reason(result, "BTC-USD")
+        assert "stop at" in reason(result, "BTC-USD")
+
+    def test_the_kill_switch_still_blocks_a_stop(self, tmp_path):
+        h, buy = self.entered(tmp_path)
+        h.now = NOW
+        KillSwitch(h.config.kill_switch_path).engage("testing")
+        [sell] = only(h.analyze(positions={"BTC-USD": buy.quantity}))
+        assert not sell.risk.passed
+        assert "kill_switch" in [f.rule for f in sell.risk.blocking_failures]
+
+    def test_a_coin_sold_elsewhere_is_not_chased(self, tmp_path):
+        h, _ = self.entered(tmp_path)
+        h.now = NOW
+        state = h.state(positions={})
+        state.positions_as_of = utcnow() + timedelta(minutes=1)
+        result = h.agent().analyze(state)
+        assert only(result) == []
+        assert "sold outside the agent" in reason(result, "BTC-USD")
+
+
+class TestTranches:
+    def test_a_close_under_the_200_day_average_buys_a_tranche(self, tmp_path):
+        h = Harness(tmp_path, {"BTC-USD": FLAT, "ETH-USD": DIP})
+        [buy] = only(h.analyze(), "ETH-USD")
+        assert (detail(buy)["sleeve"], detail(buy)["rule"]) == (LONG_TERM, RULE_TRANCHE)
+        # $250 over the two watchlist coins, in ten tranches.
+        assert buy.notional == pytest.approx(D("12.50"), abs=D("0.01"))
+        assert "tranche 1 of 10" in buy.reason and "under its 200-day average" in buy.reason
+
+    def test_the_next_tranche_waits_a_week(self, tmp_path):
+        h = Harness(tmp_path, {"BTC-USD": FLAT, "ETH-USD": DIP})
+        h.now = NOW - 5 * DAY
+        [buy] = only(h.analyze(), "ETH-USD")
+        h.fill(buy)
+        h.now = NOW
+        result = h.analyze()
+        assert only(result, "ETH-USD") == []
+        assert "1 of 10 tranches bought; the next waits a week" in reason(result, "ETH-USD")
+        h.now = NOW + 2 * DAY  # a week on, still under the average
+        h.coinbase.bars["ETH-USD"] += daily_candles([90, 90], symbol="ETH-USD", last=LAST + 2 * DAY)
+        h.coinbase.bars["BTC-USD"] += daily_candles([3000, 3000], symbol="BTC-USD",
+                                                    last=LAST + 2 * DAY)
+        [second] = only(h.analyze(), "ETH-USD")
+        assert "tranche 2 of 10" in second.reason
+
+
+class TestCoinLimit:
+    def test_an_entry_is_trimmed_to_the_room_under_the_limit(self, tmp_path):
+        h = Harness(tmp_path, {"BTC-USD": BREAKOUT, "ETH-USD": FLAT})
+        close = D(str(BREAKOUT[-1]))
+        held = D(90) / close  # $90 of BTC already in a $500 account: $10 of room at 20%
+        [buy] = only(h.analyze(positions={"BTC-USD": held}, portfolio=D(500)))
+        assert buy.notional == pytest.approx(D(10), abs=D("0.01"))
+        assert "trimmed from $25.00 to the per-coin limit" in buy.reason
+        assert buy.risk.passed
+
+    def test_an_entry_with_no_room_is_turned_away(self, tmp_path):
+        h = Harness(tmp_path, {"BTC-USD": BREAKOUT, "ETH-USD": FLAT})
+        held = D(97) / D(str(BREAKOUT[-1]))
+        result = h.analyze(positions={"BTC-USD": held}, portfolio=D(500))
+        assert only(result) == []
+        assert "turned away" in reason(result, "BTC-USD")
+
+    def test_the_short_term_gets_the_room_first(self):
+        view = DayView(LAST, D(110), prior_high=D(100), average=D(100), atr=D(2))
+        coin = CoinDay("BTC-USD", LAST, D(110), view, average=D(120), highest=None,
+                       bid=D(110), account_holding=D(70))
+        book = SplitBook(Sleeve(LONG_TERM, D(250)), Sleeve(SHORT_TERM, D(250)))
+        decision = decide(
+            {"BTC-USD": coin}, book, Breakout(), Accumulate(), min_trade=D(5),
+            coin_cap_pct=D(20), account_value=D(500), long_symbols=["BTC-USD", "ETH-USD"],
+        )
+        [entry] = decision.orders
+        assert (entry.rule, entry.dollars) == (RULE_ENTRY, D(25))
+        assert any("tranche 1 of 10 waits" in n for n in decision.notes["BTC-USD"])
+
+
+class TestInputs:
+    def test_coinbase_unreachable_is_explained(self, tmp_path):
+        h = Harness(tmp_path, {"BTC-USD": BREAKOUT, "ETH-USD": FLAT})
+        h.coinbase.fail = True
         result = h.analyze()
         assert result.proposals == []
-        assert "at or under its 1-day average" in result.outcomes[0].skipped_reason
+        assert "no daily bars from Coinbase: Coinbase is unreachable" in reason(result, "BTC-USD")
 
-    def test_no_buy_before_the_average_exists(self, config):
-        h = Harness(config, [100, 101, 95])  # 3 bars; the average needs 24
+    def test_a_close_not_yet_published_is_waited_for(self, tmp_path):
+        h = Harness(tmp_path, {"BTC-USD": BREAKOUT, "ETH-USD": FLAT})
+        h.now = NOW + DAY  # the next close is due, but the fake has none past LAST
         result = h.analyze()
         assert result.proposals == []
-        assert "needs 24 bars and 3 are on hand" in result.outcomes[0].skipped_reason
+        assert "has not published the 2026-06-01 daily close yet" in reason(result, "BTC-USD")
 
-    def test_a_filled_step_is_not_proposed_again_in_the_cycle(self, config):
-        h = Harness(config, RISE + [127, 123])
-        h.fill(only(h.analyze()))
-        h.extend([122])
-        assert h.analyze().proposals == []
-
-    def test_an_open_order_holds_its_step_until_it_ends(self, config):
-        h = Harness(config, RISE + [127, 123])
-        buy = only(h.analyze())
-        h.fill(buy, quantity=0, state="confirmed")  # placed, not filled
-        h.extend([122])
-        assert h.analyze().proposals == []
-        h.fill(buy, quantity=0, state="canceled")  # ended unfilled: the step is free
-        h.extend([122.5])
-        assert only(h.analyze()).sizing_detail["ladder"]["step"] == 0
-
-    def test_nothing_to_do_says_where_the_next_orders_trigger(self, config):
-        h = Harness(config, RISE)
-        reason = h.analyze().outcomes[0].skipped_reason
-        assert reason.startswith("no order this bar: closed 130.00 (+0.0% from the anchor")
-        assert "step 1 buys at 123.50" in reason
-        assert "above its 1-day average" in reason
-
-    def test_the_anchor_starts_at_anchor_since(self, config):
-        later = replace(config, strategy=replace(config.strategy, anchor_since=None))
-        h = Harness(later, RISE + [127, 123])
-        since = h.candles[-3].end  # after the 130 high: the anchor is 127
-        dated = replace(later, strategy=replace(later.strategy, anchor_since=since))
-        result = Agent(dated, store=h.store, audit=h.audit).analyze(
-            h.market(), symbols=["BTC-USD"]
-        )
-        assert result.proposals == []  # 123 is only 3.1% under 127
-
-
-class TestSells:
-    def bought(self, config, *more):
-        h = Harness(config, RISE + [127, 123])
-        h.fill(only(h.analyze()))
-        return h.extend(list(more))
-
-    def test_a_take_profit_sells_the_steps_dollars_at_the_bid(self, config):
-        h = self.bought(config, 128, 133, 137)  # +5.4% over the 130 anchor
-        proposal = only(h.analyze(held=h.held()))
-        assert proposal.side is Side.SELL
-        assert proposal.reference_price == h.market().quotes["BTC-USD"].bid
-        assert proposal.notional == D("5.00")
-        assert proposal.reason.startswith("take profit: closed 137.00, 5.4% over the anchor")
-        assert proposal.risk.passed
-
-    def test_the_trend_exit_sells_everything_the_ladder_holds(self, config):
-        h = self.bought(config, 118, 110)
-        proposal = only(h.analyze(held=h.held()))
-        assert proposal.side is Side.SELL and proposal.quantity == h.held()
-        assert proposal.reason.startswith("trend exit: closed 110.00, at or under its 1-day")
-        assert proposal.sizing_detail["ladder"]["entry_proposal_ids"]
-
-    def test_a_sell_passes_the_caps_on_new_exposure_and_says_so(self, config):
-        h = self.bought(config, 118, 110)
-        strict = replace(
-            config,
-            risk=replace(
-                config.risk, max_notional_per_trade_usd=D("1"), max_daily_notional_usd=D("1")
-            ),
-        )
-        result = Agent(strict, store=h.store, audit=h.audit).analyze(
-            h.market(held=h.held()), symbols=["BTC-USD"]
-        )
-        proposal = only(result)
-        assert proposal.risk.passed, [f.message for f in proposal.risk.blocking_failures]
-        exempted = {
-            f.rule for f in proposal.risk.findings if "not applied to a trend exit" in f.message
-        }
-        assert exempted == {"per_trade_notional", "daily_notional"}
-
-    def test_the_kill_switch_still_blocks_a_sell(self, config):
-        h = self.bought(config, 118, 110)
-        KillSwitch(config.kill_switch_path).engage("manual")
-        proposal = only(h.analyze(held=h.held()))
-        assert "kill_switch" in [f.rule for f in proposal.risk.blocking_failures]
-
-    def test_the_sale_is_capped_at_what_the_account_holds(self, config):
-        h = self.bought(config, 118, 110)
-        half = (h.held() / 2).quantize(D("0.00000001"))
-        assert only(h.analyze(held=half)).quantity == half
-
-    def test_a_coin_sold_elsewhere_is_not_chased(self, config):
-        h = self.bought(config, 118, 110)
-        result = h.analyze(held=None, as_of=utcnow() + timedelta(minutes=1))
+    def test_an_order_without_a_quote_is_not_priced(self, tmp_path):
+        h = Harness(tmp_path, {"BTC-USD": BREAKOUT, "ETH-USD": FLAT})
+        state = h.state()
+        del state.quotes["BTC-USD"]
+        result = h.agent().analyze(state)
         assert result.proposals == []
-        assert "sold outside the agent" in result.outcomes[0].skipped_reason
+        assert "no live quote to price them" in reason(result, "BTC-USD")
 
-    def test_a_stale_snapshot_still_proposes_and_coverage_says_why(self, config):
-        h = self.bought(config, 118, 110)
-        proposal = only(h.analyze(held=None, as_of=utcnow() - timedelta(hours=1)))
-        assert [f.rule for f in proposal.risk.blocking_failures] == ["sell_coverage"]
-
-    def test_an_open_sell_blocks_another(self, config):
-        h = self.bought(config, 118, 110)
-        h.fill(only(h.analyze(held=h.held())), quantity=0, state="confirmed")
-        h.extend([108])
-        result = h.analyze(held=h.held())
-        assert result.proposals == []
-        assert "a ladder sell order is still open" in result.outcomes[0].skipped_reason
-
-    def test_a_coin_bought_outside_the_agent_is_never_sold(self, config):
-        h = Harness(config, RISE + [118, 110])
-        result = h.analyze(held="5")
-        assert result.proposals == []  # the ladder holds none, so no trend exit
+    def test_off_the_watchlist(self, tmp_path):
+        h = Harness(tmp_path, {"BTC-USD": BREAKOUT, "ETH-USD": FLAT})
+        result = h.agent().analyze(h.state(), symbols=["DOGE-USD"])
+        assert "not on the watchlist allowlist" in reason(result, "DOGE-USD")
 
 
-class TestSkips:
-    def test_no_history(self, config):
-        result = Agent(config, store=PriceStore(config.price_store_path)).analyze(
-            Harness(config).market(close=100), symbols=["BTC-USD"]
+class TestRecords:
+    def test_proposals_are_recorded_as_the_splits_and_are_not_hit_rate_scored(self, tmp_path):
+        h = Harness(tmp_path, {"BTC-USD": BREAKOUT, "ETH-USD": FLAT})
+        [buy] = only(h.analyze())
+        [record] = list(h.audit.events(kind=KIND_PROPOSAL))
+        assert record["proposal_id"] == buy.proposal_id
+        assert (record["strategy"], record["sleeve"], record["rule"]) == (
+            "split", SHORT_TERM, RULE_ENTRY
         )
-        assert "no price history" in result.outcomes[0].skipped_reason
-        assert "historicals" in result.outcomes[0].skipped_reason
+        assert record["trigger_reason"] == buy.reason
+        assert outcome_from_proposal_record(record, []) is None
 
-    def test_no_quote(self, config):
-        h = Harness(config, RISE)
-        result = h.agent.analyze(MarketState(quotes={}), symbols=["BTC-USD"])
-        assert "no live quote" in result.outcomes[0].skipped_reason
-
-    def test_off_the_watchlist(self, config):
-        h = Harness(config, RISE)
-        result = h.agent.analyze(h.market(), symbols=["DOGE-USD"])
-        assert result.proposals == [] and "allowlist" in result.outcomes[0].skipped_reason
-
-
-class TestRecording:
-    def test_proposals_are_recorded_as_the_ladders_and_are_not_hit_rate_scored(self, config):
-        h = Harness(config, RISE + [127, 123])
-        proposal = only(h.analyze())
+    def test_blocked_proposals_are_recorded_too(self, tmp_path):
+        h = Harness(tmp_path, {"BTC-USD": BREAKOUT, "ETH-USD": FLAT})
+        [buy] = only(h.analyze(spread=D("0.02")))  # a 4% spread
+        assert not buy.risk.passed
         [record] = list(h.audit.events(kind=KIND_PROPOSAL))
-        assert record["proposal_id"] == proposal.proposal_id
-        assert (record["strategy"], record["rule"], record["step"]) == ("ladder", "dip", 0)
-        assert record["trigger_reason"] == proposal.reason
-        assert record["status"] == ProposalStatus.PROPOSED.value
-        assert outcome_from_proposal_record(record, h.candles) is None
+        assert "spread" in record["risk_failures"]
 
-    def test_blocked_proposals_are_recorded_too(self, config):
-        h = Harness(config, RISE + [127, 123])
-        KillSwitch(config.kill_switch_path).engage("manual")
-        h.analyze()
-        [record] = list(h.audit.events(kind=KIND_PROPOSAL))
-        assert record["risk_passed"] is False
-
-    def test_no_record_leaves_the_audit_log_untouched(self, config):
-        h = Harness(config, RISE + [127, 123])
-        h.agent.analyze(h.market(), symbols=["BTC-USD"], record=False)
-        assert list(h.audit.events(kind=KIND_PROPOSAL)) == []
+    def test_no_record_leaves_the_audit_log_untouched(self, tmp_path):
+        h = Harness(tmp_path, {"BTC-USD": BREAKOUT, "ETH-USD": FLAT})
+        h.agent().analyze(h.state(), record=False)
+        assert list(h.audit.events()) == []
 
 
-SWINGS = piecewise(
-    [(0, 100), (40, 160), (44, 151), (52, 170), (56, 180), (60, 168), (64, 150), (70, 138),
-     (90, 130), (120, 190), (125, 178), (128, 168), (140, 205), (150, 250)]
-)
+def walk(seed, start, days, drift):
+    rng = random.Random(seed)
+    price, out = start, []
+    for index in range(days):
+        trend = drift * (1 if (index // 70) % 2 == 0 else -1.2)
+        price *= 1 + trend + rng.gauss(0, 0.025)
+        out.append(round(price, 2))
+    return out
 
 
-def test_live_trades_exactly_what_the_backtest_trades(config, monkeypatch):
-    """The same bars through ``rhca run``'s path and through ``rhca backtest``.
+def test_live_trades_exactly_what_the_backtest_trades(tmp_path):
+    """Day by day, filling every proposal at its price, the live path makes the
+    same trades on the same days as ``run_split`` -- the evidence the paper
+    test and the backtest describe what the agent actually proposes."""
+    days = 360
+    paths = {"BTC-USD": walk(3, 40000, days, 0.004), "ETH-USD": walk(8, 2500, days, 0.005)}
+    h = Harness(tmp_path, paths)
+    window = 150
+    first = LAST - (window - 1) * DAY
 
-    Each bar, the live pipeline analyzes, and whatever it proposes fills at
-    once, recorded at the bar's close. The backtest fills at the close too,
-    crossing the same spread. The trades must match: bar, side and quantity.
-    """
-    candles = make_candles(SWINGS)
-    trend = backtest.above_trend(candles, config.strategy.trend_bars)
-    replay = backtest.run_ladder(
-        candles,
-        mode="anchor",
-        trend=trend,
-        trend_exit=True,
-        round_trip_pct=HALF * 2 * 100,
-    )
-    kinds = {(f.side, f.quantity > 0) for f in replay.fills}
-    assert kinds == {(Side.BUY, True), (Side.SELL, True)} and len(replay.fills) >= 8
-
-    clock: list[datetime] = [candles[0].end]
-    monkeypatch.setattr("robinhood_crypto_agent.audit.utcnow", lambda: clock[0])
-    monkeypatch.setattr("robinhood_crypto_agent.agent.utcnow", lambda: clock[0])
-    h = Harness(config)
-    live = []
-    for candle in candles:
-        clock[0] = candle.end
-        h.extend([candle.close])
-        for proposal in h.analyze(held=h.held()).proposals:
-            assert proposal.risk.passed, [f.message for f in proposal.risk.blocking_failures]
+    for offset in range(window):
+        day = first + offset * DAY
+        h.now = day + DAY + timedelta(hours=1)
+        held = {}
+        book = h.agent().book()
+        for sleeve in (book.long, book.short):
+            for symbol, holding in sleeve.holdings.items():
+                held[symbol] = held.get(symbol, D(0)) + holding.quantity
+        result = h.analyze(positions=held)
+        for proposal in result.proposals:
             h.fill(proposal)
-            live.append((candle.end, proposal.side, proposal.quantity))
 
-    expected = [(f.at, f.side, f.quantity) for f in replay.fills]
-    assert [(at, side) for at, side, _ in live] == [(at, side) for at, side, _ in expected]
-    for (_, _, got), (_, _, want) in zip(live, expected, strict=True):
-        assert abs(got - want) < D("0.0000001")
+    live = []
+    for record in h.audit.events(kind=KIND_PROPOSAL):
+        if not any(e.get("proposal_id") == record["proposal_id"]
+                   for e in h.audit.events(kind="execution")):
+            continue
+        live.append((record["symbol"], record["sleeve"], record["side"],
+                     record["proposal"]["sizing_detail"]["split"]["day"]))
+
+    bars = {s: daily_candles(c, symbol=s, last=LAST) for s, c in paths.items()}
+    rule, plan = Breakout(), Accumulate()
+    prepared = {s: pb.Prepared(b, day_views(b, rule)) for s, b in bars.items()}
+    split = pb.run_split(prepared, rule, plan, capital=D(500), long_pct=D(50), start=first,
+                         end=LAST + DAY, min_trade=D(5))
+    expected = []
+    for trade in split.short.trades:
+        expected.append((trade.symbol, SHORT_TERM, "buy", trade.entry_day.isoformat()))
+        if trade.exit_day is not None:
+            expected.append((trade.symbol, SHORT_TERM, "sell", trade.exit_day.isoformat()))
+    for trade in split.long.trades:
+        expected.append((trade.symbol, LONG_TERM, "buy", trade.entry_day.isoformat()))
+
+    assert sorted(live) == sorted(expected)
+    assert any(side == "sell" for _, _, side, _ in expected)  # the path exercises a stop
+    assert any(sleeve == LONG_TERM for _, sleeve, _, _ in expected)
+
+    # And the money matches: each sleeve's cash as the ledger has it.
+    book = h.agent().book()
+    assert book.long.cash == pytest.approx(
+        split.long.capital - sum(t.cost for t in split.long.trades), abs=D("0.05")
+    )
+
+
+def test_config_split_settings_reach_the_agent(tmp_path):
+    h = Harness(tmp_path, {"BTC-USD": FLAT, "ETH-USD": DIP})
+    h.config = replace(
+        h.config, strategy=replace(h.config.strategy, split_long_pct=D(20), split_long_mode="dca")
+    )
+    [buy] = only(h.analyze(), "ETH-USD")
+    assert "long-term weekly DCA" in buy.reason
+    # $100 over two coins is $50 a coin: ten $5 tranches.
+    assert buy.notional == pytest.approx(D(5), abs=D("0.01"))

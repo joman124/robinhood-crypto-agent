@@ -18,17 +18,18 @@ You are the only component that can **place an order**:
   It gives you proposals and validated payloads.
 - **`rhca run`** is a shadow-mode loop that runs on its own. It *reads* from
   Robinhood's Crypto API with a read-only client (quotes and pairs only; the
-  Agentic account's balance and holdings come from `rhca ingest`). Each closed
-  hour it runs the trend ladder (`docs/strategy.md`) on every watchlist coin
-  (BTC, ETH, SOL, XRP), and logs what the ladder wants as proposals. It never
-  orders.
+  Agentic account's balance and holdings come from `rhca ingest`). After each
+  UTC daily close it runs **the split** (`docs/strategy.md`, "The split") on
+  every watchlist coin (BTC, ETH, SOL, XRP) -- $250 long-term, bought the
+  buy-low way and held, and $250 trading the breakout -- and logs what it
+  wants as proposals, afresh each hour. It never orders.
 - **The forward test** also runs inside `rhca run` (`config/shadow.yaml`): the
-  split account -- $100 long-term, $400 in the breakout -- on paper. After
-  each UTC daily close it writes a `shadow_day` record of its paper fills.
-  `rhca shadow` reports it. A paper fill is **not a proposal**: it has no
-  proposal id, and it is never a reason to place an order.
+  same split on paper. After each UTC daily close it writes a `shadow_day`
+  record of its paper fills. `rhca shadow` reports it. A paper fill is **not a
+  proposal**: it has no proposal id, and it is never a reason to place an
+  order.
 - **A human** approves a specific proposal by its id. Nothing else is approval
-  — including the ladder wanting it, and including a proposal the dashboard
+  — including the split wanting it, and including a proposal the dashboard
   shows as ready.
 
 ## Hard rules
@@ -103,19 +104,27 @@ You are the only component that can **place an order**:
 
 ## Following an execution plan
 
-Every ladder proposal is **`PROMPT`**: one tranche, one limit order at its
-`target_price` (the ask for a buy, the bid for a sell). Submit it promptly.
-Never re-price it to chase a fill, and never add size to it.
+Every split proposal is **`PROMPT`**: one tranche, one limit order at its
+`target_price` (the ask for a buy, the bid for a sell). Submit it promptly:
+the rule decided on the last daily close, and its entry is meant to fill near
+it. Never re-price it to chase a fill, and never add size to it. If the price
+has moved past the drift tolerance, run `rhca analyze` for a fresh proposal
+priced at the current quote -- the day's decision stands until the next close.
+
+A proposal's `sleeve` says whose money it is: a **short-term** breakout entry
+or stop, or a **long-term** tranche. Long-term tranches are never sold; a stop
+sells only what the short-term sleeve holds of that coin.
 
 Older proposals from the retired System 1 may be **`STAGED`** (several
 tranches, one limit order each). If one is ever approved, log every tranche
 with its own `record-execution --tranche N`; `rhca approve` refuses a tranche
 that would exceed the remaining unfilled quantity.
 
-The ladder rebuilds its state from the fills you record. Record the
-`place_crypto_order` response, and then the fill from `get_crypto_orders`
-once it happens (or the cancellation, if it never fills). Until then it
-treats the step as taken and will not propose it again.
+The split rebuilds each sleeve's cash and holdings from the fills you record.
+Record the `place_crypto_order` response, and then the fill from
+`get_crypto_orders` once it happens (or the cancellation, if it never fills).
+Until then it treats the order as working: it will not propose it again, and
+an open buy's dollars stay out of the sleeve's cash.
 
 ## Tool-contract facts worth remembering
 
@@ -156,7 +165,7 @@ When `rhca run` is running, its proposals are already in the audit log with a
 `declined_by_system2` and `not_escalated`). Act only on `proposed` ones a human
 names by id, through the same `plan-order` → `approve` → `place_crypto_order`
 → `record-execution` steps. Check `rhca status` for whether the loop is alive
-before trusting its quotes; it also shows each coin's ladder position and
+before trusting its quotes; it also shows each sleeve's cash, holdings and
 realized P&L.
 
 Once a day, record realized P&L so the daily loss cap is real:

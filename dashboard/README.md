@@ -3,10 +3,11 @@
 A web view of every trade the agent has suggested, whether those suggestions
 turned out to be good, and a place to accept or decline the ones waiting on you.
 
-The agent trades the **trend ladder** (`docs/strategy.md`). Its proposals are
-measured on realized P&L, not hit rate: a dip buy waits days for its sell. The
-hit-rate panels still render the retired System 1's records (composite
-signals, regime, System 2), and say so.
+The agent trades **the split** (`docs/strategy.md`): a long-term sleeve bought
+in tranches and held, and a short-term sleeve trading the breakout. Its
+proposals are measured on realized P&L, not hit rate: a breakout is held until
+its stop and a tranche for good. The hit-rate panels still render the retired
+System 1's records (composite signals, regime, System 2), and say so.
 
 ## What is on the page
 
@@ -14,19 +15,20 @@ signals, regime, System 2), and say so.
   switch, the execution mode, and how old the last sync is. Banners explain
   anything that changes what the numbers mean: an engaged kill switch, a stale
   sync, read-only mode, in-memory storage.
-- **Headline numbers.** The ladder's realized P&L per pair, System 1's hit
+- **Headline numbers.** The split's realized P&L per pair, System 1's hit
   rate and average move, the proposal count, and today's proposals,
   executions, traded dollars and realized P&L.
 - **The proposal log.** "Needs your call" by default, with Decided and All tabs,
   search, stage/pair/outcome filters, pagination, CSV export, and a card layout
-  on phones. A ladder row shows its rule and step ("Dip, step 1"); a System 1
+  on phones. A split row shows its sleeve and rule ("Short-term entry",
+  "Long-term tranche"); a retired ladder row its rule and step; a System 1
   row shows its composite score and confidence. Accept is greyed out, with the
   reason, whenever the agent's gate would refuse it: risk-blocked, a record
   rather than a proposal, the kill switch, or price drift past
   `price_drift_tolerance_pct` as of the last sync.
 - **The detail drawer** (click any row; `#p=<id>` links straight to one). The
   decision with an optional note and whether the agent has picked it up; the
-  trade, plan, drift, and the ladder rule with its reason; every risk rule;
+  trade, plan, drift, and the split's rule with its reason; every risk rule;
   the outcome; any execution; and the `rhca` commands to copy into the
   terminal. A System 1 record also shows its regime, composite, trigger,
   System 2 verdict and every signal on a −1…+1 track.
@@ -59,7 +61,7 @@ Two consequences worth stating plainly:
   behind it. Risk rules whose message would quote the account (sizing, the
   dollar caps, open positions, concentration, sell coverage) arrive as a
   pass/fail verdict with no text, System 2's written rationale never arrives,
-  and neither does the text of the loop's last error. The ladder sends its
+  and neither does the text of the loop's last error. The split sends its
   realized P&L per pair, as today's realized P&L already is, but not what it
   holds or what that cost.
 
@@ -153,7 +155,8 @@ rhca dashboard-sync --url http://localhost:3000 --token dev-token
   after that, and a loss if it lost money at all. A move that merely beat the
   spread on the mark is not a profit in practice, so it is not a win here.
 - A time exit is a rule closing a position, not a prediction, so it is not
-  scored. Neither is any of the trend ladder's proposals.
+  scored. Neither is any of the split's proposals, nor the retired trend
+  ladder's.
 - Outcomes are scored for **every** proposal, including ones you declined. The
   record is of the agent's judgement, not of the subset you happened to like.
 
