@@ -19,10 +19,11 @@ You are the only component that can **place an order**:
 - **`rhca run`** is a shadow-mode loop that runs on its own. It *reads* from
   Robinhood's Crypto API with a read-only client (quotes and pairs only; the
   Agentic account's balance and holdings come from `rhca ingest`). Each closed
-  hour it runs the trend ladder (`docs/strategy.md`) on BTC and ETH, and logs
-  what the ladder wants as proposals. It never orders.
+  hour it runs the trend ladder (`docs/strategy.md`) on every watchlist coin
+  (BTC, ETH, SOL, XRP), and logs what the ladder wants as proposals. It never
+  orders.
 - **The forward test** also runs inside `rhca run` (`config/shadow.yaml`): the
-  split account -- $250 long-term, $250 in the breakout -- on paper. After
+  split account -- $100 long-term, $400 in the breakout -- on paper. After
   each UTC daily close it writes a `shadow_day` record of its paper fills.
   `rhca shadow` reports it. A paper fill is **not a proposal**: it has no
   proposal id, and it is never a reason to place an order.

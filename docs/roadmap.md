@@ -43,11 +43,12 @@ windows.
    again at four (`strategy.md`, "Over four years"): it fails consistency.
    It has no live implementation.
 0a. **The forward test** runs from 2026-09-28 (`strategy.md`, "The forward
-   test"): the owner's split -- $250 bought the buy-low way and held, $250 in
-   the breakout -- on paper, inside `rhca run`. Keep `rhca run` running, and
-   read the bar with `rhca shadow` on or after 2026-12-27. A live split also
-   needs the concentration cap and watchlist changes listed in `strategy.md`,
-   "What running it for real would take" -- owner decisions, not side effects.
+   test"): the owner's split -- $100 bought the buy-low way and held, $400 in
+   the breakout, no coin over 20% of the account -- on paper, inside
+   `rhca run`. Keep `rhca run` running, and read the bar with `rhca shadow` on
+   or after 2026-12-27. The per-coin limit (20%) and the watchlist (BTC, ETH,
+   SOL, XRP) were set for it on 2026-09-28; what else a live split needs is in
+   `strategy.md`, "What running it for real would take".
 1. **Run the backtest on real bars** (runbook, "Backtesting"):
    `rhca backtest --days 180`, `--days 365` and `--days 730 --roll-window 90`.
    Hold `ladder (anchor) +50d exit` to the bar in

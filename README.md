@@ -1,7 +1,7 @@
 # robinhood-crypto-agent
 
-A crypto trading agent for Robinhood that trades one rule on BTC and ETH: the
-**trend ladder**. It buys dips in dollar steps while the price is above its
+A crypto trading agent for Robinhood that trades one rule on its watchlist
+(BTC, ETH, SOL and XRP): the **trend ladder**. It buys dips in dollar steps while the price is above its
 50-day average, sells into strength, and sells everything when the price
 closes under that average. Fourteen risk rules check every proposal. Orders go
 only through [Claude Code](https://claude.com/claude-code) and the
@@ -54,8 +54,8 @@ in with `rhca ingest`. On each closed hour it runs the ladder, and logs what
 the ladder wants as a proposal for a human to approve. Setup and keys:
 [`docs/runbook.md`](./docs/runbook.md#shadow-run-rhca-run).
 
-It also keeps the **forward test**: the split account -- $250 held long-term,
-$250 in the breakout -- on paper from 2026-09-28, recorded after each UTC
+It also keeps the **forward test**: the split account -- $100 held long-term,
+$400 in the breakout -- on paper from 2026-09-28, recorded after each UTC
 daily close and reported by `rhca shadow`. It never proposes
 ([`docs/strategy.md`](./docs/strategy.md#the-forward-test)).
 
@@ -142,8 +142,8 @@ rhca record-execution <proposal-id> --tranche 0 -f response.json
 # bars, over the whole window and over rolling 90-day windows
 rhca backtest --days 730 --roll-window 90
 rhca backtest --symbols BTC-USD,ETH-USD,SOL-USD,XRP-USD --days 730 --strategies breakout
-# ... and the split: half held long-term, half in the breakout
-rhca backtest --symbols BTC-USD,ETH-USD,SOL-USD,XRP-USD --days 1460 --strategies split
+# ... and the split: 20% held long-term, 80% in the breakout (config/shadow.yaml)
+rhca backtest --days 1460 --roll-window 90 --strategies split
 
 # The forward test: the split on paper since 2026-09-28, against its bar
 rhca shadow

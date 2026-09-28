@@ -3,8 +3,8 @@
 ## Shadow run (`rhca run`)
 
 The real-time loop: Robinhood quotes in, hourly bars built from them, and the
-trend ladder ([`strategy.md`](./strategy.md)) run on BTC and ETH at every
-closed hour. What the ladder wants is logged as a proposal for you to approve.
+trend ladder ([`strategy.md`](./strategy.md)) run on every watchlist coin
+(BTC, ETH, SOL, XRP) at every closed hour. What the ladder wants is logged as a proposal for you to approve.
 **It cannot place an order** — the Robinhood client has no order method. It
 runs on this PC, in a terminal you leave open.
 
@@ -293,7 +293,7 @@ the cloud sandbox cannot reach Coinbase:
 ```
 
 The symbols, the steps and the trend window default to the watchlist and
-`config/strategy.yaml` (BTC and ETH, `5:5,10:10,20:20`, 50 days). The 50 days
+`config/strategy.yaml` (BTC, ETH, SOL and XRP, `5:5,10:10,20:20`, 50 days). The 50 days
 of warm-up for the average are fetched before the window, so the window
 itself is exactly `--days` long. `--trend-days 0` drops every trend row.
 
@@ -344,17 +344,20 @@ clear". `--strategies breakout` runs it alone, without the ladder's tables. A ba
 authorizes nothing. It doesn't change a limit or the approval gate, and it
 says nothing about the next trade.
 
-**The split** (`strategy.md`, "The split") runs half the account long-term
-and half in the breakout:
+**The split** (`strategy.md`, "The split") runs part of the account
+long-term and the rest in the breakout -- by default the forward test's
+split (`config/shadow.yaml`: 20% long-term), with no coin over the per-coin
+limit in `config/risk_limits.yaml` (20%):
 
 ```powershell
-.venv\Scripts\rhca backtest --symbols BTC-USD,ETH-USD,SOL-USD,XRP-USD --days 1460 --roll-window 90 --strategies split
+.venv\Scripts\rhca backtest --days 1460 --roll-window 90 --strategies split
 ```
 
 It shows the long-term sleeve bought three ways (buy low, weekly DCA, lump
 sum), the breakout sleeve, the split, and the whole account in the breakout
-or in hold. `--long-mode`, `--long-pct` and `--long-symbols` change the
-long-term sleeve.
+or in hold, and how often the per-coin limit trimmed or turned away a buy.
+`--long-mode`, `--long-pct` and `--long-symbols` change the long-term sleeve;
+`--coin-cap-pct` the limit.
 
 ## Forward test (`rhca shadow`)
 

@@ -114,10 +114,20 @@ class TestLongTermSleeve:
             assert close < averages[trade.entry_day]
             assert trade.quantity == D(50) / (close * D("1.0095"))  # paid the ask
 
-    def test_a_tranche_under_the_minimum_is_not_bought(self):
+    def test_a_small_share_buys_fewer_minimum_sized_tranches(self):
         plan = Accumulate(mode=DCA, tranches=10)
-        result = pb.run_accumulate(prepared(BTC_USD=days([100] * 30)), plan, capital=D(40))
-        assert result.trades == []  # $4 tranches, $5 minimum
+        assert plan.tranches_for(D(62.5), D(5)) == 10  # $6.25 each: ten fit
+        assert plan.tranches_for(D(25), D(5)) == 5  # $2.50 each would not
+        assert plan.tranches_for(D(4), D(5)) == 1
+        assert Accumulate(mode=LUMP).tranches_for(D(25), D(5)) == 1
+        result = pb.run_accumulate(prepared(BTC_USD=days([100] * 60)), plan, capital=D(40))
+        assert [t.cost for t in result.trades] == [D(5)] * 8  # $40 in eight $5 buys
+        assert "one of 8 equal tranches" in plan.describe(8)
+
+    def test_a_share_under_the_minimum_buys_nothing(self):
+        plan = Accumulate(mode=DCA)
+        result = pb.run_accumulate(prepared(BTC_USD=days([100] * 30)), plan, capital=D(4))
+        assert result.trades == []
 
 
 class TestSplit:
@@ -178,6 +188,76 @@ class TestSplit:
         assert summary["long_mode"] == DIP and set(summary["long_term"]) == {DIP, DCA, LUMP}
 
 
+RALLY = [100] * 12 + [104, 106, 108, 110, 112, 109, 90, 91]  # breakout: in day 12, out day 18
+
+
+class TestCoinCap:
+    """One coin's holdings, both sleeves together, stay under a share of the account."""
+
+    def paths(self):
+        return prepared(BTC_USD=days(RALLY), ETH_USD=days([50] * len(RALLY), symbol="ETH-USD"))
+
+    def test_without_a_cap_the_sleeves_run_as_if_alone(self):
+        paths = self.paths()
+        split = pb.run_split(paths, RULE, DIP_PLAN, capital=D(500), long_pct=D(40))
+        alone_long = pb.run_accumulate(paths, DIP_PLAN, capital=D(200))
+        alone_short = pb.run_breakout(paths, RULE, capital=D(300))
+        assert split.long.equity_curve == alone_long.equity_curve
+        assert split.short.equity_curve == alone_short.equity_curve
+        assert split.short.trimmed == split.short.blocked == split.long.blocked == 0
+
+    def test_a_breakout_entry_is_trimmed_to_the_room_left(self):
+        paths = self.paths()
+        lump = Accumulate(mode=LUMP)  # $125 of BTC and of ETH from day 0
+        free = pb.run_split(paths, RULE, lump, capital=D(500))
+        capped = pb.run_split(paths, RULE, lump, capital=D(500), coin_cap_pct=D(30))
+        [wanted] = [t for t in free.short.trades if t.symbol == "BTC-USD"]
+        [got] = [t for t in capped.short.trades if t.symbol == "BTC-USD"]
+        assert capped.short.trimmed == 1 and got.cost < wanted.cost
+        assert got.risk == got.cost * RULE.stop_fraction(paths["BTC-USD"].views[day(12)])
+        # Right after the entry, BTC is 30% of the account, to the cent.
+        [(_, account)] = [(d, e) for d, e in capped.combined.equity_curve if d == day(12)]
+        long_btc = sum(t.quantity for t in capped.long.trades if t.symbol == "BTC-USD")
+        btc = (long_btc + got.quantity) * D(104) * (1 - D("0.0095"))
+        assert abs(btc + got.cost - got.quantity * D(104) * D("0.9905") - D("0.3") * (
+            account + got.cost - got.quantity * D(104) * D("0.9905"))) < D("0.01")
+
+    def test_an_entry_with_no_room_is_blocked(self):
+        paths = self.paths()
+        capped = pb.run_split(paths, RULE, Accumulate(mode=LUMP), coin_cap_pct=D(25))
+        assert [t for t in capped.short.trades if t.symbol == "BTC-USD"] == []
+        assert capped.short.blocked == 5  # turned away each day it still wanted in: 12 to 16
+
+    def test_the_short_term_goes_first_and_a_long_term_tranche_waits(self):
+        paths = self.paths()
+        plan = Accumulate(mode=DCA, tranches=2, every_days=13)  # buys due on days 0 and 13
+        split = pb.run_split(
+            paths, RULE, plan, capital=D(500), long_pct=D(20), long_symbols=["BTC-USD"],
+            coin_cap_pct=D(25),
+        )
+        [short] = [t for t in split.short.trades if t.symbol == "BTC-USD"]
+        assert (short.entry_day, short.exit_day) == (day(12), day(18))
+        # Day 13's tranche has no room while the breakout holds BTC, and buys on
+        # the day it sells.
+        assert [t.entry_day for t in split.long.trades] == [day(0), day(18)]
+        assert split.long.blocked == 5
+
+    def test_the_report_says_what_the_cap_did(self):
+        report = pb.evaluate_split(self.paths(), RULE, Accumulate(mode=LUMP), coin_cap_pct=D(30))
+        text = pb.render_split(report, RULE)
+        assert "No coin may be more than 30% of the whole account" in text
+        assert (
+            "The 30% per-coin limit trimmed 1 short-term entry; it turned a short-term entry "
+            "away 0 times and held a long-term tranche back 0 times" in text
+        )
+        summary = pb.split_summary(report)
+        assert summary["coin_cap_pct"] == "30" and summary["short_term"]["trimmed"] == 1
+
+    def test_a_cap_must_be_a_percent(self):
+        with pytest.raises(ValueError):
+            pb.run_split(self.paths(), RULE, DIP_PLAN, coin_cap_pct=D(0))
+
+
 def test_rolling_split_windows_start_in_cash():
     bars = days([100 + (i % 17) * 2 + i * 0.5 for i in range(120)])
     hourly = [
@@ -227,13 +307,31 @@ class TestCli:
         assert payload["split"]["long_mode"] == DIP
         assert payload["split"]["split"]["capital"] == "500.00"
 
+    def test_the_split_defaults_to_the_forward_tests(self, tmp_path, capsys):
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "shadow.yaml").write_text(
+            "shadow:\n  start: 2026-10-01\n  long_pct: 30\n  long_mode: lump\n"
+        )
+        (config_dir / "risk_limits.yaml").write_text(
+            "limits:\n  max_position_pct_of_portfolio: 20\n  min_notional_per_trade_usd: 5\n"
+        )
+        closes = [100] * 210 + [100 + i * 2 for i in range(40)]
+        args = ["--config-dir", str(config_dir), *self.args(tmp_path, closes)]
+        assert main(args) == EXIT_OK
+        out = capsys.readouterr().out
+        assert "long-term  $150.00" in out and "split: lump sum + breakout" in out
+        assert "No coin may be more than 20% of the whole account" in out
+
     def test_bad_splits_are_refused(self, tmp_path, capsys):
         args = self.args(tmp_path, [100] * 30)
         assert main([*args, "--long-pct", "0"]) == EXIT_ERROR
         assert main([*args, "--long-pct", "100"]) == EXIT_ERROR
         assert main([*args, "--long-symbols", "ETH-USD"]) == EXIT_ERROR
-        assert main([*args, "--capital", "60"]) == EXIT_ERROR  # $3 weekly tranches
+        assert main([*args, "--capital", "8"]) == EXIT_ERROR  # $4 of the coin
         assert "under the $5 minimum trade" in capsys.readouterr().err
+        assert main([*args, "--coin-cap-pct", "0"]) == EXIT_ERROR
+        assert main([*args, "--coin-cap-pct", "101"]) == EXIT_ERROR
 
     def test_the_200_day_average_is_fetched_before_the_window(self, tmp_path, monkeypatch):
         requested = []
