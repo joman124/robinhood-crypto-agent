@@ -44,9 +44,12 @@ KIND_EXECUTION = "execution"
 KIND_PNL = "pnl_observation"
 KIND_KILL_SWITCH = "kill_switch"
 KIND_NOTE = "note"
+#: One UTC day of the forward test's paper account (``shadow.py``). Paper, not
+#: a proposal: it has no proposal id, and nothing can approve or execute it.
+KIND_SHADOW_DAY = "shadow_day"
 
 VALID_KINDS = frozenset(
-    {KIND_PROPOSAL, KIND_EXECUTION, KIND_PNL, KIND_KILL_SWITCH, KIND_NOTE}
+    {KIND_PROPOSAL, KIND_EXECUTION, KIND_PNL, KIND_KILL_SWITCH, KIND_NOTE, KIND_SHADOW_DAY}
 )
 
 

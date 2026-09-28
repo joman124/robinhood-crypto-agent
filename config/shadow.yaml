@@ -1,0 +1,31 @@
+# The forward test: `rhca run` keeps the split account on paper from `start`
+# (docs/strategy.md, "The forward test"). It never proposes and never orders:
+# after each UTC daily close it writes one `shadow_day` record to the audit log,
+# and `rhca shadow` reports on it.
+#
+# Set by the owner, 2026-09-28: $250 held long-term and $250 in the breakout.
+# Changing anything here restarts the test, so treat it like the other config
+# files -- a deliberate change by the owner, never a side effect. Delete the
+# file to turn the forward test off.
+
+shadow:
+  # The first UTC daily close the test counts: the day after the last bar any
+  # backtest in docs/strategy.md had seen. Both rules were fixed before it.
+  start: 2026-09-28
+
+  capital: 500
+
+  # Percent of capital in the long-term sleeve; the rest trades the breakout.
+  long_pct: 50
+
+  # How the long-term sleeve buys: dip (buy low -- a weekly tranche only under
+  # the 200-day average), dca (a weekly tranche whatever the price) or lump.
+  long_mode: dip
+
+  # The coins, for both sleeves. These reach past the watchlist on purpose: the
+  # forward test reads Coinbase's public daily closes and trades nothing.
+  symbols:
+    - BTC-USD
+    - ETH-USD
+    - SOL-USD
+    - XRP-USD

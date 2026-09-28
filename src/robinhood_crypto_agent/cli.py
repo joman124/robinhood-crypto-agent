@@ -20,7 +20,8 @@ how a fabricated fill ends up in an audit log.
 pairs from Robinhood's Crypto API with a read-only client and runs the trend
 ladder on every closed bar (see ``runner``). Balance and holdings are the
 Agentic account's, as ``rhca ingest`` last cached them. It proposes; it cannot
-order. Its proposals go through the same ``rhca approve`` gate.
+order. Its proposals go through the same ``rhca approve`` gate. It also keeps
+the forward test's paper account (``shadow``), which ``rhca shadow`` reports.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from . import dashboard as dashboard_mod
 from . import portfolio_backtest as portfolio_mod
 from . import reports
 from . import runner as runner_mod
+from . import shadow as shadow_mod
 from .agent import Agent, MarketState
 from .audit import AuditLog, day_from
 from .bootstrap import fetch_coinbase_history
@@ -68,6 +70,8 @@ from .serde import proposal_from_dict
 from .store import PriceStore, StateCache
 from .store.state import SECTION_CRYPTO_BUYING_POWER
 from .strategy.breakout import Breakout
+from .strategy.hodl import MODES as LONG_MODES
+from .strategy.hodl import Accumulate
 from .strategy.ladder import describe_steps
 from .symbols import canonical
 
@@ -273,6 +277,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     print()
 
     for line in describe_ladder(config, audit, state):
+        print(line)
+    print()
+
+    for line in shadow_mod.describe_status(config, runner_mod.read_json(config.shadow_path)):
         print(line)
     print()
 
@@ -1072,9 +1080,10 @@ def describe_ingested_balance(state: StateCache) -> str:
 
 
 BREAKOUT = "breakout"
-#: What --strategies accepts: the per-coin strategies, and the breakout, which
-#: runs as one account across every symbol.
-BACKTEST_STRATEGIES = (*backtest_mod.STRATEGY_NAMES, BREAKOUT)
+SPLIT = "split"
+#: What --strategies accepts: the per-coin strategies, and the breakout and the
+#: split, which run as one account across every symbol.
+BACKTEST_STRATEGIES = (*backtest_mod.STRATEGY_NAMES, BREAKOUT, SPLIT)
 
 #: How long fetched backtest history is reused before it is fetched again.
 BACKTEST_CACHE_HOURS = 6
@@ -1153,7 +1162,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         )
     per_coin = [s for s in strategies if s in backtest_mod.STRATEGY_NAMES]
     rule = None
-    if BREAKOUT in strategies:
+    if BREAKOUT in strategies or SPLIT in strategies:
         try:
             rule = Breakout(
                 risk_pct=to_decimal(args.risk_pct, field="risk-pct"),
@@ -1168,6 +1177,9 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     capital = to_decimal(args.capital, field="capital")
     if capital <= 0:
         raise AgentError("--capital must be positive")
+    plan, long_pct, long_symbols = None, Decimal("50"), None
+    if SPLIT in strategies:
+        plan, long_pct, long_symbols = split_settings(args, symbols, capital, config)
 
     trend_days = config.strategy.trend_days if args.trend_days is None else args.trend_days
     if trend_days < 0:
@@ -1176,8 +1188,13 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         raise AgentError("--roll-window must be 0 (off) or days, and --roll-step positive")
     interval = config.strategy.bar_interval_minutes
     # Days of history fetched before the window, only to warm up averages: the
-    # ladder's trend average, and the breakout's 100-day one.
-    warmup_days = max(trend_days, rule.warmup_days + 2 if rule else 0)
+    # ladder's trend average, the breakout's 100-day one, and the long-term
+    # sleeve's 200-day one.
+    warmup_days = max(
+        trend_days,
+        rule.warmup_days + 2 if rule else 0,
+        plan.average_days + 1 if plan else 0,
+    )
 
     # The window traded stays the same whatever the warm-up.
     series: dict[str, list[Candle]] = {}
@@ -1234,16 +1251,32 @@ def cmd_backtest(args: argparse.Namespace) -> int:
                 trend_days=trend_days,
             )
 
-    breakout = None
-    if rule is not None:
-        prepared = portfolio_mod.prepare(full, rule)
+    breakout = split = None
+    min_trade = config.risk.min_notional_per_trade_usd
+    prepared = portfolio_mod.prepare(full, rule) if rule is not None else {}
+    if rule is not None and BREAKOUT in strategies:
         breakout = portfolio_mod.evaluate(
             prepared,
             rule,
             capital=capital,
             round_trip_pct=round_trip,
             start=window_start,
-            min_trade=config.risk.min_notional_per_trade_usd,
+            min_trade=min_trade,
+        )
+    if rule is not None and plan is not None:
+        missing = sorted(set(long_symbols or ()) - set(prepared))
+        if missing:
+            raise AgentError(f"--long-symbols: no history loaded for {', '.join(missing)}")
+        split = portfolio_mod.evaluate_split(
+            prepared,
+            rule,
+            plan,
+            capital=capital,
+            long_pct=long_pct,
+            round_trip_pct=round_trip,
+            start=window_start,
+            min_trade=min_trade,
+            long_symbols=long_symbols,
         )
 
     if args.json:
@@ -1252,6 +1285,8 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         }
         if breakout is not None:
             payload[BREAKOUT] = portfolio_mod.summary(breakout)
+        if split is not None:
+            payload[SPLIT] = portfolio_mod.split_summary(split)
         print(json.dumps(payload, indent=2))
         return EXIT_OK
     if per_coin:
@@ -1265,10 +1300,16 @@ def cmd_backtest(args: argparse.Namespace) -> int:
                 trend_days=trend_days,
             )
         )
+    printed = bool(per_coin)
     if breakout is not None and rule is not None:
-        if per_coin:
+        if printed:
             print()
         print(portfolio_mod.render(breakout, rule))
+        printed = True
+    if split is not None and rule is not None:
+        if printed:
+            print()
+        print(portfolio_mod.render_split(split, rule))
     if args.roll_window:
         window = timedelta(days=args.roll_window)
         step = timedelta(days=args.roll_step)
@@ -1285,7 +1326,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
             )
             print()
             print(backtest_mod.render_rolling(windows, window=window, step=step))
-        if rule is not None:
+        if rule is not None and breakout is not None:
             rolling = portfolio_mod.run_rolling(
                 series,
                 prepared,
@@ -1294,11 +1335,77 @@ def cmd_backtest(args: argparse.Namespace) -> int:
                 step=step,
                 capital=capital,
                 round_trip_pct=round_trip,
-                min_trade=config.risk.min_notional_per_trade_usd,
+                min_trade=min_trade,
             )
             print()
             print(portfolio_mod.render_rolling(rolling, window=window, step=step))
+        if rule is not None and plan is not None:
+            rolling_split = portfolio_mod.run_rolling_split(
+                series,
+                prepared,
+                rule,
+                plan,
+                window=window,
+                step=step,
+                capital=capital,
+                long_pct=long_pct,
+                round_trip_pct=round_trip,
+                min_trade=min_trade,
+                long_symbols=long_symbols,
+            )
+            print()
+            print(portfolio_mod.render_rolling_split(rolling_split, window=window, step=step))
     return EXIT_OK
+
+
+def split_settings(
+    args: argparse.Namespace, symbols: Sequence[str], capital: Decimal, config: AgentConfig
+) -> tuple[Accumulate, Decimal, list[str] | None]:
+    """The split's long-term plan, its share of --capital, and its coins."""
+    try:
+        plan = Accumulate(mode=args.long_mode)
+    except ValueError as exc:
+        raise AgentError(f"--long-mode: {exc}") from exc
+    long_pct = to_decimal(args.long_pct, field="long-pct")
+    if not 0 < long_pct < 100:
+        raise AgentError("--long-pct must be strictly between 0 and 100")
+    long_symbols = None
+    if args.long_symbols:
+        long_symbols = [canonical(s) for s in args.long_symbols.split(",") if s.strip()]
+        outside = sorted(set(long_symbols) - set(symbols))
+        if outside:
+            raise AgentError(f"--long-symbols must be among --symbols; not {', '.join(outside)}")
+    coins = len(long_symbols or symbols)
+    # The weekly rows buy in tranches; one under the minimum trade would be
+    # refused live, so it is refused here too.
+    tranche = capital * long_pct / 100 / coins / Accumulate().tranches
+    if tranche < config.risk.min_notional_per_trade_usd:
+        raise AgentError(
+            f"the long-term sleeve's weekly tranche would be ${round_money(tranche)}, under the "
+            f"${config.risk.min_notional_per_trade_usd} minimum trade: raise --capital or "
+            "--long-pct, or pass fewer --long-symbols"
+        )
+    return plan, long_pct, long_symbols
+
+
+def cmd_shadow(args: argparse.Namespace) -> int:
+    """The forward test's paper account, replayed from Coinbase's daily closes."""
+    config = load_config(args.config_dir, data_dir=args.data_dir)
+    print(shadow_mod.report(config, AuditLog(config.audit_path)))
+    return EXIT_OK
+
+
+def describe_forward_test(config: AgentConfig) -> str:
+    """The ``rhca run`` banner's line for the forward test."""
+    shadow = config.shadow
+    if shadow is None:
+        return "off (no config/shadow.yaml)"
+    _, plan = shadow_mod.rules(config)
+    return (
+        f"paper split from the {shadow.start:%Y-%m-%d} close: ${round_money(shadow.long_capital)} "
+        f"{plan.label} + ${round_money(shadow.short_capital)} breakout on "
+        f"{', '.join(shadow.symbols)}; never proposes"
+    )
 
 
 def _keep_awake() -> bool:
@@ -1364,6 +1471,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     print(f"  rule             : trend ladder, {describe_steps(ladder.steps)}; {trend}")
     print("  risk             : 14 rules, then a human approves each proposal by id")
+    print(f"  forward test     : {describe_forward_test(config)}")
     print(f"  dashboard sync   : {'on' if services.dashboard else 'off'}")
     # Bootstrapping here rather than asking for it beforehand: the trend
     # average needs weeks of bars, and every restart leaves a gap between the
@@ -1425,6 +1533,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.set_defaults(func=cmd_run)
 
+    shadow = sub.add_parser(
+        "shadow",
+        help="the forward test: the split account on paper, against its bar (never orders)",
+    )
+    shadow.set_defaults(func=cmd_shadow)
+
     bootstrap = sub.add_parser(
         "bootstrap-history",
         help="import Coinbase bars so the trend average and anchor exist at once",
@@ -1433,14 +1547,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     backtest = sub.add_parser(
         "backtest",
-        help="replay the trend ladder, the breakout, and their baselines on history",
+        help="replay the trend ladder, the breakout, the split, and their baselines on history",
     )
     backtest.add_argument("--symbols", default=None, help="comma-separated; default the watchlist")
     backtest.add_argument("--days", type=int, default=90, help="history to fetch (default 90)")
     backtest.add_argument(
         "--strategies",
         default="ladder,trend,hold,breakout",
-        help="any of ladder, trend, hold, breakout",
+        help="any of ladder, trend, hold, breakout, split",
     )
     backtest.add_argument(
         "--ladder",
@@ -1465,7 +1579,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backtest.add_argument(
         "--capital", default=str(portfolio_mod.DEFAULT_CAPITAL),
-        help="the breakout's starting account, dollars (default 500)",
+        help="the breakout's (or the split's) starting account, dollars (default 500)",
     )
     backtest.add_argument(
         "--risk-pct", default="1",
@@ -1474,6 +1588,18 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument(
         "--max-weight-pct", default=None,
         help="the breakout's cap per coin, percent (default: risk_limits.yaml's, 10)",
+    )
+    backtest.add_argument(
+        "--long-pct", default="50",
+        help="split: the share of --capital held long-term, percent (default 50)",
+    )
+    backtest.add_argument(
+        "--long-mode", default="dip", choices=LONG_MODES,
+        help="split: how the long-term sleeve buys -- dip (buy low, the default), dca, lump",
+    )
+    backtest.add_argument(
+        "--long-symbols", default=None,
+        help="split: the long-term sleeve's coins (default: every --symbols coin)",
     )
     backtest.add_argument("--refresh", action="store_true", help="refetch instead of the cache")
     backtest.add_argument(

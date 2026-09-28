@@ -37,6 +37,18 @@ ledger rebuilds it from the audit log on every pass, so a restart changes
 nothing, and the ladder only ever sells what its own recorded fills bought.
 `rhca backtest` drives the same function over history.
 
+The loop also keeps the forward test (`shadow.py`, `config/shadow.yaml`):
+
+```
+Coinbase daily closes ─► replay the split from its start date ─► shadow_day record
+                         (portfolio_backtest.run_split)           + Robinhood bid/ask
+```
+
+After each UTC daily close it replays the paper split account from its start
+date and writes one `shadow_day` record. The replay is the backtest code, so
+the paper account cannot drift from it. A `shadow_day` is not a proposal and
+has no proposal id: nothing reaches the approval gate from it.
+
 ## The pipeline
 
 ```
@@ -75,6 +87,10 @@ next step would buy or sell.
 | `runner.py` | `rhca run`: cadences, once-per-bar dedupe, heartbeat, per-task failure isolation |
 | `bootstrap.py` | Coinbase candles: the 52 days the trend average needs, at once |
 | `backtest.py` | `rhca backtest`: the ladder against its baselines, whole and in rolling windows |
+| `strategy/breakout.py` | The breakout: a daily trend rule, backtest and paper only |
+| `strategy/hodl.py` | The long-term sleeve: when to buy (buy low, weekly DCA, lump sum); never sells |
+| `portfolio_backtest.py` | The breakout and the split, each as one account across coins |
+| `shadow.py` | The forward test: the split on paper, one `shadow_day` per daily close; `rhca shadow` |
 | `outcomes.py` | The retired System 1's six-hour hit rate, kept for its records |
 | `net.py` | The one HTTP helper: timeouts, size cap, error wording |
 

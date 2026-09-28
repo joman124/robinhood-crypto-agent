@@ -17,12 +17,16 @@ Two numbers answer whether it has an edge, whatever the position size:
   how much is risked.
 - **Return over max drawdown**, against hold's. Raw return rewards whoever
   held the most coin through a rally.
+
+The **split** runs one account as two sleeves that never pass cash between
+them: a long-term one that buys and holds (``strategy/hodl.py``) and a
+short-term one that trades the breakout, sized off its own sleeve.
 """
 
 from __future__ import annotations
 
 import statistics
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Mapping, Sequence
@@ -31,6 +35,7 @@ from .backtest import STRESS_FACTOR, money, pct, window_starts
 from .models import Candle
 from .numeric import ZERO
 from .strategy.breakout import Breakout, DayView, daily_bars, day_views
+from .strategy.hodl import DIP, LUMP, MODES, Accumulate, moving_averages
 
 DEFAULT_CAPITAL = Decimal("500")
 DEFAULT_MIN_TRADE = Decimal("5")
@@ -164,6 +169,12 @@ class PortfolioResult:
             return ZERO
         return sum(self.exposure, ZERO) / Decimal(len(self.exposure)) * ONE_HUNDRED
 
+    @property
+    def final_exposure_pct(self) -> Decimal:
+        """The share in coins on the last day: for a sleeve that only buys,
+        what is left is cash it never spent."""
+        return self.exposure[-1] * ONE_HUNDRED if self.exposure else ZERO
+
     def pnl_by_symbol(self) -> dict[str, Decimal]:
         totals = dict.fromkeys(self.symbols, ZERO)
         for trade in self.trades:
@@ -270,6 +281,70 @@ def run_breakout(
     return result
 
 
+def run_accumulate(
+    prepared: Mapping[str, Prepared],
+    plan: Accumulate,
+    *,
+    capital: Decimal = DEFAULT_CAPITAL,
+    round_trip_pct: Decimal = Decimal("1.9"),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    min_trade: Decimal = DEFAULT_MIN_TRADE,
+    name: str | None = None,
+) -> PortfolioResult:
+    """The long-term sleeve: each coin's even share bought in tranches, as
+    ``plan`` says, and never sold. Every tranche is one open trade, marked at
+    the bid on the last day."""
+    half = round_trip_pct / Decimal(200)
+    symbols = sorted(prepared)
+    result = PortfolioResult(name or f"long-term: {plan.label}", symbols, capital, round_trip_pct)
+    days, closes = _days(prepared, start, end)
+    tranche = capital / Decimal(len(symbols)) / Decimal(plan.tranche_count) if symbols else ZERO
+    averages = (
+        {s: moving_averages(p.daily, plan.average_days) for s, p in prepared.items()}
+        if plan.mode == DIP
+        else {}
+    )
+    cash = capital
+    held = dict.fromkeys(symbols, ZERO)
+    bought = dict.fromkeys(symbols, 0)
+    last_buy: dict[str, datetime] = {}
+    last_close: dict[str, Decimal] = {}
+    buys: list[tuple[str, datetime, Decimal, Decimal]] = []
+    for day in days:
+        for symbol in symbols:
+            close = closes[symbol].get(day)
+            if close is None:
+                continue
+            last_close[symbol] = close
+            if bought[symbol] >= plan.tranche_count or not plan.due(
+                day=day,
+                close=close,
+                average=averages.get(symbol, {}).get(day),
+                last_buy=last_buy.get(symbol),
+            ):
+                continue
+            dollars = min(tranche, cash)
+            if dollars <= ZERO or dollars < min_trade:
+                continue
+            quantity = dollars / (close * (1 + half))
+            cash -= dollars
+            held[symbol] += quantity
+            bought[symbol] += 1
+            last_buy[symbol] = day
+            buys.append((symbol, day, quantity, dollars))
+        worth = sum(
+            (q * last_close[s] * (1 - half) for s, q in held.items() if q > ZERO), ZERO
+        )
+        account = cash + worth
+        result.equity_curve.append((day, account))
+        result.exposure.append(worth / account if account > ZERO else ZERO)
+    for symbol, day, quantity, dollars in sorted(buys, key=lambda b: (b[0], b[1])):
+        proceeds = quantity * last_close[symbol] * (1 - half)
+        result.trades.append(Trade(symbol, day, None, quantity, dollars, proceeds, ZERO))
+    return result
+
+
 def run_equal_hold(
     prepared: Mapping[str, Prepared],
     *,
@@ -280,33 +355,77 @@ def run_equal_hold(
 ) -> PortfolioResult:
     """The baseline: the same money split evenly across the coins on their
     first day in the window, and held."""
-    half = round_trip_pct / Decimal(200)
-    symbols = sorted(prepared)
-    result = PortfolioResult("hold (equal weight)", symbols, capital, round_trip_pct)
-    days, closes = _days(prepared, start, end)
-    share = capital / Decimal(len(symbols)) if symbols else ZERO
-    cash = capital
-    held: dict[str, tuple[Decimal, datetime]] = {}
-    last_close: dict[str, Decimal] = {}
-    for day in days:
-        for symbol in symbols:
-            close = closes[symbol].get(day)
-            if close is None:
-                continue
-            last_close[symbol] = close
-            if symbol not in held:
-                held[symbol] = (share / (close * (1 + half)), day)
-                cash -= share
-        worth = sum(
-            (q * last_close[s] * (1 - half) for s, (q, _) in held.items()), ZERO
-        )
-        account = cash + worth
-        result.equity_curve.append((day, account))
-        result.exposure.append(worth / account if account > ZERO else ZERO)
-    for symbol, (quantity, bought) in sorted(held.items()):
-        proceeds = quantity * last_close[symbol] * (1 - half)
-        result.trades.append(Trade(symbol, bought, None, quantity, share, proceeds, ZERO))
+    return run_accumulate(
+        prepared,
+        Accumulate(mode=LUMP),
+        capital=capital,
+        round_trip_pct=round_trip_pct,
+        start=start,
+        end=end,
+        min_trade=ZERO,
+        name="hold (equal weight)",
+    )
+
+
+def combine(name: str, parts: Sequence[PortfolioResult]) -> PortfolioResult:
+    """One account made of sleeves that keep their own cash: each day's
+    equity is the sum of theirs, and its exposure their coins over that sum."""
+    symbols = sorted({s for part in parts for s in part.symbols})
+    trip = parts[0].round_trip_pct if parts else ZERO
+    result = PortfolioResult(name, symbols, sum((p.capital for p in parts), ZERO), trip)
+    curves = [
+        {day: (equity, exposure) for (day, equity), exposure in zip(p.equity_curve, p.exposure, strict=True)}
+        for p in parts
+    ]
+    latest = [(p.capital, ZERO) for p in parts]
+    for day in sorted({day for p in parts for day, _ in p.equity_curve}):
+        for index, curve in enumerate(curves):
+            if day in curve:
+                latest[index] = curve[day]
+        equity = sum((e for e, _ in latest), ZERO)
+        in_coins = sum((e * x for e, x in latest), ZERO)
+        result.equity_curve.append((day, equity))
+        result.exposure.append(in_coins / equity if equity > ZERO else ZERO)
+    result.trades = [trade for part in parts for trade in part.trades]
     return result
+
+
+@dataclass
+class SplitResult:
+    long: PortfolioResult
+    short: PortfolioResult
+    combined: PortfolioResult
+
+
+def _subset(prepared: Mapping[str, Prepared], symbols: Sequence[str] | None) -> dict[str, Prepared]:
+    return {s: p for s, p in prepared.items() if symbols is None or s in symbols}
+
+
+def run_split(
+    prepared: Mapping[str, Prepared],
+    rule: Breakout,
+    plan: Accumulate,
+    *,
+    capital: Decimal = DEFAULT_CAPITAL,
+    long_pct: Decimal = Decimal("50"),
+    round_trip_pct: Decimal = Decimal("1.9"),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    min_trade: Decimal = DEFAULT_MIN_TRADE,
+    long_symbols: Sequence[str] | None = None,
+) -> SplitResult:
+    """``long_pct`` of ``capital`` bought and held as ``plan`` says, on
+    ``long_symbols`` (default: every coin); the rest trading the breakout on
+    every coin, sized off its own sleeve. Never rebalanced."""
+    if not ZERO < long_pct < ONE_HUNDRED:
+        raise ValueError("the long-term share must be a percent strictly between 0 and 100")
+    long_capital = capital * long_pct / ONE_HUNDRED
+    kwargs = dict(round_trip_pct=round_trip_pct, start=start, end=end, min_trade=min_trade)
+    long = run_accumulate(_subset(prepared, long_symbols), plan, capital=long_capital, **kwargs)
+    short = run_breakout(
+        prepared, rule, capital=capital - long_capital, name="short-term: breakout", **kwargs
+    )
+    return SplitResult(long, short, combine(f"split: {plan.label} + breakout", [long, short]))
 
 
 @dataclass
@@ -474,25 +593,35 @@ def run_rolling(
     return out
 
 
+def _rolling_row(
+    name: str, values: Sequence[float], drawdowns: Sequence[float], beat: str, *, width: int = 22
+) -> str:
+    count = len(values)
+    positive = sum(1 for v in values if v > 0)
+    return (
+        f"  {name:<{width}}{count:>8}{f'{positive}/{count}':>10}{beat:>11}"
+        f"{pct(statistics.median(values)):>9}{pct(min(values)):>9}{pct(max(values)):>9}"
+        f"{pct(-statistics.median(drawdowns)):>12}{pct(-max(drawdowns)):>11}"
+    )
+
+
+def _rolling_header(width: int = 22) -> str:
+    return (
+        f"  {'strategy':<{width}}{'windows':>8}{'positive':>10}{'beat hold':>11}{'median':>9}"
+        f"{'worst':>9}{'best':>9}{'median dd':>12}{'worst dd':>11}"
+    )
+
+
+def _beat(values: Sequence[float], hold: Sequence[float]) -> str:
+    return f"{sum(1 for v, h in zip(values, hold, strict=True) if v > h)}/{len(values)}"
+
+
 def render_rolling(rolling: RollingBreakout, *, window: timedelta, step: timedelta) -> str:
     count = len(rolling.returns)
     if count == 0:
         return (
             f"BREAKOUT ROLLING WINDOWS: no whole {window.days}-day window fits in the history."
         )
-
-    def row(name: str, values: list[float], drawdowns: list[float], beat: str) -> str:
-        positive = sum(1 for v in values if v > 0)
-        return (
-            f"  {name:<22}{count:>8}{f'{positive}/{count}':>10}{beat:>11}"
-            f"{pct(statistics.median(values)):>9}{pct(min(values)):>9}{pct(max(values)):>9}"
-            f"{pct(-statistics.median(drawdowns)):>12}{pct(-max(drawdowns)):>11}"
-        )
-
-    beat = sum(1 for r, h in zip(rolling.returns, rolling.hold_returns, strict=True) if r > h)
-    beat_stressed = sum(
-        1 for r, h in zip(rolling.stressed_returns, rolling.hold_returns, strict=True) if r > h
-    )
     return "\n".join(
         [
             "=" * 110,
@@ -501,14 +630,229 @@ def render_rolling(rolling: RollingBreakout, *, window: timedelta, step: timedel
             f"{window.days}-day windows, a new one every {step.days} days: {count} "
             f"window{'' if count == 1 else 's'}. Each starts in cash, with its averages warm.",
             f"Stressed at {STRESS_FACTOR}x the round trip, the breakout beat hold in "
-            f"{beat_stressed}/{count}.",
+            f"{_beat(rolling.stressed_returns, rolling.hold_returns)}.",
             "",
-            f"  {'strategy':<22}{'windows':>8}{'positive':>10}{'beat hold':>11}{'median':>9}"
-            f"{'worst':>9}{'best':>9}{'median dd':>12}{'worst dd':>11}",
-            row("breakout", rolling.returns, rolling.drawdowns, f"{beat}/{count}"),
-            row("hold (equal weight)", rolling.hold_returns, rolling.hold_drawdowns, "-"),
+            _rolling_header(),
+            _rolling_row(
+                "breakout", rolling.returns, rolling.drawdowns,
+                _beat(rolling.returns, rolling.hold_returns),
+            ),
+            _rolling_row("hold (equal weight)", rolling.hold_returns, rolling.hold_drawdowns, "-"),
         ]
     )
+
+
+# -- the split ---------------------------------------------------------------
+
+
+@dataclass
+class SplitReport:
+    plan: Accumulate
+    long_symbols: list[str]
+    split: SplitResult
+    split_stressed: SplitResult
+    #: The long-term sleeve bought each way, (normal, stressed), by mode.
+    long_variants: dict[str, tuple[PortfolioResult, PortfolioResult]]
+    #: The whole account in the breakout, and in hold, (normal, stressed).
+    all_breakout: tuple[PortfolioResult, PortfolioResult]
+    all_hold: tuple[PortfolioResult, PortfolioResult]
+
+
+def evaluate_split(
+    prepared: Mapping[str, Prepared],
+    rule: Breakout,
+    plan: Accumulate,
+    *,
+    capital: Decimal = DEFAULT_CAPITAL,
+    long_pct: Decimal = Decimal("50"),
+    round_trip_pct: Decimal = Decimal("1.9"),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    min_trade: Decimal = DEFAULT_MIN_TRADE,
+    long_symbols: Sequence[str] | None = None,
+) -> SplitReport:
+    """The split, and what it is weighed against: the long-term sleeve bought
+    the other two ways, and the whole account in the breakout or in hold."""
+    trips = (round_trip_pct, round_trip_pct * STRESS_FACTOR)
+    window = dict(start=start, end=end)
+    split, split_stressed = (
+        run_split(
+            prepared, rule, plan, capital=capital, long_pct=long_pct, round_trip_pct=trip,
+            min_trade=min_trade, long_symbols=long_symbols, **window,
+        )
+        for trip in trips
+    )
+    long_prepared = _subset(prepared, long_symbols)
+    variants: dict[str, tuple[PortfolioResult, PortfolioResult]] = {}
+    for mode in MODES:
+        if mode == plan.mode:
+            variants[mode] = (split.long, split_stressed.long)
+            continue
+        other = replace(plan, mode=mode)
+        base, stressed = (
+            run_accumulate(
+                long_prepared, other, capital=split.long.capital, round_trip_pct=trip,
+                min_trade=min_trade, **window,
+            )
+            for trip in trips
+        )
+        variants[mode] = (base, stressed)
+    breakout_runs = [
+        run_breakout(
+            prepared, rule, capital=capital, round_trip_pct=trip, min_trade=min_trade,
+            name="all in the breakout", **window,
+        )
+        for trip in trips
+    ]
+    hold_runs = [
+        run_equal_hold(prepared, capital=capital, round_trip_pct=trip, **window) for trip in trips
+    ]
+    for run in hold_runs:
+        run.name = "all in hold (lump sum)"
+    return SplitReport(
+        plan=plan,
+        long_symbols=sorted(long_prepared),
+        split=split,
+        split_stressed=split_stressed,
+        long_variants=variants,
+        all_breakout=(breakout_runs[0], breakout_runs[1]),
+        all_hold=(hold_runs[0], hold_runs[1]),
+    )
+
+
+_SPLIT_WIDTH = 30
+
+
+def _split_line(result: PortfolioResult, stressed: PortfolioResult) -> str:
+    return (
+        f"  {result.name:<{_SPLIT_WIDTH}}{money(result.capital):>10}{pct(result.total_return_pct):>9}"
+        f"{pct(-result.max_drawdown_pct):>9}{_ratio(result.return_over_drawdown):>8}"
+        f"{float(result.average_exposure_pct):>9.0f}%{float(result.final_exposure_pct):>8.0f}%"
+        f"{money(result.final_equity):>11}{pct(stressed.total_return_pct):>10}"
+    )
+
+
+def render_split(report: SplitReport, rule: Breakout) -> str:
+    split = report.split
+    combined, long, short = split.combined, split.long, split.short
+    span = (
+        f", {combined.start:%Y-%m-%d} to {combined.end:%Y-%m-%d}"
+        if combined.start and combined.end
+        else ""
+    )
+    trip = combined.round_trip_pct
+    lines = [
+        "=" * 110,
+        "SPLIT ACCOUNT: LONG-TERM + SHORT-TERM",
+        "=" * 110,
+        f"One {money(combined.capital)} account{span}, in two sleeves that never pass cash "
+        "between them:",
+        f"  long-term  {money(long.capital)} in {', '.join(report.long_symbols)}. "
+        f"{report.plan.describe()}",
+        f"  short-term {money(short.capital)} trading the breakout on {', '.join(short.symbols)}, "
+        "sized off its own sleeve:",
+        f"             {rule.describe()}",
+        f"Every fill crosses half the {trip}% round trip; 'stressed' re-runs at "
+        f"{trip * STRESS_FACTOR}%. 'in coins' is the average share held in coins,",
+        "'at end' the share on the last day: the rest is cash, which for a long-term row is "
+        "money it never spent.",
+        "",
+        f"  {'account':<{_SPLIT_WIDTH}}{'capital':>10}{'return':>9}{'max dd':>9}{'ret/dd':>8}"
+        f"{'in coins':>10}{'at end':>9}{'final':>11}{'stressed':>10}",
+    ]
+    for mode in MODES:
+        base, stressed = report.long_variants[mode]
+        lines.append(_split_line(base, stressed))
+    lines += [
+        _split_line(short, report.split_stressed.short),
+        _split_line(combined, report.split_stressed.combined),
+        _split_line(*report.all_breakout),
+        _split_line(*report.all_hold),
+        "",
+        f"The split buys its long-term sleeve the '{report.plan.label}' way; the other two "
+        "long-term rows show the same sleeve bought differently.",
+        "A backtest authorizes nothing. Running a split for real is the owner's decision, "
+        "inside config/risk_limits.yaml",
+        "(docs/strategy.md, 'The split').",
+    ]
+    return "\n".join(lines)
+
+
+@dataclass
+class RollingSplit:
+    starts: list[datetime]
+    #: Each row's (return, max drawdown) per window, in percent.
+    rows: dict[str, list[tuple[float, float]]]
+    hold: list[tuple[float, float]]
+
+
+def run_rolling_split(
+    series: Mapping[str, Sequence[Candle]],
+    prepared: Mapping[str, Prepared],
+    rule: Breakout,
+    plan: Accumulate,
+    *,
+    window: timedelta,
+    step: timedelta,
+    capital: Decimal = DEFAULT_CAPITAL,
+    long_pct: Decimal = Decimal("50"),
+    round_trip_pct: Decimal = Decimal("1.9"),
+    min_trade: Decimal = DEFAULT_MIN_TRADE,
+    long_symbols: Sequence[str] | None = None,
+) -> RollingSplit:
+    """The split, each sleeve, and hold over every window, each starting in cash."""
+    out = RollingSplit([], {}, [])
+    for start in window_starts(series, window=window, step=step):
+        end = start + window
+        split = run_split(
+            prepared, rule, plan, capital=capital, long_pct=long_pct,
+            round_trip_pct=round_trip_pct, start=start, end=end, min_trade=min_trade,
+            long_symbols=long_symbols,
+        )
+        if not split.combined.equity_curve:
+            continue
+        hold = run_equal_hold(
+            prepared, capital=capital, round_trip_pct=round_trip_pct, start=start, end=end
+        )
+        out.starts.append(start)
+        for result in (split.combined, split.long, split.short):
+            out.rows.setdefault(result.name, []).append(
+                (float(result.total_return_pct), float(result.max_drawdown_pct))
+            )
+        out.hold.append((float(hold.total_return_pct), float(hold.max_drawdown_pct)))
+    return out
+
+
+def render_rolling_split(rolling: RollingSplit, *, window: timedelta, step: timedelta) -> str:
+    count = len(rolling.starts)
+    if count == 0:
+        return f"SPLIT ROLLING WINDOWS: no whole {window.days}-day window fits in the history."
+    hold_returns = [r for r, _ in rolling.hold]
+    lines = [
+        "=" * 110,
+        "SPLIT ROLLING WINDOWS",
+        "=" * 110,
+        f"{window.days}-day windows, a new one every {step.days} days: {count} "
+        f"window{'' if count == 1 else 's'}. Each starts in cash; each sleeve's return is on "
+        "its own money.",
+        "",
+        _rolling_header(_SPLIT_WIDTH),
+    ]
+    for name, values in rolling.rows.items():
+        returns = [r for r, _ in values]
+        lines.append(
+            _rolling_row(
+                name, returns, [d for _, d in values], _beat(returns, hold_returns),
+                width=_SPLIT_WIDTH,
+            )
+        )
+    lines.append(
+        _rolling_row(
+            "hold (equal weight)", hold_returns, [d for _, d in rolling.hold], "-",
+            width=_SPLIT_WIDTH,
+        )
+    )
+    return "\n".join(lines)
 
 
 def _num(value: Decimal | None, places: int = 2) -> str | None:
@@ -548,4 +892,29 @@ def summary(report: BreakoutReport) -> dict[str, object]:
             if report.without_best
             else None
         ),
+    }
+
+
+def _sleeve_numbers(result: PortfolioResult) -> dict[str, object]:
+    return {
+        "capital": _num(result.capital),
+        **_numbers(result),
+        "final_exposure_pct": _num(result.final_exposure_pct),
+    }
+
+
+def split_summary(report: SplitReport) -> dict[str, object]:
+    """The split's numbers, JSON-safe."""
+    split = report.split
+    return {
+        "long_mode": report.plan.mode,
+        "long_symbols": report.long_symbols,
+        "start": split.combined.start.isoformat() if split.combined.start else None,
+        "end": split.combined.end.isoformat() if split.combined.end else None,
+        "split": _sleeve_numbers(split.combined),
+        "split_stressed": _sleeve_numbers(report.split_stressed.combined),
+        "long_term": {mode: _sleeve_numbers(base) for mode, (base, _) in report.long_variants.items()},
+        "short_term": _sleeve_numbers(split.short),
+        "all_breakout": _sleeve_numbers(report.all_breakout[0]),
+        "all_hold": _sleeve_numbers(report.all_hold[0]),
     }

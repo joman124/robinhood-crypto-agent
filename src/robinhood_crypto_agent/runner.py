@@ -4,6 +4,9 @@
                                                                             |
                                          logged, and synced to the dashboard
 
+    Coinbase daily closes -> the split account, on paper -> one shadow_day record
+                             (the forward test, config/shadow.yaml; ``shadow.py``)
+
 Each minute the loop re-runs the ladder on the last closed bar. What it wants
 -- a dip buy, a take-profit, the trend exit -- is logged once per bar as a
 proposal. A fresh one each bar keeps its price inside the approval gate's drift
@@ -12,6 +15,9 @@ tolerance for as long as the rule still wants it.
 "Shadow" means exactly one thing: there is no code path from here to an order.
 The Robinhood client is read-only, and a proposal is a row in the audit log
 that a human can take through the approval gate -- or not.
+
+The forward test is paper all the way down: it writes ``shadow_day`` records,
+never proposals, so nothing it does can reach the approval gate.
 
 Each task runs on its own cadence and fails on its own. A Robinhood 5xx is
 logged and retried next time; it never stops the loop. The heartbeat file
@@ -32,12 +38,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import dashboard as dashboard_mod
+from . import shadow as shadow_mod
 from .agent import Agent, MarketState, ladder_annotations
 from .audit import KIND_PROPOSAL, AuditLog
 from .config import AgentConfig
 from .errors import AgentError
 from .models import Proposal, parse_timestamp, utcnow
-from .numeric import format_decimal
+from .numeric import format_decimal, round_money
 from .robinhood import RobinhoodClient
 from .store import PriceStore, StateCache
 from .store.prices import floor_to_interval
@@ -54,6 +61,8 @@ class Services:
 
     robinhood: RobinhoodClient
     dashboard: tuple[str, str] | None = None
+    #: Daily bars for the forward test; ``None`` reads Coinbase's public candles.
+    daily_history: shadow_mod.Fetch | None = None
 
 
 class Runner:
@@ -86,10 +95,23 @@ class Runner:
             ("evaluate", pipeline.quote_interval_seconds, self._evaluate),
             ("sync", pipeline.sync_interval_seconds, self._sync),
         ]
+        self.shadow = (
+            shadow_mod.ShadowTracker(
+                config, self.audit, services.robinhood, fetch=services.daily_history
+            )
+            if config.shadow is not None
+            else None
+        )
+        if self.shadow is not None:
+            self._tasks.append(
+                ("forward test", shadow_mod.CHECK_INTERVAL_SECONDS, self._forward_test)
+            )
         self._due = {name: 0.0 for name, _, _ in self._tasks}
         self._started_at = utcnow()
         self._cycles = 0
-        self._counts = dict.fromkeys(("quotes", "candidates", "proposed", "errors"), 0)
+        self._counts = dict.fromkeys(
+            ("quotes", "candidates", "proposed", "forward_test_days", "errors"), 0
+        )
         self._last_error: dict[str, str] | None = None
         self._resume_from_audit()
 
@@ -201,6 +223,29 @@ class Runner:
             proposal.reason,
         )
 
+    def _forward_test(self) -> None:
+        """Record the latest UTC daily close of the paper split account, once."""
+        result = self.shadow.update() if self.shadow is not None else None
+        if result is None:
+            return
+        self._counts["forward_test_days"] += 1
+        write_json_atomic(self.config.shadow_path, shadow_mod.snapshot(result, self.config))
+        day = f"{result.through:%Y-%m-%d}"
+        fills = result.fills_on(result.through)
+        for fill in fills:
+            log.info(
+                "forward test (paper, not a proposal) %s close: %s %s %s $%s at %s",
+                day, fill.sleeve, fill.side, fill.symbol,
+                round_money(fill.dollars), format_decimal(fill.close),
+            )
+        log.info(
+            "forward test (paper) %s close: %s; split account $%s after %s close(s)",
+            day,
+            f"{len(fills)} paper fill(s)" if fills else "no paper fills",
+            round_money(result.split.combined.final_equity),
+            result.closes,
+        )
+
     def _sync(self) -> None:
         if self.services.dashboard is None:
             return
@@ -238,6 +283,7 @@ class Runner:
                 "services": {
                     "robinhood": True,
                     "dashboard": services.dashboard is not None,
+                    "forward_test": self.shadow is not None,
                 },
             },
         )
@@ -299,7 +345,13 @@ def describe_heartbeat(heartbeat: dict[str, Any] | None, *, stale_after_seconds:
         f"  services     : {enabled}",
         f"  this run     : {counts.get('quotes', 0)} quotes, "
         f"{counts.get('candidates', 0)} proposals logged "
-        f"({counts.get('proposed', 0)} passing risk), {counts.get('errors', 0)} errors",
+        f"({counts.get('proposed', 0)} passing risk), "
+        + (
+            f"{counts.get('forward_test_days', 0)} forward-test close(s) recorded, "
+            if services.get("forward_test")
+            else ""
+        )
+        + f"{counts.get('errors', 0)} errors",
     ]
     error = heartbeat.get("last_error")
     if isinstance(error, dict):

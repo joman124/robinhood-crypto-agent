@@ -20,6 +20,8 @@ from typing import Any
 from .errors import ConfigError
 from .models import ExecutionMode, parse_timestamp
 from .numeric import ZERO, to_decimal
+from .strategy.hodl import DIP
+from .strategy.hodl import MODES as LONG_MODES
 from .strategy.ladder import DEFAULT_STEPS, MODE_ANCHOR, Ladder, parse_steps, trend_bars
 from .symbols import canonical
 
@@ -246,6 +248,97 @@ class PipelineConfig:
 
 
 @dataclass(frozen=True)
+class ShadowConfig:
+    """The forward test (``config/shadow.yaml``): the split account on paper,
+    kept by ``rhca run`` from ``start``. It trades nothing, so its coins may
+    reach past the watchlist; changing any of it restarts the test."""
+
+    #: The first UTC daily close the test counts (midnight UTC of that day).
+    start: datetime
+    symbols: tuple[str, ...] = ("BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD")
+    capital: Decimal = Decimal("500")
+    #: The share of ``capital`` held long-term, percent; the rest trades the breakout.
+    long_pct: Decimal = Decimal("50")
+    long_mode: str = DIP
+    #: The long-term sleeve's coins; ``None`` holds every one of ``symbols``.
+    long_symbols: tuple[str, ...] | None = None
+
+    @classmethod
+    def from_mapping(cls, data: dict[str, Any] | None) -> "ShadowConfig | None":
+        """``None`` when there is no forward test configured."""
+        if not data:
+            return None
+        data = dict(data)
+        unknown = set(data) - set(cls.__dataclass_fields__)
+        if unknown:
+            raise ConfigError(f"unknown shadow setting(s): {', '.join(sorted(unknown))}")
+        if data.get("start") in (None, ""):
+            raise ConfigError("shadow.start is required: the first UTC daily close the test counts")
+        try:
+            start = _utc_day(data["start"])
+            kwargs: dict[str, Any] = {"start": start}
+            if data.get("symbols") is not None:
+                kwargs["symbols"] = _symbols(data["symbols"], "shadow.symbols")
+            if data.get("long_symbols") is not None:
+                kwargs["long_symbols"] = _symbols(data["long_symbols"], "shadow.long_symbols")
+            for name in ("capital", "long_pct"):
+                if data.get(name) is not None:
+                    kwargs[name] = to_decimal(data[name], field=name)
+            if data.get("long_mode") is not None:
+                kwargs["long_mode"] = str(data["long_mode"])
+        except (ValueError, ArithmeticError, TypeError) as exc:
+            raise ConfigError(f"shadow: {exc}") from exc
+        config = cls(**kwargs)
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if not self.symbols:
+            raise ConfigError("shadow.symbols must list at least one pair")
+        if self.capital <= ZERO:
+            raise ConfigError("shadow.capital must be positive")
+        if not ZERO < self.long_pct < Decimal(100):
+            raise ConfigError("shadow.long_pct must be strictly between 0 and 100")
+        if self.long_mode not in LONG_MODES:
+            raise ConfigError(f"shadow.long_mode must be one of {', '.join(LONG_MODES)}")
+        outside = set(self.long_symbols or ()) - set(self.symbols)
+        if outside:
+            raise ConfigError(
+                f"shadow.long_symbols must be among shadow.symbols; not {', '.join(sorted(outside))}"
+            )
+
+    @property
+    def long_capital(self) -> Decimal:
+        return self.capital * self.long_pct / Decimal(100)
+
+    @property
+    def short_capital(self) -> Decimal:
+        return self.capital - self.long_capital
+
+
+def _utc_day(value: Any) -> datetime:
+    """A date, or a timestamp floored to its UTC day, as midnight UTC."""
+    if isinstance(value, datetime):
+        moment = parse_timestamp(value)
+    elif isinstance(value, date):
+        moment = datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+    else:
+        text = str(value).strip()
+        moment = (
+            datetime.fromisoformat(text).replace(tzinfo=timezone.utc)
+            if len(text) == 10
+            else parse_timestamp(text)
+        )
+    return moment.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _symbols(value: Any, name: str) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{name} must be a list of pair symbols")
+    return tuple(dict.fromkeys(canonical(str(s)) for s in value))
+
+
+@dataclass(frozen=True)
 class AgentConfig:
     """Everything the agent needs to run, assembled from the config directory."""
 
@@ -255,6 +348,8 @@ class AgentConfig:
     risk: RiskLimits = field(default_factory=RiskLimits)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
+    #: The forward test; ``None`` when ``config/shadow.yaml`` is absent.
+    shadow: ShadowConfig | None = None
     data_dir: Path = DEFAULT_DATA_DIR
 
     @property
@@ -276,6 +371,11 @@ class AgentConfig:
     @property
     def heartbeat_path(self) -> Path:
         return self.data_dir / "heartbeat.json"
+
+    @property
+    def shadow_path(self) -> Path:
+        """The forward test's latest replay, for ``rhca status``."""
+        return self.data_dir / "shadow.json"
 
     def allows(self, symbol: str) -> bool:
         """Whether ``symbol`` is on the watchlist allowlist."""
@@ -314,6 +414,7 @@ def load_config(
     risk_raw = _read_yaml(config_dir / "risk_limits.yaml")
     strategy_raw = _read_yaml(config_dir / "strategy.yaml")
     pipeline_raw = _read_yaml(config_dir / "pipeline.yaml")
+    shadow_raw = _read_yaml(config_dir / "shadow.yaml")
 
     mode_raw = str(agent_raw.get("execution_mode", ExecutionMode.PROPOSE_ONLY.value)).lower()
     try:
@@ -348,5 +449,6 @@ def load_config(
         risk=RiskLimits.from_mapping(risk_raw.get("limits", risk_raw)),
         strategy=StrategyConfig.from_mapping(strategy_raw.get("strategy", strategy_raw)),
         pipeline=PipelineConfig.from_mapping(pipeline_raw.get("pipeline", pipeline_raw)),
+        shadow=ShadowConfig.from_mapping(shadow_raw.get("shadow", shadow_raw)),
         data_dir=resolved_data_dir,
     )
