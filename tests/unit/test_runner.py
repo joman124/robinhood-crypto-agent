@@ -99,7 +99,7 @@ def test_a_dip_is_proposed_and_logged_as_the_ladders(config):
     assert record["trigger_reason"].startswith("dip: closed 75,900.00")
     heartbeat = json.loads(config.heartbeat_path.read_text())
     assert heartbeat["counts"]["proposed"] == 1
-    assert heartbeat["services"] == {"robinhood": True, "dashboard": False}
+    assert heartbeat["services"] == {"robinhood": True, "dashboard": False, "forward_test": False}
 
 
 def test_a_proposal_is_logged_once_per_bar_even_across_a_restart(config):

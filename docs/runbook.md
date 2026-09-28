@@ -344,6 +344,47 @@ clear". `--strategies breakout` runs it alone, without the ladder's tables. A ba
 authorizes nothing. It doesn't change a limit or the approval gate, and it
 says nothing about the next trade.
 
+**The split** (`strategy.md`, "The split") runs half the account long-term
+and half in the breakout:
+
+```powershell
+.venv\Scripts\rhca backtest --symbols BTC-USD,ETH-USD,SOL-USD,XRP-USD --days 1460 --roll-window 90 --strategies split
+```
+
+It shows the long-term sleeve bought three ways (buy low, weekly DCA, lump
+sum), the breakout sleeve, the split, and the whole account in the breakout
+or in hold. `--long-mode`, `--long-pct` and `--long-symbols` change the
+long-term sleeve.
+
+## Forward test (`rhca shadow`)
+
+`config/shadow.yaml` turns it on (it ships on). While `rhca run` is running,
+it records the split's paper account after every UTC daily close: one
+`shadow_day` record in the audit log, and a line in the run's output:
+
+```
+forward test (paper, not a proposal) 2026-10-02 close: short-term buy SOL-USD $24.10 at 143.2
+forward test (paper) 2026-10-02 close: 1 paper fill(s); split account $501.30 after 5 close(s)
+```
+
+`rhca status` shows the paper account in two lines. For the full report --
+every paper fill, what is held, and the three checks of its bar:
+
+```powershell
+.venv\Scripts\rhca shadow
+```
+
+The bar is read after 90 daily closes, on 2026-12-27 (`strategy.md`, "The
+forward test"). Until then every verdict says "so far". Keep `rhca run`
+running: a day it was not running is not compared, only replayed.
+
+**A paper fill is not a proposal.** It has no proposal id, and nothing here
+trades it. If `rhca shadow` shows a buy, that is the paper account's, not a
+trade to make.
+
+Changing `config/shadow.yaml` restarts the test; delete it to turn the test
+off.
+
 ## Reconciling against Robinhood
 
 The audit log records what the agent was told. To check it against what

@@ -21,6 +21,11 @@ You are the only component that can **place an order**:
   Agentic account's balance and holdings come from `rhca ingest`). Each closed
   hour it runs the trend ladder (`docs/strategy.md`) on BTC and ETH, and logs
   what the ladder wants as proposals. It never orders.
+- **The forward test** also runs inside `rhca run` (`config/shadow.yaml`): the
+  split account -- $250 long-term, $250 in the breakout -- on paper. After
+  each UTC daily close it writes a `shadow_day` record of its paper fills.
+  `rhca shadow` reports it. A paper fill is **not a proposal**: it has no
+  proposal id, and it is never a reason to place an order.
 - **A human** approves a specific proposal by its id. Nothing else is approval
   — including the ladder wanting it, and including a proposal the dashboard
   shows as ready.
@@ -66,10 +71,12 @@ You are the only component that can **place an order**:
    implemented, so setting it only makes every proposal fail the risk check --
    it is not a shortcut to a working automation mode.
 
-9. **Never edit `config/risk_limits.yaml`, `config/agent.yaml`, or
-   `config/strategy.yaml` as a side effect** of executing a trade or wanting a
-   proposal to pass. A config change is its own deliberate act, initiated by the
-   human. If a limit blocks a trade, report that — do not widen the limit.
+9. **Never edit `config/risk_limits.yaml`, `config/agent.yaml`,
+   `config/strategy.yaml` or `config/shadow.yaml` as a side effect** of
+   executing a trade or wanting a proposal to pass. A config change is its own
+   deliberate act, initiated by the human. If a limit blocks a trade, report
+   that — do not widen the limit. Editing `config/shadow.yaml` restarts the
+   forward test.
 
 10. **Never fabricate a tool response.** Quotes, balances, fills, order ids and
     P&L go into the audit log only from real MCP output, piped in as JSON, or

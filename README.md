@@ -54,6 +54,11 @@ in with `rhca ingest`. On each closed hour it runs the ladder, and logs what
 the ladder wants as a proposal for a human to approve. Setup and keys:
 [`docs/runbook.md`](./docs/runbook.md#shadow-run-rhca-run).
 
+It also keeps the **forward test**: the split account -- $250 held long-term,
+$250 in the breakout -- on paper from 2026-09-28, recorded after each UTC
+daily close and reported by `rhca shadow`. It never proposes
+([`docs/strategy.md`](./docs/strategy.md#the-forward-test)).
+
 ## What it does
 
 - **Builds its own price history.** The MCP server has no crypto historicals
@@ -137,6 +142,11 @@ rhca record-execution <proposal-id> --tranche 0 -f response.json
 # bars, over the whole window and over rolling 90-day windows
 rhca backtest --days 730 --roll-window 90
 rhca backtest --symbols BTC-USD,ETH-USD,SOL-USD,XRP-USD --days 730 --strategies breakout
+# ... and the split: half held long-term, half in the breakout
+rhca backtest --symbols BTC-USD,ETH-USD,SOL-USD,XRP-USD --days 1460 --strategies split
+
+# The forward test: the split on paper since 2026-09-28, against its bar
+rhca shadow
 
 # Push proposals + outcomes to the dashboard, pull back your accept/decline
 rhca dashboard-sync --url https://your-project.vercel.app --token "$TOKEN"
@@ -163,7 +173,8 @@ src/robinhood_crypto_agent/
 ├── robinhood.py        # read-only Crypto Trading API client (no order methods)
 ├── bootstrap.py        # Coinbase candles for a fresh checkout
 ├── backtest.py         # rhca backtest: the ladder vs its baselines
-├── portfolio_backtest.py # the breakout candidate, as one account across coins
+├── portfolio_backtest.py # the breakout and the split, as one account across coins
+├── shadow.py           # the forward test: the split on paper, one daily close at a time
 ├── net.py              # the one HTTP helper
 ├── agent.py            # the analysis pipeline: bars + ledger -> ladder -> proposals
 ├── ledger.py           # the ladder's holdings and cycle, from recorded fills
@@ -181,7 +192,7 @@ src/robinhood_crypto_agent/
 ├── dashboard.py        # the payload the dashboard renders
 ├── mcp/                # the RobinHood tool contract and response parsers
 ├── store/              # price history and cached account state
-├── strategy/           # the trend ladder (live) and the breakout (backtest only)
+├── strategy/           # the trend ladder (live); the breakout and hodl (paper only)
 └── execution/          # order payloads, approval gate, kill switch
 
 dashboard/              # Next.js app, deployable to Vercel

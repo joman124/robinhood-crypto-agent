@@ -39,10 +39,15 @@ windows.
 
 0. **The trend ladder failed its bar** on real BTC and ETH bars, 2026-09-27
    (`strategy.md`, "The trend exit, tested"). Approve none of its proposals.
-   Its successor candidate, the **breakout**, is built and backtest-only:
-   run it on BTC, ETH, SOL and XRP and hold it to the bar in `strategy.md`,
-   "The bar it has to clear". Only if it clears all five does it get a live
-   implementation.
+   Its successor candidate, the **breakout**, scored 4 of 5 at two years and
+   again at four (`strategy.md`, "Over four years"): it fails consistency.
+   It has no live implementation.
+0a. **The forward test** runs from 2026-09-28 (`strategy.md`, "The forward
+   test"): the owner's split -- $250 bought the buy-low way and held, $250 in
+   the breakout -- on paper, inside `rhca run`. Keep `rhca run` running, and
+   read the bar with `rhca shadow` on or after 2026-12-27. A live split also
+   needs the concentration cap and watchlist changes listed in `strategy.md`,
+   "What running it for real would take" -- owner decisions, not side effects.
 1. **Run the backtest on real bars** (runbook, "Backtesting"):
    `rhca backtest --days 180`, `--days 365` and `--days 730 --roll-window 90`.
    Hold `ladder (anchor) +50d exit` to the bar in
