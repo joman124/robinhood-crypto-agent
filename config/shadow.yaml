@@ -3,11 +3,10 @@
 # after each UTC daily close it writes one `shadow_day` record to the audit log,
 # and `rhca shadow` reports on it.
 #
-# Set by the owner, 2026-09-28: $100 held long-term and $400 in the breakout,
-# so the short-term side always has money to trade (changed from 50:50 the same
-# day, before the first forward close). No coin may be more than
-# max_position_pct_of_portfolio (config/risk_limits.yaml) of the account,
-# counting both sleeves; the breakout gets the room first.
+# Set by the owner, 2026-09-28: $250 held long-term and $250 in the breakout.
+# No coin may be more than max_position_pct_of_portfolio
+# (config/risk_limits.yaml) of the account, counting both sleeves; the breakout
+# gets the room first.
 #
 # Changing anything here, or that limit, restarts the test, so treat it like
 # the other config files -- a deliberate change by the owner, never a side
@@ -21,8 +20,8 @@ shadow:
   capital: 500
 
   # Percent of capital in the long-term sleeve; the rest trades the breakout.
-  # $100 over four coins is $25 each: five $5 tranches, the minimum trade.
-  long_pct: 20
+  # $250 over four coins is $62.50 each: ten $6.25 tranches.
+  long_pct: 50
 
   # How the long-term sleeve buys: dip (buy low -- a weekly tranche only under
   # the 200-day average), dca (a weekly tranche whatever the price) or lump.
