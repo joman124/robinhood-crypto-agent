@@ -17,7 +17,10 @@ limits:
   max_daily_loss_usd: 40               # ceiling: 1000
 
   # Concentration and breadth
-  max_position_pct_of_portfolio: 10    # ceiling: 25
+  # Raised from 10 by the owner, 2026-09-28, to make room for the split: one
+  # coin held both long-term and short-term. Counts everything the account holds
+  # in the coin, whichever sleeve bought it; it only ever stops buys.
+  max_position_pct_of_portfolio: 20    # ceiling: 25
   # Raised from 5 by the owner, 2026-09-22 (the code ceiling moved 8 -> 15 with
   # it). Counts every coin the account holds, not just the watchlist.
   max_open_positions: 15               # ceiling: 15

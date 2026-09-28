@@ -1164,12 +1164,15 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     rule = None
     if BREAKOUT in strategies or SPLIT in strategies:
         try:
+            # The rule's own 10% per coin unless asked otherwise: it was fixed
+            # with the rule, and the account-wide limit in risk_limits.yaml is
+            # a separate cap (the split's --coin-cap-pct).
             rule = Breakout(
                 risk_pct=to_decimal(args.risk_pct, field="risk-pct"),
-                max_weight_pct=(
-                    to_decimal(args.max_weight_pct, field="max-weight-pct")
+                **(
+                    {"max_weight_pct": to_decimal(args.max_weight_pct, field="max-weight-pct")}
                     if args.max_weight_pct is not None
-                    else config.risk.max_position_pct_of_portfolio
+                    else {}
                 ),
             )
         except ValueError as exc:
@@ -1177,9 +1180,9 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     capital = to_decimal(args.capital, field="capital")
     if capital <= 0:
         raise AgentError("--capital must be positive")
-    plan, long_pct, long_symbols = None, Decimal("50"), None
+    plan, long_pct, long_symbols, coin_cap = None, Decimal("50"), None, None
     if SPLIT in strategies:
-        plan, long_pct, long_symbols = split_settings(args, symbols, capital, config)
+        plan, long_pct, long_symbols, coin_cap = split_settings(args, symbols, capital, config)
 
     trend_days = config.strategy.trend_days if args.trend_days is None else args.trend_days
     if trend_days < 0:
@@ -1277,6 +1280,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
             start=window_start,
             min_trade=min_trade,
             long_symbols=long_symbols,
+            coin_cap_pct=coin_cap,
         )
 
     if args.json:
@@ -1352,6 +1356,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
                 round_trip_pct=round_trip,
                 min_trade=min_trade,
                 long_symbols=long_symbols,
+                coin_cap_pct=coin_cap,
             )
             print()
             print(portfolio_mod.render_rolling_split(rolling_split, window=window, step=step))
@@ -1360,13 +1365,20 @@ def cmd_backtest(args: argparse.Namespace) -> int:
 
 def split_settings(
     args: argparse.Namespace, symbols: Sequence[str], capital: Decimal, config: AgentConfig
-) -> tuple[Accumulate, Decimal, list[str] | None]:
-    """The split's long-term plan, its share of --capital, and its coins."""
+) -> tuple[Accumulate, Decimal, list[str] | None, Decimal]:
+    """The split's long-term plan, its share of --capital, its coins, and the
+    most of the whole account one coin may be. What is not given defaults to
+    the split the forward test runs (config/shadow.yaml)."""
+    shadow = config.shadow
     try:
-        plan = Accumulate(mode=args.long_mode)
+        plan = Accumulate(mode=args.long_mode or (shadow.long_mode if shadow else "dip"))
     except ValueError as exc:
         raise AgentError(f"--long-mode: {exc}") from exc
-    long_pct = to_decimal(args.long_pct, field="long-pct")
+    long_pct = (
+        to_decimal(args.long_pct, field="long-pct")
+        if args.long_pct is not None
+        else (shadow.long_pct if shadow else Decimal("50"))
+    )
     if not 0 < long_pct < 100:
         raise AgentError("--long-pct must be strictly between 0 and 100")
     long_symbols = None
@@ -1376,16 +1388,23 @@ def split_settings(
         if outside:
             raise AgentError(f"--long-symbols must be among --symbols; not {', '.join(outside)}")
     coins = len(long_symbols or symbols)
-    # The weekly rows buy in tranches; one under the minimum trade would be
-    # refused live, so it is refused here too.
-    tranche = capital * long_pct / 100 / coins / Accumulate().tranches
-    if tranche < config.risk.min_notional_per_trade_usd:
+    # A small share buys fewer, minimum-sized tranches; one too small for a
+    # single minimum trade could never buy at all.
+    share = capital * long_pct / 100 / coins
+    if share < config.risk.min_notional_per_trade_usd:
         raise AgentError(
-            f"the long-term sleeve's weekly tranche would be ${round_money(tranche)}, under the "
+            f"the long-term sleeve would hold ${round_money(share)} of each coin, under the "
             f"${config.risk.min_notional_per_trade_usd} minimum trade: raise --capital or "
             "--long-pct, or pass fewer --long-symbols"
         )
-    return plan, long_pct, long_symbols
+    coin_cap = (
+        to_decimal(args.coin_cap_pct, field="coin-cap-pct")
+        if args.coin_cap_pct is not None
+        else config.risk.max_position_pct_of_portfolio
+    )
+    if not 0 < coin_cap <= 100:
+        raise AgentError("--coin-cap-pct must be a percent in (0, 100]")
+    return plan, long_pct, long_symbols, coin_cap
 
 
 def cmd_shadow(args: argparse.Namespace) -> int:
@@ -1587,19 +1606,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backtest.add_argument(
         "--max-weight-pct", default=None,
-        help="the breakout's cap per coin, percent (default: risk_limits.yaml's, 10)",
+        help="the breakout's cap per coin, percent of its account (default 10, the rule's own)",
     )
     backtest.add_argument(
-        "--long-pct", default="50",
-        help="split: the share of --capital held long-term, percent (default 50)",
+        "--long-pct", default=None,
+        help="split: the share of --capital held long-term, percent "
+        "(default: config/shadow.yaml's, else 50)",
     )
     backtest.add_argument(
-        "--long-mode", default="dip", choices=LONG_MODES,
-        help="split: how the long-term sleeve buys -- dip (buy low, the default), dca, lump",
+        "--long-mode", default=None, choices=LONG_MODES,
+        help="split: how the long-term sleeve buys -- dip (buy low), dca, lump "
+        "(default: config/shadow.yaml's, else dip)",
     )
     backtest.add_argument(
         "--long-symbols", default=None,
         help="split: the long-term sleeve's coins (default: every --symbols coin)",
+    )
+    backtest.add_argument(
+        "--coin-cap-pct", default=None,
+        help="split: the most of the whole account one coin may be, both sleeves together "
+        "(default: risk_limits.yaml's max_position_pct_of_portfolio)",
     )
     backtest.add_argument("--refresh", action="store_true", help="refetch instead of the cache")
     backtest.add_argument(

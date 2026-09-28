@@ -71,12 +71,22 @@ WORST_WINDOW_DRAWDOWN_PCT = Decimal("10.1")
 
 
 def rules(config: AgentConfig) -> tuple[Breakout, Accumulate]:
-    """The two rules, at the sizes ``rhca backtest`` uses by default."""
+    """The two rules, as ``rhca backtest`` runs them by default."""
     shadow = _shadow(config)
-    return (
-        Breakout(max_weight_pct=config.risk.max_position_pct_of_portfolio),
-        Accumulate(mode=shadow.long_mode),
-    )
+    return Breakout(), Accumulate(mode=shadow.long_mode)
+
+
+def coin_cap_pct(config: AgentConfig) -> Decimal:
+    """The most of the whole paper account one coin may be: the live limit."""
+    return config.risk.max_position_pct_of_portfolio
+
+
+def long_tranches(config: AgentConfig) -> int:
+    """How many tranches each long-term coin's share is bought in."""
+    shadow = _shadow(config)
+    _, plan = rules(config)
+    coins = len(shadow.long_symbols or shadow.symbols)
+    return plan.tranches_for(shadow.long_capital / coins, config.risk.min_notional_per_trade_usd)
 
 
 def _shadow(config: AgentConfig) -> ShadowConfig:
@@ -99,6 +109,7 @@ def setup(config: AgentConfig) -> dict[str, Any]:
         "long_mode": shadow.long_mode,
         "symbols": list(shadow.symbols),
         "long_symbols": list(shadow.long_symbols) if shadow.long_symbols else None,
+        "coin_cap_pct": str(coin_cap_pct(config)),
     }
 
 
@@ -184,6 +195,7 @@ def replay(
         round_trip_pct=DEFAULT_ROUND_TRIP_PCT,
         min_trade=config.risk.min_notional_per_trade_usd,
         long_symbols=shadow.long_symbols,
+        coin_cap_pct=coin_cap_pct(config),
         **window,
     )
     hold = run_equal_hold(
@@ -451,9 +463,11 @@ def render(
         f"Counting from the {shadow.start:%Y-%m-%d} daily close: {result.closes} close(s) so far, "
         f"through {result.through:%Y-%m-%d}. The bar is read after {BAR_DAYS} closes, on "
         f"{bar_day + DAY:%Y-%m-%d}.",
-        f"{money(split.long.capital)} long-term ({Accumulate(mode=shadow.long_mode).describe()})",
+        f"{money(split.long.capital)} long-term "
+        f"({Accumulate(mode=shadow.long_mode).describe(long_tranches(config))})",
         f"{money(split.short.capital)} short-term in the breakout; every fill crosses half the "
-        f"{DEFAULT_ROUND_TRIP_PCT}% round trip.",
+        f"{DEFAULT_ROUND_TRIP_PCT}% round trip. No coin may be more than "
+        f"{coin_cap_pct(config)}% of the account.",
         "",
         f"  {'account':<30}{'capital':>10}{'equity':>11}{'return':>9}{'max dd':>9}{'in coins':>10}",
         _row(split.long.name, split.long),

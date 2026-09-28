@@ -110,8 +110,18 @@ class TestConfig:
         shadow = load_config("config").shadow
         assert shadow.start == datetime(2026, 9, 28, tzinfo=timezone.utc)
         assert shadow.symbols == ("BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD")
-        assert (shadow.capital, shadow.long_pct, shadow.long_mode) == (500, 50, "dip")
-        assert (shadow.long_capital, shadow.short_capital) == (250, 250)
+        assert (shadow.capital, shadow.long_pct, shadow.long_mode) == (500, 20, "dip")
+        assert (shadow.long_capital, shadow.short_capital) == (100, 400)
+
+    def test_the_breakout_keeps_its_own_cap_under_the_accounts(self):
+        """The account-wide limit (20%) is the split's cap on one coin; the
+        breakout still sizes to its own 10% of its sleeve, as it was tested."""
+        config = load_config("config")
+        rule, _ = sh.rules(config)
+        assert rule.max_weight_pct == 10
+        assert sh.coin_cap_pct(config) == 20
+        assert sh.setup(config)["coin_cap_pct"] == "20"
+        assert sh.long_tranches(config) == 5  # $25 a coin in $5 buys
 
     def test_no_file_means_no_forward_test(self, tmp_path):
         assert load_config(tmp_path).shadow is None
