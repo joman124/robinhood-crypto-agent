@@ -20,17 +20,13 @@ export function SignInForm() {
           });
         }}
       >
-        <svg viewBox="0 0 32 32" width="36" height="36" aria-hidden="true">
-          <rect width="32" height="32" rx="8" className="brand-mark" />
-          <path d="M7 21l6-6 4 4 8-9" className="brand-line" />
-        </svg>
-        <h1>Robinhood crypto agent</h1>
-        <p>This dashboard shows trade proposals and records your decisions. Sign in to continue.</p>
+        <span className="brand-mark big" aria-hidden="true"><i /><i /></span>
+        <h1>The split</h1>
         <label className="sr-only" htmlFor="password">
           Password
         </label>
         <input id="password" type="password" name="password" placeholder="Password" autoFocus required />
-        <button type="submit" className="primary" disabled={pending}>
+        <button type="submit" className="btn primary wide" disabled={pending}>
           {pending ? "Checking…" : "Sign in"}
         </button>
         {error && (
