@@ -57,9 +57,7 @@ export function HitRateTrend({ proposals }: { proposals: Proposal[] }) {
     return (
       <section className="panel">
         <h2>System 1 hit rate over time</h2>
-        <p className="muted">
-          Needs at least two resolved wins or losses. {points.length === 1 ? "One so far." : ""}
-        </p>
+        <p className="muted">—</p>
       </section>
     );
   }
@@ -90,7 +88,7 @@ export function HitRateTrend({ proposals }: { proposals: Proposal[] }) {
     new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
   return (
-    <section className="panel">
+    <section className="panel reveal">
       <div className="panel-head">
         <h2>System 1 hit rate over time</h2>
         <span className="muted small">
@@ -129,7 +127,7 @@ export function HitRateTrend({ proposals }: { proposals: Proposal[] }) {
           <text x={w - PAD.right} y={H - 6} textAnchor="end" className="axis-label">
             {fmt(t1)}
           </text>
-          <path d={path} className="trend-line" />
+          <path d={path} pathLength={1} className="trend-line draw" />
           <circle cx={x(last.t)} cy={y(last.rate)} r={4} className="trend-dot" />
           {active && (
             <>

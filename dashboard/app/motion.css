@@ -1,0 +1,224 @@
+/*
+ * Motion layer.
+ *
+ * One easing (--ease), one rule: things arrive, they do not bounce. Data
+ * marks draw in the way they are read (bands left to right, arcs clockwise,
+ * bars from their baseline). Continuous motion is reserved for things that
+ * are actually moving: traffic along a route, the live loop.
+ * Everything collapses to its final state under prefers-reduced-motion.
+ */
+
+/* fate colors: status palette, always with a glyph and a label */
+.fate-placed { --fate: var(--status-good); }
+.fate-accepted { --fate: var(--status-good); }
+.fate-awaiting { --fate: var(--status-warning); }
+.fate-declined { --fate: var(--baseline); }
+.fate-held { --fate: var(--text-muted); }
+.fate-blocked { --fate: var(--status-critical); }
+.fate-glyph { color: var(--fate); font-style: normal; font-size: 0.95em; line-height: 1; }
+
+/* ---------- scroll reveal (native; a no-op where unsupported) ---------- */
+
+@supports (animation-timeline: view()) {
+  .reveal {
+    animation: rise linear both;
+    animation-timeline: view();
+    animation-range: entry 0% entry 60%;
+  }
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(28px) scale(0.985); filter: blur(4px); }
+}
+
+/* ---------- fate bar ---------- */
+
+.fate-bar {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 2px;
+  height: 26px;
+  border-radius: 7px;
+  overflow: hidden;
+}
+.fate-bar-seg {
+  container-type: inline-size;
+  min-width: 4px;
+  background: var(--fate);
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  transform-origin: left;
+  animation: grow-x 1.2s var(--ease) both;
+}
+.fate-bar-seg.fate-declined, .fate-bar-seg.fate-held { background: color-mix(in srgb, var(--fate) 70%, var(--card)); }
+.fate-bar-label { font: 600 10.5px/1 var(--mono); letter-spacing: 0.02em; color: var(--bg); white-space: nowrap; }
+.fate-bar-seg.fate-declined .fate-bar-label, .fate-bar-seg.fate-held .fate-bar-label { color: var(--ink); }
+@container (max-width: 110px) { .fate-bar-label { display: none; } }
+@keyframes grow-x { from { transform: scaleX(0); } }
+
+/* ---------- panels, shared ---------- */
+
+.panel-head h2 {
+  font-family: var(--serif);
+  text-transform: none;
+  letter-spacing: -0.01em;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.head-controls { display: flex; flex-wrap: wrap; gap: 8px; }
+.segmented button { transition: background 0.25s var(--ease), color 0.25s var(--ease), box-shadow 0.25s var(--ease); }
+.tip-inline { color: var(--text-primary); }
+
+/* ---------- trade flow ---------- */
+
+.flow-chart { position: relative; width: 100%; min-height: 340px; overflow-x: auto; overscroll-behavior-x: contain; }
+.flow { display: block; overflow: visible; }
+.tone-ink { --tone: var(--text-primary); }
+.tone-ink-2 { --tone: var(--text-secondary); }
+.tone-blocked { --tone: var(--status-critical); }
+.tone-accepted, .tone-placed { --tone: var(--status-good); }
+.tone-awaiting { --tone: var(--status-warning); }
+.tone-declined { --tone: var(--baseline); }
+.tone-held { --tone: var(--text-muted); }
+
+.band {
+  fill: var(--tone);
+  fill-opacity: 0.2;
+  clip-path: inset(0 100% 0 0);
+  transition: fill-opacity 0.3s var(--ease);
+  cursor: pointer;
+}
+.flow.play .band { animation: wipe 1.3s var(--ease) forwards; }
+.band:hover, .flow.has-focus .band:not(.dim) { fill-opacity: 0.4; }
+.band.dim { fill-opacity: 0.06; }
+@keyframes wipe { to { clip-path: inset(0 0 0 0); } }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+
+.particle { fill: var(--tone); opacity: 0; }
+.flow.play .particle { animation: fade-in 0.6s 1.4s var(--ease) forwards; }
+.particle.dim { visibility: hidden; }
+@keyframes fade-in { to { opacity: 0.9; } }
+
+.node { cursor: pointer; transition: opacity 0.3s var(--ease); }
+.node rect { fill: var(--tone); transform-box: fill-box; transform-origin: center; transform: scaleY(0); }
+.flow.play .node rect { animation: node-in 0.7s var(--ease) forwards; animation-delay: inherit; }
+.node.dim { opacity: 0.3; }
+@keyframes node-in { to { transform: scaleY(1); } }
+.node text { paint-order: stroke; stroke: var(--surface-1); stroke-width: 4px; stroke-linejoin: round; opacity: 0; }
+.flow.play .node text { animation: fade-in-full 0.6s var(--ease) forwards; animation-delay: inherit; }
+@keyframes fade-in-full { to { opacity: 1; } }
+.node-count { font-family: var(--serif); font-size: 20px; fill: var(--text-primary); font-variant-numeric: tabular-nums; }
+.node-label { font-size: 12px; fill: var(--text-secondary); }
+
+/* ---------- segment rings ---------- */
+
+.rings { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 250px)); gap: 14px; }
+.ring-card {
+  margin: 0;
+  padding: 18px 16px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--gridline);
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  transition: transform 0.4s var(--ease), box-shadow 0.4s var(--ease);
+}
+.ring-card:hover { transform: translateY(-3px); box-shadow: var(--shadow); }
+.ring-wrap { position: relative; width: 132px; aspect-ratio: 1; }
+.ring { width: 100%; height: 100%; overflow: visible; }
+.ring-track { fill: none; stroke: var(--gridline); stroke-width: 10; }
+.ring-arc {
+  fill: none;
+  stroke: var(--series);
+  stroke-width: 10;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 1.4s var(--ease) var(--delay);
+}
+.ring-glow {
+  fill: none;
+  stroke: var(--series);
+  stroke-width: 18;
+  stroke-linecap: round;
+  opacity: 0.35;
+  transition: stroke-dashoffset 1.4s var(--ease) var(--delay);
+  animation: halo 2.4s ease-in-out infinite;
+}
+@keyframes halo { 50% { opacity: 0.08; } }
+.ring-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.ring-value { font-family: var(--serif); font-size: 32px; line-height: 1; font-variant-numeric: tabular-nums; }
+.ring-value.unknown { color: var(--text-muted); }
+.ring-sub { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; }
+.ring-card figcaption { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 1px; }
+.ring-card figcaption strong::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--series);
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+.fate-strip { display: flex; gap: 2px; width: 100%; height: 6px; border-radius: 3px; overflow: hidden; }
+.fate-seg { background: var(--fate); min-width: 3px; transform-origin: left; animation: grow-x 1.2s var(--ease) both; animation-delay: var(--delay); }
+
+/* ---------- timeline swarm ---------- */
+
+.fate-keys { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.fate-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 4px 11px;
+  transition: opacity 0.25s var(--ease);
+}
+.fate-key.off { opacity: 0.45; text-decoration: line-through; }
+.fate-count { font-variant-numeric: tabular-nums; color: var(--text-muted); }
+.timeline { min-height: 120px; }
+.lane { fill: var(--surface-2); }
+.lane-label { font-size: 12.5px; fill: var(--text-secondary); font-weight: 560; }
+.dot {
+  fill: var(--fate);
+  stroke: var(--surface-1);
+  stroke-width: 1.5;
+  cursor: pointer;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 0.2s var(--ease);
+}
+.dot.fate-accepted { fill: var(--surface-1); stroke: var(--status-good); stroke-width: 2.4; }
+.dot.fate-declined { fill: var(--surface-1); stroke: var(--baseline); stroke-width: 2; }
+.swarm .dot { animation: pop 0.55s var(--ease) backwards; animation-play-state: paused; }
+.swarm.play .dot { animation-play-state: running; }
+.dot-g { cursor: pointer; }
+.dot-hit { fill: transparent; }
+.dot-g:hover .dot { transform: scale(1.7); }
+@keyframes pop { from { transform: scale(0); opacity: 0; } 60% { transform: scale(1.35); } }
+.dot-pulse { fill: none; stroke: var(--status-warning); stroke-width: 2; transform-box: fill-box; transform-origin: center; animation: ripple 1.8s var(--ease) infinite; }
+@keyframes ripple { from { transform: scale(1); opacity: 0.9; } to { transform: scale(3); opacity: 0; } }
+
+/* ---------- the older charts, now drawn in ---------- */
+
+.trend-line.draw { stroke-dasharray: 1; stroke-dashoffset: 1; animation: draw 1.8s var(--ease) 0.2s forwards; }
+.bar-seg { transform-origin: left; animation: grow-x 1s var(--ease) both; }
+
+@media (max-width: 720px) {
+  .rings { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .ring-wrap { width: 108px; }
+  .ring-value { font-size: 26px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+  .particles, .ring-glow, .dot-pulse { display: none; }
+  .reveal { animation: none !important; }
+}

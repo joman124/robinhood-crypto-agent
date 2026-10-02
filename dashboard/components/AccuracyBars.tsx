@@ -40,7 +40,7 @@ export function AccuracyBars({ stats }: { stats: Payload["stats"] }) {
   const name = group.label ?? ((k: string) => k);
 
   return (
-    <section className="panel">
+    <section className="panel reveal">
       <div className="panel-head">
         <h2>System 1 accuracy by</h2>
         <div className="segmented" role="tablist" aria-label="Group accuracy by">
@@ -58,29 +58,16 @@ export function AccuracyBars({ stats }: { stats: Payload["stats"] }) {
         </div>
       </div>
 
-      <p className="muted small">
-        The retired System 1&apos;s records only. The trend ladder is not hit-rate scored; it is
-        measured on realized P&amp;L.
-        {group.key === "status" && (
-          <>
-            {" "}Its shadow run asked whether each stage earned its place: compare{" "}
-            <em>Proposed</em> against <em>Passed by System 2</em>, and escalated stages against{" "}
-            <em>Held back</em>.
-          </>
-        )}
-      </p>
-
       {rows.length === 1 ? (
         <p className="single-row">
-          Only one {group.title.toLowerCase()} has resolved outcomes so far:{" "}
-          <strong>{name(rows[0][0])}</strong>, {summary(rows[0][1])}.
+          <strong>{name(rows[0][0])}</strong> · {summary(rows[0][1])}
         </p>
       ) : (
         rows.map(([key, s]) => {
           const total = Math.max(s.resolved, 1);
           const width = (n: number) => `${(n / total) * 100}%`;
           return (
-            <div className="bar-row" key={key}>
+            <div className="bar-row" key={`${group.key}-${key}`}>
               <div className="bar-name" title={STATUS[key]?.help}>
                 {name(key)}
               </div>

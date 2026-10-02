@@ -11,32 +11,40 @@ System 1's records (composite signals, regime, System 2), and say so.
 
 ## What is on the page
 
-- **Status strip.** Whether the shadow loop (`rhca run`) is running, the kill
-  switch, the execution mode, and how old the last sync is. Banners explain
-  anything that changes what the numbers mean: an engaged kill switch, a stale
-  sync, read-only mode, in-memory storage.
-- **Headline numbers.** The split's realized P&L per pair, System 1's hit
-  rate and average move, the proposal count, and today's proposals,
-  executions, traded dollars and realized P&L.
-- **The proposal log.** "Needs your call" by default, with Decided and All tabs,
-  search, stage/pair/outcome filters, pagination, CSV export, and a card layout
-  on phones. A split row shows its sleeve and rule ("Short-term entry",
-  "Long-term tranche"); a retired ladder row its rule and step; a System 1
-  row shows its composite score and confidence. Accept is greyed out, with the
-  reason, whenever the agent's gate would refuse it: risk-blocked, a record
-  rather than a proposal, the kill switch, or price drift past
-  `price_drift_tolerance_pct` as of the last sync.
-- **The detail drawer** (click any row; `#p=<id>` links straight to one). The
-  decision with an optional note and whether the agent has picked it up; the
-  trade, plan, drift, and the split's rule with its reason; every risk rule;
-  the outcome; any execution; and the `rhca` commands to copy into the
-  terminal. A System 1 record also shows its regime, composite, trigger,
-  System 2 verdict and every signal on a −1…+1 track.
-- **System 1 hit rate over time**, the **shadow loop** heartbeat (counts,
-  services, last error task), and **System 1 accuracy by** pipeline stage,
-  regime, pair or side.
+Five pages behind one sidebar, after the Figma "The split" console. Every page
+shares the top bar (Robinhood quotes, last sync, mode, kill switch), the
+real-money line, and the banners that change what the numbers mean: an engaged
+kill switch, a stale sync, read-only mode, in-memory storage.
 
-The page re-fetches every minute while the tab is visible.
+- **Command center** (`/`). Headline numbers (proposals, cleared risk, what
+  needs your call, placed, the split's realized P&L) over a bar of every
+  proposal by *fate* (`lib/flow.ts`); the two sleeves side by side; the oldest
+  proposal waiting on you; the watchlist with marks and each coin's latest
+  proposal; the safety posture; a countdown to the next UTC daily close; the
+  Sankey of where every trade went; every trade on the clock; the shadow loop's
+  heartbeat.
+- **Proposals** (`/proposals`, `?id=<proposal id>` links straight to one). The
+  queue ("Your call" by default, Decided, All, with search, pair and outcome
+  filters, pagination and CSV export) beside the full packet: the airlock
+  steps, the trade and its thesis, signals for a System 1 record, the drift
+  check against the last mark, every risk rule, the outcome, any execution,
+  and the `rhca` commands to copy. Accept needs the proposal id typed back.
+  "Place order" is permanently disabled. Old `/#p=<id>` links redirect here.
+- **Risk engine** (`/risk`). One proposal's evaluation (the newest blocked
+  one by default): its verdict, every rule numbered pass/block, the active
+  blocker, and what the engine guarantees. "Rule history" ranks which rules
+  block and how often across every synced proposal.
+- **Strategy** (`/strategy`). The split's two sleeves and their rules,
+  activity by coin, success rate by segment or coin, and the retired System
+  1's hit rate and accuracy panels, which say they are System 1's.
+- **Audit trail** (`/audit`). Every proposal, risk block, decision, sync and
+  control event this console holds, newest first, with the record as synced
+  and a JSONL export. It is a view; the agent's append-only log stays on its
+  machine (`rhca audit`).
+
+The pages re-fetch every minute while the tab is visible. Every animation
+settles to its final state under `prefers-reduced-motion`. `npm run check`
+runs the fate and segment self-check.
 
 ## What it does and does not do
 
@@ -164,7 +172,7 @@ rhca dashboard-sync --url http://localhost:3000 --token dev-token
 
 | Route | Auth | Purpose |
 |---|---|---|
-| `/` | session cookie | The dashboard |
+| `/`, `/proposals`, `/risk`, `/strategy`, `/audit` | session cookie | The console |
 | `POST /api/proposals` | bearer token | Ingest from `rhca dashboard-sync` |
 | `GET /api/proposals` | bearer token | Read back the stored payload |
 | `GET /api/decisions` | bearer token | Decisions for the agent to pull |

@@ -21,9 +21,7 @@ export function Pipeline({ beat }: { beat: Heartbeat | null | undefined }) {
     return (
       <section className="panel">
         <h2>Shadow loop</h2>
-        <p className="muted">
-          No heartbeat yet. Start it where the agent lives with <code>rhca run</code>.
-        </p>
+        <p className="muted">—</p>
       </section>
     );
   }
@@ -46,7 +44,6 @@ export function Pipeline({ beat }: { beat: Heartbeat | null | undefined }) {
           </div>
         ))}
       </div>
-      <p className="muted small">Counts are for the current run.</p>
 
       <ul className="services" aria-label="Services">
         {SERVICES.map(([key, label]) => {
@@ -62,9 +59,8 @@ export function Pipeline({ beat }: { beat: Heartbeat | null | undefined }) {
 
       {beat.last_error && (
         <p className="alert warn compact">
-          <strong>Last error</strong> in <code>{beat.last_error.task ?? "a task"}</code>,{" "}
-          <RelTime iso={beat.last_error.at} />. The text stays on the agent&apos;s machine; read it
-          with <code>rhca status</code>.
+          <strong>Last error</strong> · <code>{beat.last_error.task ?? "task"}</code> ·{" "}
+          <RelTime iso={beat.last_error.at} />
         </p>
       )}
     </section>

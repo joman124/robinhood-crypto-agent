@@ -1,197 +1,238 @@
-import { AccuracyBars } from "@/components/AccuracyBars";
-import { HitRateTrend } from "@/components/HitRateTrend";
-import { LiveProvider } from "@/components/Live";
+import Link from "next/link";
+
+import { CsvButton } from "@/components/CsvButton";
+import { RelTime } from "@/components/Live";
+import { CountUp } from "@/components/motion";
 import { Pipeline } from "@/components/Pipeline";
-import { ProposalLog } from "@/components/ProposalLog";
-import { SignInForm, SignOutButton } from "@/components/SignIn";
-import { StatTile } from "@/components/StatTile";
-import { StatusAlerts, StatusStrip } from "@/components/StatusStrip";
-import { isLadder, money, pct, signedPct } from "@/lib/format";
-import { canDecide, isAuthenticated, passwordConfigured } from "@/lib/session";
-import { getDecisions, getPayload, storageMode } from "@/lib/store";
+import { Shell } from "@/components/Shell";
+import { SignalClock } from "@/components/ShellClient";
+import { SignInForm } from "@/components/SignIn";
+import { TradeFlow } from "@/components/TradeFlow";
+import { TradeTimeline } from "@/components/TradeTimeline";
+import { Badge, CardHead, CoinMark, Fact, FateBadge, Facts, Icon, PageHead } from "@/components/ui";
+import { loadConsole } from "@/lib/console";
+import { FATES, FATE_ORDER, type Fated, SEGMENTS } from "@/lib/flow";
+import { coinOf, isLadder, ladderLabel, money, price } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
-const FALLBACK_REPO = "https://github.com/joman124/robinhood-crypto-agent";
+export default async function CommandCenter() {
+  const c = await loadConsole();
+  if (c.gated) return <SignInForm />;
 
-export default async function Page() {
-  const [payload, decisions, authed, mayDecide] = await Promise.all([
-    getPayload(),
-    getDecisions(),
-    isAuthenticated(),
-    canDecide(),
-  ]);
-
-  // Password set but not signed in: show only the sign-in form. Proposal data
-  // is not rendered to an unauthenticated visitor.
-  if (passwordConfigured() && !authed) {
-    return <SignInForm />;
-  }
-
-  const repo = payload?.repo_url || process.env.NEXT_PUBLIC_REPO_URL || FALLBACK_REPO;
-  const stats = payload?.stats.overall;
-  const scoring = payload?.scoring;
-  const today = payload?.today;
-  const decidedIds = new Set(decisions.map((d) => d.proposal_id));
-  const proposals = payload?.proposals ?? [];
-  const awaiting = proposals.filter((p) => p.actionable && !decidedIds.has(p.proposal_id));
-  const ladderCount = proposals.filter(isLadder).length;
-  const splitCount = proposals.filter((p) => p.strategy === "split").length;
-  const pnlByCoin = payload?.split_realized_pnl ?? payload?.ladder_realized_pnl;
-  const ladderPnl = Object.entries(pnlByCoin ?? {});
-  const ladderTotal = ladderPnl.reduce((sum, [, v]) => sum + Number(v), 0);
-  const doc = (path: string) => `${repo}/blob/main/${path}`;
+  const { payload, rows } = c;
+  const count = (f: string) => rows.filter((r) => r.fate === f).length;
+  const blocked = count("blocked");
+  const awaiting = rows.filter((r) => r.fate === "awaiting");
+  const pnl = Object.entries(payload?.split_realized_pnl ?? {});
+  const pnlTotal = pnl.reduce((sum, [, v]) => sum + Number(v), 0);
+  const split = rows.filter((r) => r.p.strategy === "split").length;
+  const kill = payload?.kill_switch;
 
   return (
-    <LiveProvider serverNow={Date.now()}>
-      <header className="topbar">
-        <div className="topbar-inner">
-          <div className="brand">
-            <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true">
-              <rect width="32" height="32" rx="8" className="brand-mark" />
-              <path d="M7 21l6-6 4 4 8-9" className="brand-line" />
-            </svg>
-            <div>
-              <div className="brand-name">Robinhood crypto agent</div>
-              <div className="brand-sub">Proposals, their track record, and your sign-off</div>
+    <Shell c={c}>
+      <PageHead title="Command Center">
+        <CsvButton proposals={payload?.proposals ?? []} />
+        <Link className="btn primary" href="/proposals">
+          <Icon name="file-check" /> Review queue
+        </Link>
+      </PageHead>
+
+      <section className="card kpi-strip" aria-label="Headline numbers">
+        <Kpi label="Proposals" value={String(rows.length)} note={`${split} split · ${rows.length - split} retired`} />
+        <Kpi
+          label="Cleared risk"
+          value={rows.length ? `${Math.round(((rows.length - blocked) / rows.length) * 100)}%` : "—"}
+          note={`${blocked} blocked`}
+          tone="mint"
+        />
+        <Kpi label="Needs your call" value={String(awaiting.length).padStart(2, "0")} note="" tone="amber" />
+        <Kpi label="Placed" value={String(count("placed"))} note={`${count("accepted")} accepted`} />
+        <Kpi
+          label="Split realized P&L"
+          value={pnl.length ? money(pnlTotal.toFixed(2)) : "—"}
+          note={pnl.map(([s, v]) => `${coinOf(s)} ${money(v)}`).join(" · ")}
+          tone={pnlTotal < 0 ? "red" : "mint"}
+        />
+        {rows.length > 0 && <FateBar rows={rows} />}
+      </section>
+
+      <div className="grid-main">
+        <Sleeves rows={rows} />
+        <AwaitingCard first={awaiting.at(-1)} total={awaiting.length} tolerance={payload?.limits?.price_drift_tolerance_pct} />
+      </div>
+
+      <div className="grid-main">
+        <section className="card flush">
+          <CardHead title="Watchlist" />
+          <div className="table-scroll">
+            <table className="grid-table">
+              <thead>
+                <tr><th>Asset</th><th className="num">Mark</th><th>Latest proposal</th><th className="num">Realized P&amp;L</th></tr>
+              </thead>
+              <tbody>
+                {(payload?.watchlist ?? []).map((sym) => {
+                  const mark = payload?.market?.[sym];
+                  const latest = rows.find((r) => r.p.symbol === sym);
+                  const pl = payload?.split_realized_pnl?.[sym];
+                  return (
+                    <tr key={sym}>
+                      <td>
+                        <span className="asset">
+                          <CoinMark symbol={sym} />
+                          <span><strong>{coinOf(sym)} / USD</strong><small>{mark ? <RelTime iso={mark.observed_at} /> : "no mark"}</small></span>
+                        </span>
+                      </td>
+                      <td className="num mono">{mark ? price(mark.mark) : "—"}</td>
+                      <td>
+                        {latest ? (
+                          <Link className="row-link" href={`/proposals?id=${latest.p.proposal_id}`}>
+                            <FateBadge fate={latest.fate} />
+                            <span>{isLadder(latest.p) ? ladderLabel(latest.p) : SEGMENTS[latest.segment].label}</span>
+                            <small><RelTime iso={latest.p.proposed_at} /></small>
+                          </Link>
+                        ) : (
+                          <span className="muted small">—</span>
+                        )}
+                      </td>
+                      <td className={`num mono ${Number(pl) < 0 ? "tone-text red" : pl ? "tone-text mint" : "muted"}`}>{pl ? money(pl) : "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <div className="stack">
+          <section className="card">
+            <CardHead title="Safety">
+              <Badge tone={kill?.engaged ? "red" : "mint"}>{kill?.engaged ? "Halted" : "Nominal"}</Badge>
+            </CardHead>
+            <dl className="posture">
+              <div><dt>Drift limit</dt><dd>≤ {payload?.limits?.price_drift_tolerance_pct ?? "—"}%</dd></div>
+              <div><dt>Kill switch</dt><dd className={kill?.engaged ? "tone-text red" : undefined}>{kill ? (kill.engaged ? "Engaged" : "Armed") : "—"}</dd></div>
+              <div><dt>Mode</dt><dd className="tone-text violet">{(payload?.execution_mode ?? "propose_only").replace(/_/g, "-")}</dd></div>
+            </dl>
+          </section>
+          <section className="card">
+            <CardHead title="Next daily close" />
+            <SignalClock />
+          </section>
+        </div>
+      </div>
+
+      {rows.length > 0 && (
+        <>
+          <TradeFlow rows={rows} />
+          <TradeTimeline rows={rows} />
+        </>
+      )}
+      {payload && <Pipeline beat={payload.pipeline} />}
+    </Shell>
+  );
+}
+
+function Kpi({ label, value, note, tone }: { label: string; value: string; note: string; tone?: string }) {
+  return (
+    <div className="kpi">
+      <span className="kpi-label">{label}</span>
+      <span className="kpi-value"><CountUp text={value} /></span>
+      <span className={`kpi-note ${tone ? `tone-text ${tone}` : ""}`}>{note}</span>
+    </div>
+  );
+}
+
+/** Every proposal by what became of it, as one bar. */
+function FateBar({ rows }: { rows: Fated[] }) {
+  const n = (f: string) => rows.filter((r) => r.fate === f).length;
+  const shown = FATE_ORDER.filter((f) => n(f) > 0);
+  return (
+    <div className="fate-bar" role="img" aria-label={shown.map((f) => `${n(f)} ${FATES[f].label.toLowerCase()}`).join(", ")}>
+      {shown.map((f, i) => (
+        <div key={f} className={`fate-bar-seg fate-${f}`} style={{ flexGrow: n(f), animationDelay: `${200 + i * 90}ms` }}>
+          <span className="fate-bar-label">{FATES[f].glyph} {FATES[f].short} {n(f)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Sleeves({ rows }: { rows: Fated[] }) {
+  const sleeves = [
+    { key: "long", tag: "Long-term" },
+    { key: "short", tag: "Breakout" },
+  ] as const;
+  return (
+    <section className="card">
+      <CardHead title="Sleeves" />
+      <div className="sleeves">
+        {sleeves.map((s) => {
+          const mine = rows.filter((r) => r.segment === s.key);
+          const by = (f: string) => mine.filter((r) => r.fate === f).length;
+          const coins = [...new Set(mine.map((r) => r.p.symbol))];
+          return (
+            <div key={s.key} className={`sleeve ${s.key}`}>
+              <p className="eyebrow">{s.tag}</p>
+              <p className="sleeve-value"><CountUp text={String(mine.length)} /> <small>proposals</small></p>
+              <Facts cols={3}>
+                <Fact label="Placed" tone="mint">{by("placed")}</Fact>
+                <Fact label="Your call" tone="amber">{by("awaiting")}</Fact>
+                <Fact label="Blocked" tone="red">{by("blocked")}</Fact>
+              </Facts>
+              <div className="coin-bars" aria-label="Proposals by coin">
+                {coins.map((sym) => (
+                  <span key={sym} className={`coin-bar coin-${coinOf(sym).toLowerCase()}`} style={{ flexGrow: mine.filter((r) => r.p.symbol === sym).length }} title={`${coinOf(sym)}: ${mine.filter((r) => r.p.symbol === sym).length}`} />
+                ))}
+              </div>
             </div>
-          </div>
-          <nav className="topnav">
-            {awaiting.length > 0 && (
-              <a href="#proposals" className="attention">
-                {awaiting.length} need{awaiting.length === 1 ? "s" : ""} your call
-              </a>
-            )}
-            <a href={repo} target="_blank" rel="noreferrer">
-              GitHub ↗
-            </a>
-            {authed && <SignOutButton />}
-          </nav>
-        </div>
-        <div className="topbar-inner">
-          <StatusStrip payload={payload} />
-        </div>
-      </header>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
 
-      <main className="wrap">
-        <StatusAlerts payload={payload} />
-
-        {!passwordConfigured() && (
-          <div className="alert warn">
-            <strong>Read-only.</strong> <code>DASHBOARD_PASSWORD</code> is not set, so no decision
-            can be recorded here. Set it in the Vercel project to enable accept and decline.
-          </div>
-        )}
-        {storageMode() === "memory" && (
-          <div className="alert warn">
-            <strong>Using in-process memory.</strong> No <code>KV_REST_API_URL</code> is configured,
-            so anything recorded here is lost on the next cold start and is not shared between
-            serverless instances. Connect Vercel KV before relying on it.
-          </div>
-        )}
-
-        {stats && (
-          <div className="tiles">
-            {pnlByCoin && (
-              <StatTile
-                label={payload?.split_realized_pnl ? "Split P&L" : "Ladder P&L"}
-                value={ladderPnl.length ? money(ladderTotal.toFixed(2)) : "—"}
-                unknown={ladderPnl.length === 0}
-                note={
-                  ladderPnl.length
-                    ? `realized · ${ladderPnl.map(([symbol, v]) => `${symbol} ${money(v)}`).join(" · ")}`
-                    : "no fills recorded yet"
-                }
-              />
-            )}
-            <StatTile
-              label="System 1 hit rate"
-              value={pct(stats.win_rate)}
-              unknown={stats.win_rate === null}
-              note={
-                stats.win_rate === null
-                  ? "nothing has resolved yet"
-                  : `${stats.wins}W / ${stats.losses}L · ${stats.flat} flat`
-              }
-            />
-            <StatTile
-              label="System 1 average move"
-              value={stats.average_move_pct !== null ? signedPct(stats.average_move_pct) : "—"}
-              unknown={stats.average_move_pct === null}
-              note={
-                stats.best_move_pct !== null
-                  ? `best ${signedPct(stats.best_move_pct)} · worst ${signedPct(stats.worst_move_pct)}`
-                  : "in the proposal's favour"
-              }
-            />
-            <StatTile
-              label="Proposals"
-              value={String(proposals.length)}
-              note={`${splitCount} split · ${ladderCount - splitCount} ladder · ${proposals.length - ladderCount} System 1 · ${stats.resolved} scored`}
-            />
-            {today && (
-              <StatTile
-                label="Today (UTC)"
-                value={`${today.proposals}`}
-                note={`proposal${today.proposals === 1 ? "" : "s"} · ${today.executions} executed · ${money(today.executed_notional)} traded · P&L ${money(today.realized_pnl)}`}
-              />
-            )}
-          </div>
-        )}
-
-        <p className="callout">
-          <strong>Accepting here does not place an order.</strong> It records your decision. The
-          agent picks it up and still runs the kill switch, a fresh price-drift check,
-          remaining-quantity accounting and order validation before anything is submitted. This
-          page holds no Robinhood credentials.
-        </p>
-
-        <ProposalLog payload={payload} decisions={decisions} canDecide={mayDecide} />
-
-        {payload && (
-          <div className="grid-2">
-            <HitRateTrend proposals={payload.proposals} />
-            <Pipeline beat={payload.pipeline} />
-          </div>
-        )}
-
-        {payload && <AccuracyBars stats={payload.stats} />}
-
-        <footer className="footer">
-          <p>
-            The split is measured on realized P&amp;L from its recorded fills: a breakout is held
-            until its stop and a long-term tranche is never sold, so a fixed-horizon hit rate
-            would grade them on a question they never asked. So was the retired trend ladder. The hit rate and accuracy panels cover the retired System 1&apos;s records
-            only.{" "}
-            {scoring && (
-              <>
-                Each of those was scored {scoring.horizon_bars} bars (
-                {(scoring.horizon_bars * scoring.bar_interval_minutes) / 60}h) after the proposal,
-                as the whole round trip: in at the proposal&apos;s price, out at the far side of the
-                book. It is a win only if it made more than {scoring.hurdle_pct}% after that, and a
-                loss if it lost money at all.{" "}
-              </>
-            )}
-            Hit rate is wins over wins + losses. Flat outcomes are excluded, an unresolved proposal
-            is never a loss, and every candidate was scored, including ones you declined and ones
-            the pipeline held back.
-          </p>
-          <nav className="footer-links">
-            <a href={doc("docs/risk-controls.md")} target="_blank" rel="noreferrer">
-              Risk controls
-            </a>
-            <a href={doc("docs/strategy.md")} target="_blank" rel="noreferrer">
-              Strategy
-            </a>
-            <a href={doc("docs/runbook.md")} target="_blank" rel="noreferrer">
-              Runbook
-            </a>
-            <a href={doc("docs/autonomy.md")} target="_blank" rel="noreferrer">
-              Path to autonomy
-            </a>
-          </nav>
-        </footer>
-      </main>
-    </LiveProvider>
+function AwaitingCard({ first, total, tolerance }: { first: Fated | undefined; total: number; tolerance?: string }) {
+  if (!first) {
+    return (
+      <section className="card awaiting empty-state">
+        <Badge tone="mint" icon="circle-check">Queue clear</Badge>
+        <Link className="btn" href="/proposals?tab=all">All proposals</Link>
+      </section>
+    );
+  }
+  const { p } = first;
+  const findings = p.risk_findings ?? [];
+  const passed = findings.filter((f) => f.passed).length;
+  const drift = Number(p.drift_pct);
+  return (
+    <section className="card awaiting">
+      <div className="card-top">
+        <Badge tone="amber" icon="clock">Your call{total > 1 ? ` · 1 of ${total}` : ""}</Badge>
+        <span className="eyebrow"><RelTime iso={p.proposed_at} /></span>
+      </div>
+      <div className="asset big">
+        <CoinMark symbol={p.symbol} size={36} />
+        <span>
+          <strong>{p.side === "buy" ? "Buy" : "Sell"} {coinOf(p.symbol)} · {isLadder(p) ? ladderLabel(p) : "proposal"}</strong>
+          <small className="mono tone-text mint">{p.proposal_id}</small>
+        </span>
+      </div>
+      <Facts cols={3}>
+        <Fact label="Notional">{money(p.notional)}</Fact>
+        <Fact label="Reference">{price(p.reference_price)}</Fact>
+        <Fact label="Drift at sync" tone={tolerance && drift > Number(tolerance) ? "red" : undefined}>
+          {p.drift_pct != null ? `${drift.toFixed(2)}%` : "—"}
+        </Fact>
+      </Facts>
+      <div className="inline-check">
+        <Icon name="shield-check" />
+        <span>{findings.length ? `${passed} / ${findings.length} checks passed` : "Risk passed"}</span>
+      </div>
+      <Link className="btn primary wide" href={`/proposals?id=${p.proposal_id}`}>
+        <Icon name="arrow-right" /> Review
+      </Link>
+    </section>
   );
 }

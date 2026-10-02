@@ -184,3 +184,16 @@ export function toCsv(rows: Proposal[]): string {
   };
   return [cols.map(([h]) => h).join(","), ...rows.map((r) => cols.map(([, f]) => cell(f(r))).join(","))].join("\n");
 }
+
+/** Coin identity colors, fixed per coin so BTC reads the same on every page. */
+const COIN_TONES: Record<string, string> = { BTC: "amber", ETH: "violet", SOL: "mint", XRP: "sky" };
+const FALLBACK_TONES = ["sky", "violet", "mint", "amber"];
+
+export function coinOf(symbol: string): string {
+  return symbol.replace(/-USD$/, "");
+}
+
+export function coinTone(symbol: string): string {
+  const coin = coinOf(symbol);
+  return COIN_TONES[coin] ?? FALLBACK_TONES[[...coin].reduce((s, c) => s + c.charCodeAt(0), 0) % FALLBACK_TONES.length];
+}

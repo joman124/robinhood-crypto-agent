@@ -89,7 +89,7 @@ export async function decide(
     note: cleanNote(note),
   });
 
-  revalidatePath("/");
+  revalidatePath("/", "layout");
   return { ok: true };
 }
 
@@ -101,7 +101,7 @@ export async function undecide(proposalId: string): Promise<ActionResult> {
     return { ok: false, error: "that is not a valid proposal id" };
   }
   await clearDecision(proposalId);
-  revalidatePath("/");
+  revalidatePath("/", "layout");
   return { ok: true };
 }
 
@@ -119,13 +119,13 @@ export async function signIn(formData: FormData): Promise<ActionResult> {
     path: "/",
     maxAge: 60 * 60 * 12,
   });
-  revalidatePath("/");
+  revalidatePath("/", "layout");
   return { ok: true };
 }
 
 export async function signOut(): Promise<ActionResult> {
   const jar = await cookies();
   jar.delete(COOKIE_NAME);
-  revalidatePath("/");
+  revalidatePath("/", "layout");
   return { ok: true };
 }
