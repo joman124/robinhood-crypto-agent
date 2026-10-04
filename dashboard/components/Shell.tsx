@@ -1,7 +1,9 @@
 import { LiveProvider } from "@/components/Live";
 import { AgentState, Nav, StatusAlerts, TopBar } from "@/components/ShellClient";
+import { SidebarPnl } from "@/components/Profit";
 import { SignOutButton } from "@/components/SignIn";
 import type { Console } from "@/lib/console";
+import { pnlSummary } from "@/lib/pnl";
 
 /** The frame every console page sits in: sidebar, top bar, the real-money line, alerts. */
 export function Shell({ c, children }: { c: Console; children: React.ReactNode }) {
@@ -18,6 +20,7 @@ export function Shell({ c, children }: { c: Console; children: React.ReactNode }
             </span>
           </div>
           <Nav awaiting={awaiting} />
+          <SidebarPnl s={pnlSummary(c.payload)} />
           <AgentState payload={c.payload} />
           <div className="operator">
             <span className="avatar" aria-hidden="true">OP</span>

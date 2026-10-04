@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "check": "node lib/flow.check.mjs"
+    "check": "node lib/flow.check.mjs && node lib/pnl.check.mjs"
   },
   "dependencies": {
     "next": "^15.5.25",

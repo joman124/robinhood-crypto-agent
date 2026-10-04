@@ -16,13 +16,14 @@ shares the top bar (Robinhood quotes, last sync, mode, kill switch), the
 real-money line, and the banners that change what the numbers mean: an engaged
 kill switch, a stale sync, read-only mode, in-memory storage.
 
-- **Command center** (`/`). Headline numbers (proposals, cleared risk, what
-  needs your call, placed, the split's realized P&L) over a bar of every
-  proposal by *fate* (`lib/flow.ts`); the two sleeves side by side; the oldest
-  proposal waiting on you; the watchlist with marks and each coin's latest
-  proposal; the safety posture; a countdown to the next UTC daily close; the
-  Sankey of where every trade went; every trade on the clock; the shadow loop's
-  heartbeat.
+- **Command center** (`/`). Money first: realized P&L from the trades you
+  took (the agent's own figure, per coin), open P&L estimated at the last mark
+  (`lib/pnl.ts`: filled quantity × (mark − proposal price), since the fill
+  price is not synced), today's P&L, and the dollars still at work, over a
+  ledger of every filled trade. The algorithm's gate stats (proposals, cleared
+  risk, placed) sit below in a quieter strip, then the sleeves, the oldest
+  proposal waiting on you, the watchlist, the Sankey and the timeline. The
+  sidebar repeats realized and open P&L on every page.
 - **Proposals** (`/proposals`, `?id=<proposal id>` links straight to one). The
   queue ("Your call" by default, Decided, All, with search, pair and outcome
   filters, pagination and CSV export) beside the full packet: the airlock
@@ -44,7 +45,7 @@ kill switch, a stale sync, read-only mode, in-memory storage.
 
 The pages re-fetch every minute while the tab is visible. Every animation
 settles to its final state under `prefers-reduced-motion`. `npm run check`
-runs the fate and segment self-check.
+runs the fate, segment and P&L self-checks.
 
 ## What it does and does not do
 

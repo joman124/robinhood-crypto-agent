@@ -4,6 +4,7 @@ import { CsvButton } from "@/components/CsvButton";
 import { RelTime } from "@/components/Live";
 import { CountUp } from "@/components/motion";
 import { Pipeline } from "@/components/Pipeline";
+import { ProfitHero, TakenLedger } from "@/components/Profit";
 import { Shell } from "@/components/Shell";
 import { SignalClock } from "@/components/ShellClient";
 import { SignInForm } from "@/components/SignIn";
@@ -13,6 +14,7 @@ import { Badge, CardHead, CoinMark, Fact, FateBadge, Facts, Icon, PageHead } fro
 import { loadConsole } from "@/lib/console";
 import { FATES, FATE_ORDER, type Fated, SEGMENTS } from "@/lib/flow";
 import { coinOf, isLadder, ladderLabel, money, price } from "@/lib/format";
+import { pnlSummary, pnlTone, signedMoney } from "@/lib/pnl";
 
 export const dynamic = "force-dynamic";
 
@@ -24,8 +26,7 @@ export default async function CommandCenter() {
   const count = (f: string) => rows.filter((r) => r.fate === f).length;
   const blocked = count("blocked");
   const awaiting = rows.filter((r) => r.fate === "awaiting");
-  const pnl = Object.entries(payload?.split_realized_pnl ?? {});
-  const pnlTotal = pnl.reduce((sum, [, v]) => sum + Number(v), 0);
+  const pnl = pnlSummary(payload);
   const split = rows.filter((r) => r.p.strategy === "split").length;
   const kill = payload?.kill_switch;
 
@@ -38,29 +39,26 @@ export default async function CommandCenter() {
         </Link>
       </PageHead>
 
-      <section className="card kpi-strip" aria-label="Headline numbers">
+      <div className="grid-main">
+        <ProfitHero s={pnl} accepted={count("accepted")} />
+        <AwaitingCard first={awaiting.at(-1)} total={awaiting.length} tolerance={payload?.limits?.price_drift_tolerance_pct} />
+      </div>
+
+      <TakenLedger s={pnl} />
+
+      <section className="card kpi-strip quiet" aria-label="How the algorithm's gates filtered">
         <Kpi label="Proposals" value={String(rows.length)} note={`${split} split · ${rows.length - split} retired`} />
         <Kpi
           label="Cleared risk"
           value={rows.length ? `${Math.round(((rows.length - blocked) / rows.length) * 100)}%` : "—"}
           note={`${blocked} blocked`}
-          tone="mint"
         />
-        <Kpi label="Needs your call" value={String(awaiting.length).padStart(2, "0")} note="" tone="amber" />
+        <Kpi label="Needs your call" value={String(awaiting.length)} note="" tone="amber" />
         <Kpi label="Placed" value={String(count("placed"))} note={`${count("accepted")} accepted`} />
-        <Kpi
-          label="Split realized P&L"
-          value={pnl.length ? money(pnlTotal.toFixed(2)) : "—"}
-          note={pnl.map(([s, v]) => `${coinOf(s)} ${money(v)}`).join(" · ")}
-          tone={pnlTotal < 0 ? "red" : "mint"}
-        />
         {rows.length > 0 && <FateBar rows={rows} />}
       </section>
 
-      <div className="grid-main">
-        <Sleeves rows={rows} />
-        <AwaitingCard first={awaiting.at(-1)} total={awaiting.length} tolerance={payload?.limits?.price_drift_tolerance_pct} />
-      </div>
+      <Sleeves rows={rows} />
 
       <div className="grid-main">
         <section className="card flush">
@@ -95,7 +93,7 @@ export default async function CommandCenter() {
                           <span className="muted small">—</span>
                         )}
                       </td>
-                      <td className={`num mono ${Number(pl) < 0 ? "tone-text red" : pl ? "tone-text mint" : "muted"}`}>{pl ? money(pl) : "—"}</td>
+                      <td className={`num mono tone-text ${pnlTone(pl ? Number(pl) : null)}`}>{pl ? signedMoney(Number(pl)) : "—"}</td>
                     </tr>
                   );
                 })}
