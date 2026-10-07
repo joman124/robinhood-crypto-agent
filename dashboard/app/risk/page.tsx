@@ -37,16 +37,10 @@ export default async function RiskEngine({ searchParams }: { searchParams: Promi
 
       <div className="tabs-row">
         <nav className="pills" aria-label="Risk views">
-          <Link className={view === "checks" ? "pill on" : "pill"} href={href("checks")}>All checks</Link>
+          <Link className={view === "checks" ? "pill on" : "pill"} href={href("checks")}>Checks</Link>
           <Link className={view === "blockers" ? "pill on" : "pill"} href={href("blockers")}>Blockers · {failedCount}</Link>
-          <Link className={view === "history" ? "pill on" : "pill"} href={href("history")}>Rule history</Link>
+          <Link className={view === "history" ? "pill on" : "pill"} href={href("history")}>History</Link>
         </nav>
-        {p && (
-          <div className="badges">
-            <Badge tone="amber">Candidate: {coinOf(p.symbol)} {isLadder(p) ? ladderLabel(p) : ""}</Badge>
-            <Badge tone="red">{proposals.filter((x) => x.risk_passed === false).length} blocked overall</Badge>
-          </div>
-        )}
       </div>
 
       {!p ? (
@@ -80,17 +74,13 @@ function Evaluation({ p, onlyFailed }: { p: Proposal; onlyFailed: boolean }) {
         </section>
 
         <section className="card">
-          <CardHead title={`${coinOf(p.symbol)} · ${isLadder(p) ? ladderLabel(p) : "System 1 candidate"}`}>
-            <Badge><span className="mono">{p.proposal_id}</span></Badge>
+          <CardHead title={`${p.side.toUpperCase()} ${coinOf(p.symbol)} · ${isLadder(p) ? ladderLabel(p) : "System 1"}`}>
+            <Link className="mono small" href={`/proposals?id=${p.proposal_id}`}>{p.proposal_id}</Link>
           </CardHead>
-          <Facts cols={5}>
+          <Facts cols={3}>
             <Fact label="Notional">{money(p.notional)}</Fact>
             <Fact label="Reference">{price(p.reference_price)}</Fact>
-            <Fact label="Drift at sync">{p.drift_pct != null ? `${Number(p.drift_pct).toFixed(2)}%` : DASH}</Fact>
-            <Fact label="Side">{p.side.toUpperCase()}</Fact>
-            <Fact label="Result" tone={blocked ? "red" : "mint"}>
-              {findings.length ? `${passed} pass · ${failed.length} block` : blocked ? "Blocked" : "Passed"}
-            </Fact>
+            <Fact label="Drift">{p.drift_pct != null ? `${Number(p.drift_pct).toFixed(2)}%` : DASH}</Fact>
           </Facts>
         </section>
       </div>
@@ -139,23 +129,21 @@ function RuleHistory({ proposals }: { proposals: Proposal[] }) {
 
   return (
     <section className="card flush">
-      <CardHead title="Blocks by rule">
-        <span className="eyebrow">{proposals.length} proposals</span>
-      </CardHead>
+      <CardHead title="Blocks by rule" />
       {ranked.length === 0 ? (
         <p className="muted small pad">—</p>
       ) : (
         <div className="table-scroll">
-          <table className="grid-table">
+          <table className="grid-table cards">
             <thead><tr><th>Rule</th><th>Checks</th><th className="num">Blocked</th><th>Share</th><th>Last blocked</th></tr></thead>
             <tbody>
               {ranked.map(([rule, t]) => (
                 <tr key={rule}>
-                  <td title={RULES[rule]}><strong>{ruleLabel(rule)}</strong></td>
-                  <td className="mono muted">{t.seen}</td>
-                  <td className={`num mono ${t.fails ? "tone-text red" : "muted"}`}>{t.fails}</td>
-                  <td><span className="meter"><span className="meter-fill red" style={{ width: `${(t.fails / max) * 100}%` }} /></span></td>
-                  <td className="muted small">{t.last ? <RelTime iso={t.last} /> : "never"}</td>
+                  <td className="lead" title={RULES[rule]}><strong>{ruleLabel(rule)}</strong></td>
+                  <td className="mono muted" data-label="Checks">{t.seen}</td>
+                  <td className={`num mono ${t.fails ? "tone-text red" : "muted"}`} data-label="Blocked">{t.fails}</td>
+                  <td className="hide-sm"><span className="meter"><span className="meter-fill red" style={{ width: `${(t.fails / max) * 100}%` }} /></span></td>
+                  <td className="muted small" data-label="Last">{t.last ? <RelTime iso={t.last} /> : "never"}</td>
                 </tr>
               ))}
             </tbody>

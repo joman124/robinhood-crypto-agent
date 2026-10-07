@@ -33,10 +33,7 @@ export default async function CommandCenter() {
   return (
     <Shell c={c}>
       <PageHead title="Command Center">
-        <CsvButton proposals={payload?.proposals ?? []} />
-        <Link className="btn primary" href="/proposals">
-          <Icon name="file-check" /> Review queue
-        </Link>
+        <span className="hide-sm"><CsvButton proposals={payload?.proposals ?? []} /></span>
       </PageHead>
 
       <div className="grid-main">
@@ -47,14 +44,14 @@ export default async function CommandCenter() {
       <TakenLedger s={pnl} />
 
       <section className="card kpi-strip quiet" aria-label="How the algorithm's gates filtered">
-        <Kpi label="Proposals" value={String(rows.length)} note={`${split} split · ${rows.length - split} retired`} />
+        <Kpi label="Proposals" value={String(rows.length)} note={rows.length > split ? `${rows.length - split} retired` : ""} />
         <Kpi
           label="Cleared risk"
           value={rows.length ? `${Math.round(((rows.length - blocked) / rows.length) * 100)}%` : "—"}
           note={`${blocked} blocked`}
         />
-        <Kpi label="Needs your call" value={String(awaiting.length)} note="" tone="amber" />
-        <Kpi label="Placed" value={String(count("placed"))} note={`${count("accepted")} accepted`} />
+        <Kpi label="Your call" value={String(awaiting.length)} note="" />
+        <Kpi label="Placed" value={String(count("placed"))} note="" />
         {rows.length > 0 && <FateBar rows={rows} />}
       </section>
 
@@ -64,9 +61,9 @@ export default async function CommandCenter() {
         <section className="card flush">
           <CardHead title="Watchlist" />
           <div className="table-scroll">
-            <table className="grid-table">
+            <table className="grid-table cards">
               <thead>
-                <tr><th>Asset</th><th className="num">Mark</th><th>Latest proposal</th><th className="num">Realized P&amp;L</th></tr>
+                <tr><th>Asset</th><th className="num">Mark</th><th>Latest</th><th className="num">Realized</th></tr>
               </thead>
               <tbody>
                 {(payload?.watchlist ?? []).map((sym) => {
@@ -75,14 +72,15 @@ export default async function CommandCenter() {
                   const pl = payload?.split_realized_pnl?.[sym];
                   return (
                     <tr key={sym}>
-                      <td>
+                      <td className="lead">
                         <span className="asset">
                           <CoinMark symbol={sym} />
-                          <span><strong>{coinOf(sym)} / USD</strong><small>{mark ? <RelTime iso={mark.observed_at} /> : "no mark"}</small></span>
+                          <span><strong>{coinOf(sym)}</strong><small>{mark ? <RelTime iso={mark.observed_at} /> : "no mark"}</small></span>
                         </span>
+                        <span className="mono lead-aside">{mark ? price(mark.mark) : "—"}</span>
                       </td>
-                      <td className="num mono">{mark ? price(mark.mark) : "—"}</td>
-                      <td>
+                      <td className="num mono hide-sm">{mark ? price(mark.mark) : "—"}</td>
+                      <td className="wide" data-label="Latest">
                         {latest ? (
                           <Link className="row-link" href={`/proposals?id=${latest.p.proposal_id}`}>
                             <FateBadge fate={latest.fate} />
@@ -93,7 +91,7 @@ export default async function CommandCenter() {
                           <span className="muted small">—</span>
                         )}
                       </td>
-                      <td className={`num mono tone-text ${pnlTone(pl ? Number(pl) : null)}`}>{pl ? signedMoney(Number(pl)) : "—"}</td>
+                      <td data-label="Realized" className={`num mono tone-text ${pnlTone(pl ? Number(pl) : null)}`}>{pl ? signedMoney(Number(pl)) : "—"}</td>
                     </tr>
                   );
                 })}
@@ -122,7 +120,7 @@ export default async function CommandCenter() {
 
       {rows.length > 0 && (
         <>
-          <TradeFlow rows={rows} />
+          <div className="hide-sm"><TradeFlow rows={rows} /></div>
           <TradeTimeline rows={rows} />
         </>
       )}
@@ -220,13 +218,13 @@ function AwaitingCard({ first, total, tolerance }: { first: Fated | undefined; t
       <Facts cols={3}>
         <Fact label="Notional">{money(p.notional)}</Fact>
         <Fact label="Reference">{price(p.reference_price)}</Fact>
-        <Fact label="Drift at sync" tone={tolerance && drift > Number(tolerance) ? "red" : undefined}>
+        <Fact label="Drift" tone={tolerance && drift > Number(tolerance) ? "red" : undefined}>
           {p.drift_pct != null ? `${drift.toFixed(2)}%` : "—"}
         </Fact>
       </Facts>
       <div className="inline-check">
         <Icon name="shield-check" />
-        <span>{findings.length ? `${passed} / ${findings.length} checks passed` : "Risk passed"}</span>
+        <span>{findings.length ? `${passed}/${findings.length} risk checks` : "Risk passed"}</span>
       </div>
       <Link className="btn primary wide" href={`/proposals?id=${p.proposal_id}`}>
         <Icon name="arrow-right" /> Review

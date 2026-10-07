@@ -9,12 +9,13 @@ import { Badge, Icon, type IconName, type Tone } from "@/components/ui";
 import { type Loop, health } from "@/lib/health";
 import type { Payload } from "@/lib/types";
 
-const NAV: { href: string; label: string; icon: IconName }[] = [
-  { href: "/", label: "Command center", icon: "layout-dashboard" },
-  { href: "/proposals", label: "Proposals", icon: "file-check" },
-  { href: "/risk", label: "Risk engine", icon: "shield-check" },
-  { href: "/strategy", label: "Strategy", icon: "split" },
-  { href: "/audit", label: "Audit trail", icon: "scroll-text" },
+/** `short` is the bottom tab bar's label on a phone. */
+const NAV: { href: string; label: string; short: string; icon: IconName }[] = [
+  { href: "/", label: "Command center", short: "Home", icon: "layout-dashboard" },
+  { href: "/proposals", label: "Proposals", short: "Queue", icon: "file-check" },
+  { href: "/risk", label: "Risk engine", short: "Risk", icon: "shield-check" },
+  { href: "/strategy", label: "Strategy", short: "Strategy", icon: "split" },
+  { href: "/audit", label: "Audit trail", short: "Audit", icon: "scroll-text" },
 ];
 
 /** Old bookmarks pointed at `/#p=<id>`; the proposal now lives on its own route. */
@@ -35,8 +36,9 @@ export function Nav({ awaiting }: { awaiting: number }) {
         const active = item.href === "/" ? path === "/" : path.startsWith(item.href);
         return (
           <Link key={item.href} href={item.href} className={active ? "nav-item on" : "nav-item"} aria-current={active ? "page" : undefined}>
-            <Icon name={item.icon} size={16} />
-            <span>{item.label}</span>
+            <Icon name={item.icon} size={18} />
+            <span className="nav-label">{item.label}</span>
+            <span className="nav-short" aria-hidden="true">{item.short}</span>
             {item.href === "/proposals" && awaiting > 0 && (
               <span className="nav-count" aria-label={`${awaiting} waiting on you`}>{awaiting}</span>
             )}
@@ -82,20 +84,20 @@ export function TopBar({ payload, readOnly, memory }: { payload: Payload | null;
   return (
     <div className="topbar">
       <div className="sources" aria-label="Data sources">
-        <span><i className={`dot ${quotes ? "mint" : "neutral"}`} aria-hidden="true" />Robinhood quotes</span>
-        <span>
+        <span title="Robinhood quotes"><i className={`dot ${quotes ? "mint" : "neutral"}`} aria-hidden="true" />Quotes</span>
+        <span title="Last sync">
           <i className={`dot ${syncStale ? "amber" : "mint"}`} aria-hidden="true" />
-          Last sync {payload ? <RelTime iso={payload.generated_at} /> : "never"}
+          Sync {payload ? <RelTime iso={payload.generated_at} /> : "never"}
         </span>
       </div>
       <div className="topbar-badges">
         <Badge tone="red" icon="triangle-alert" title="Real money. This console records decisions; it never places an order.">Real money</Badge>
-        <Badge tone="sky" icon="eye">{mode.replace(/_/g, "-")}</Badge>
+        <span className="hide-sm"><Badge tone="sky" icon="eye">{mode.replace(/_/g, "-")}</Badge></span>
         {readOnly && <Badge tone="amber" icon="lock-keyhole" title="DASHBOARD_PASSWORD is not set">Read-only</Badge>}
-        {memory && <Badge tone="amber" icon="info" title="No KV store: decisions are lost on a cold start">Memory storage</Badge>}
+        {memory && <Badge tone="amber" icon="info" title="No KV store: decisions are lost on a cold start">Memory</Badge>}
         {kill && (
-          <Badge tone={kill.engaged ? "red" : "mint"} icon="power">
-            {kill.engaged ? "Kill switch engaged" : "Kill switch armed"}
+          <Badge tone={kill.engaged ? "red" : "mint"} icon="power" title={kill.engaged ? "Kill switch engaged" : "Kill switch armed"}>
+            {kill.engaged ? "Halted" : "Armed"}
           </Badge>
         )}
       </div>

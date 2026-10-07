@@ -8,7 +8,7 @@ import { RiskChecks } from "@/components/RiskChecks";
 import { Shell } from "@/components/Shell";
 import { SignInForm } from "@/components/SignIn";
 import { Badge, CardHead, CoinMark, Fact, FateBadge, Facts, Icon, PageHead } from "@/components/ui";
-import { StatusChip, VerdictChip } from "@/components/Verdict";
+import { VerdictChip } from "@/components/Verdict";
 import { loadConsole } from "@/lib/console";
 import { DASH, acceptBlocker, coinOf, isLadder, ladderLabel, money, pct, price, score, signedPct } from "@/lib/format";
 import type { Payload, Proposal } from "@/lib/types";
@@ -40,9 +40,11 @@ export default async function Proposals({ searchParams }: { searchParams: Promis
           <h2>No proposals yet</h2>
         </section>
       ) : (
-        <div className="grid-review">
+        // On a phone the queue and the review are two screens: an id in the URL opens the review.
+        <div className={askedFor ? "grid-review detail" : "grid-review"}>
           <ProposalQueue rows={rows} decidedIds={[...decided.keys()]} selectedId={selected?.p.proposal_id ?? null} initialTab={tab} />
           <div className="stack">
+            <Link className="back-sm" href={`/proposals?tab=${tab}`}><Icon name="arrow-left" /> Queue</Link>
             {selected ? (
               <Review p={selected.p} fate={selected.fate} payload={payload} canDecide={c.mayDecide} decision={decided.get(selected.p.proposal_id)} />
             ) : (
@@ -74,60 +76,36 @@ function Review({ p, fate, payload, canDecide, decision }: {
   const failed = findings.filter((f) => !f.passed);
   const ladder = isLadder(p);
   const kill = payload?.kill_switch;
-  const step = decision ? 3 : p.risk_passed === false ? 2 : 3;
 
   return (
     <>
       <section className="card">
-        <div className="card-head">
-          <h2 className="with-icon"><Icon name="lock-keyhole" size={18} /> Approval</h2>
-        </div>
-        <ol className="steps">
-          <li className="done"><span><Icon name="check" size={12} /></span>Review</li>
-          <li className={p.risk_passed === false ? "fail" : "done"}>
-            <span><Icon name={p.risk_passed === false ? "x" : "check"} size={12} /></span>Risk checks
-          </li>
-          <li className={decision ? "done" : step === 3 ? "current" : ""}>
-            <span>{decision ? <Icon name="check" size={12} /> : "03"}</span>Decide
-          </li>
-        </ol>
-      </section>
-
-      <section className="card">
-        <CardHead title={`${coinOf(p.symbol)} · ${ladder ? ladderLabel(p) : "proposal"}`} />
         <div className="pair-row">
           <span className="asset big">
             <CoinMark symbol={p.symbol} size={40} />
             <span>
-              <strong>{coinOf(p.symbol)} / USD</strong>
-              <small className="eyebrow mint">{p.sleeve ? `${p.sleeve} sleeve` : p.strategy ?? "System 1"} · {p.side === "buy" ? "long" : "exit"}</small>
+              <strong>
+                <span className={`tone-text ${p.side === "buy" ? "mint" : "red"}`}>{p.side.toUpperCase()}</span> {coinOf(p.symbol)} · {ladder ? ladderLabel(p) : "System 1"}
+              </strong>
+              <small className="mono">{p.proposal_id} <CopyButton text={p.proposal_id} /></small>
             </span>
           </span>
-          <span className="pair-id">
-            <strong className="mono">{p.proposal_id}</strong>
-            <CopyButton text={p.proposal_id} />
-          </span>
+          <FateBadge fate={fate} />
         </div>
-        <Facts cols={5}>
-          <Fact label="Side" tone={p.side === "buy" ? "mint" : "red"}>{p.side.toUpperCase()}</Fact>
+        <Facts cols={3}>
           <Fact label="Notional">{money(p.notional)}</Fact>
-          <Fact label="Reference">{price(p.reference_price)}</Fact>
           <Fact label="Quantity">{p.quantity ?? DASH}</Fact>
-          <Fact label="Status"><FateBadge fate={fate} /></Fact>
+          <Fact label="Reference">{price(p.reference_price)}</Fact>
+          <Fact label="Last mark">{mark ? price(mark.mark) : DASH}</Fact>
+          <Fact label={`Drift · ≤ ${tolerance ?? DASH}%`} tone={driftOk ? "mint" : "red"}>{drift === null ? DASH : `${drift.toFixed(2)}%`}</Fact>
+          <Fact label="Proposed"><RelTime iso={p.proposed_at} /></Fact>
         </Facts>
-        <div className="thesis">
-          {(p.trigger_reason || p.plan?.rationale) && <p>{p.trigger_reason || p.plan?.rationale}</p>}
-          <Facts cols={4}>
-            <Fact label="Stage"><StatusChip status={p.status} /></Fact>
-            <Fact label="Plan">{p.plan ? `${p.plan.style ?? "prompt"} · ${p.plan.tranches} tranche${p.plan.tranches === 1 ? "" : "s"}` : DASH}</Fact>
-            <Fact label="Proposed"><RelTime iso={p.proposed_at} /></Fact>
-            {p.score != null ? (
-              <Fact label="Composite">{score(p.score)} · {pct(p.confidence)}</Fact>
-            ) : (
-              <Fact label="Rule">{ladder ? ladderLabel(p) : DASH}</Fact>
-            )}
-          </Facts>
-        </div>
+        {(p.trigger_reason || p.plan?.rationale || p.score != null) && (
+          <div className="thesis">
+            {(p.trigger_reason || p.plan?.rationale) && <p>{p.trigger_reason || p.plan?.rationale}</p>}
+            {p.score != null && <p className="muted small">Composite {score(p.score)} · {pct(p.confidence)}</p>}
+          </div>
+        )}
         {(p.signals ?? []).length > 0 && (
           <ul className="signals" aria-label="Signals">
             {p.signals!.map((s) => {
@@ -152,19 +130,7 @@ function Review({ p, fate, payload, canDecide, decision }: {
       </section>
 
       <section className="card">
-        <CardHead title="Price drift">
-          <Badge tone={driftOk ? "mint" : "red"}>{drift === null ? "No mark" : driftOk ? "Within limit" : "Past limit"}</Badge>
-        </CardHead>
-        <Facts cols={4}>
-          <Fact label="Proposed at">{price(p.reference_price)}</Fact>
-          <Fact label="Last mark">{mark ? price(mark.mark) : DASH}</Fact>
-          <Fact label="Drift" tone={driftOk ? "mint" : "red"}>{drift === null ? DASH : `${drift.toFixed(2)}%`}</Fact>
-          <Fact label="Limit">≤ {tolerance ?? DASH}%</Fact>
-        </Facts>
-      </section>
-
-      <section className="card">
-        <CardHead title={findings.length ? `${findings.length - failed.length} / ${findings.length} checks passed` : "Risk checks"}>
+        <CardHead title={findings.length ? `Risk · ${findings.length - failed.length}/${findings.length}` : "Risk"}>
           <Badge tone={p.risk_passed === false ? "red" : "mint"}>{p.risk_passed === false ? "Blocked" : "Cleared"}</Badge>
         </CardHead>
         <RiskChecks p={p} />
@@ -184,26 +150,26 @@ function Review({ p, fate, payload, canDecide, decision }: {
         ]}
       />
 
-      <section className="card">
+      {(p.outcome || p.execution) && (
+        <section className="card">
           <CardHead title="Outcome" />
-          {p.outcome ? (
+          {p.outcome && (
             <Facts cols={2}>
               <Fact label="Verdict"><VerdictChip verdict={p.outcome.verdict} /></Fact>
-              <Fact label="Move in its favour">{signedPct(p.outcome.signed_move_pct)}</Fact>
+              <Fact label="Move">{signedPct(p.outcome.signed_move_pct)}</Fact>
               <Fact label="Price">{price(p.outcome.reference_price)} → {price(p.outcome.resolved_price)}</Fact>
               <Fact label="Horizon · hurdle">{p.outcome.horizon_bars} bars · {p.outcome.hurdle_pct}%</Fact>
             </Facts>
-          ) : (
-            <p className="muted small">{ladder ? "Not scored" : "Pending"}</p>
           )}
           {p.execution && (
             <Facts cols={3}>
-              <Fact label="Tranches logged">{p.execution.tranches}</Fact>
+              <Fact label="Tranches">{p.execution.tranches}</Fact>
               <Fact label="Filled">{p.execution.filled_quantity}</Fact>
-              <Fact label="Last state">{p.execution.overridden ? "overridden by a human" : p.execution.state ?? DASH}</Fact>
+              <Fact label="State">{p.execution.overridden ? "overridden" : p.execution.state ?? DASH}</Fact>
             </Facts>
           )}
-      </section>
+        </section>
+      )}
     </>
   );
 }

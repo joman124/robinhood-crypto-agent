@@ -87,7 +87,7 @@ export function Airlock({ proposal, decision, canDecide, blocker, syncedAt, chec
           {canDecide && (
             <>
               <label className="field">
-                <span>Type the proposal ID to accept</span>
+                <span>Type the ID to accept</span>
                 <span className={`confirm-input ${confirmed ? "ok" : ""}`}>
                   <input
                     value={typed}
@@ -95,6 +95,9 @@ export function Airlock({ proposal, decision, canDecide, blocker, syncedAt, chec
                     placeholder={id}
                     spellCheck={false}
                     autoComplete="off"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    inputMode="text"
                     aria-describedby="confirm-hint"
                   />
                   {confirmed && <Icon name="circle-check" size={16} />}

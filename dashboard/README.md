@@ -26,10 +26,10 @@ kill switch, a stale sync, read-only mode, in-memory storage.
   sidebar repeats realized and open P&L on every page.
 - **Proposals** (`/proposals`, `?id=<proposal id>` links straight to one). The
   queue ("Your call" by default, Decided, All, with search, pair and outcome
-  filters, pagination and CSV export) beside the full packet: the airlock
-  steps, the trade and its thesis, signals for a System 1 record, the drift
-  check against the last mark, every risk rule, the outcome, any execution,
-  and the `rhca` commands to copy. Accept needs the proposal id typed back.
+  filters, pagination and CSV export) beside the full packet: the trade, its
+  thesis and its drift against the last mark, signals for a System 1 record,
+  every risk rule, the decision, and the outcome and execution once there
+  are any. Accept needs the proposal id typed back.
   "Place order" is permanently disabled. Old `/#p=<id>` links redirect here.
 - **Risk engine** (`/risk`). One proposal's evaluation (the newest blocked
   one by default): its verdict, every rule numbered pass/block, the active
@@ -42,6 +42,10 @@ kill switch, a stale sync, read-only mode, in-memory storage.
   control event this console holds, newest first, with the record as synced
   and a JSONL export. It is a view; the agent's append-only log stays on its
   machine (`rhca audit`).
+
+On a phone (≤ 900px) the sidebar becomes a slim header carrying realized
+and open P&L, the pages move to a bottom tab bar, tables become lists, and
+Proposals splits into two screens: the queue, and the review a tap opens.
 
 The pages re-fetch every minute while the tab is visible. Every animation
 settles to its final state under `prefers-reduced-motion`. `npm run check`
