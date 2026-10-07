@@ -35,13 +35,13 @@ export default async function Strategy() {
   return (
     <Shell c={c}>
       <PageHead title="Strategy">
-        <a className="btn" href={doc} target="_blank" rel="noopener noreferrer"><Icon name="book-open" /> Strategy doc</a>
+        <a className="btn hide-sm" href={doc} target="_blank" rel="noopener noreferrer" aria-label="Strategy doc"><Icon name="book-open" /> <span className="hide-sm">Doc</span></a>
       </PageHead>
 
       <section className="card kpi-strip" aria-label="The split in numbers">
-        <div className="kpi"><span className="kpi-label">Split realized P&amp;L</span><span className={`kpi-value ${pnlTotal < 0 ? "tone-text red" : ""}`}><CountUp text={pnlEntries.length ? money(pnlTotal.toFixed(2)) : "—"} /></span></div>
-        <div className="kpi"><span className="kpi-label">Long-term proposals</span><span className="kpi-value"><CountUp text={String(split.filter((r) => r.segment === "long").length)} /></span></div>
-        <div className="kpi"><span className="kpi-label">Breakout proposals</span><span className="kpi-value tone-text mint"><CountUp text={String(split.filter((r) => r.segment === "short").length)} /></span></div>
+        <div className="kpi"><span className="kpi-label">Realized P&amp;L</span><span className={`kpi-value ${pnlTotal < 0 ? "tone-text red" : ""}`}><CountUp text={pnlEntries.length ? money(pnlTotal.toFixed(2)) : "—"} /></span></div>
+        <div className="kpi"><span className="kpi-label">Long-term</span><span className="kpi-value"><CountUp text={String(split.filter((r) => r.segment === "long").length)} /></span></div>
+        <div className="kpi"><span className="kpi-label">Breakout</span><span className="kpi-value tone-text mint"><CountUp text={String(split.filter((r) => r.segment === "short").length)} /></span></div>
         <div className="kpi"><span className="kpi-label">Placed</span><span className="kpi-value"><CountUp text={String(split.filter((r) => r.fate === "placed").length)} /></span></div>
       </section>
 
@@ -65,7 +65,7 @@ export default async function Strategy() {
                       <li key={sym}>
                         <span className="mono">{coinOf(sym)}</span>
                         <span className="meter"><span className={`meter-fill coin-${coinOf(sym).toLowerCase()}`} style={{ width: `${(n / max) * 100}%` }} /></span>
-                        <span className="mono muted">{placed}/{n} placed</span>
+                        <span className="mono muted" title="placed / proposed">{placed}/{n}</span>
                       </li>
                     );
                   })}
@@ -80,9 +80,9 @@ export default async function Strategy() {
       <section className="card flush">
         <CardHead title="By coin" />
         <div className="table-scroll">
-          <table className="grid-table">
+          <table className="grid-table cards">
             <thead>
-              <tr><th>Asset</th><th className="num">Mark</th><th>Long-term</th><th>Breakout</th><th className="num">Realized P&amp;L</th><th>Latest</th></tr>
+              <tr><th>Asset</th><th className="num">Mark</th><th title="placed / proposed">Long-term</th><th title="placed / proposed">Breakout</th><th className="num">Realized</th><th>Latest</th></tr>
             </thead>
             <tbody>
               {watchlist.map((sym) => {
@@ -95,12 +95,12 @@ export default async function Strategy() {
                 const mark = payload?.market?.[sym];
                 return (
                   <tr key={sym}>
-                    <td><span className="asset"><CoinMark symbol={sym} /><strong>{coinOf(sym)}</strong></span></td>
-                    <td className="num mono">{mark ? price(mark.mark) : "—"}</td>
-                    <td className="mono">{tally("long")} <small className="muted">placed</small></td>
-                    <td className="mono tone-text mint">{tally("short")} <small className="muted">placed</small></td>
-                    <td className={`num mono ${Number(pnl[sym]) < 0 ? "tone-text red" : pnl[sym] ? "tone-text mint" : "muted"}`}>{pnl[sym] ? money(pnl[sym]) : "—"}</td>
-                    <td>{latest ? <Link className="row-link" href={`/proposals?id=${latest.p.proposal_id}`}><FateBadge fate={latest.fate} /><span>{ladderLabel(latest.p)}</span></Link> : <span className="muted small">—</span>}</td>
+                    <td className="lead"><span className="asset"><CoinMark symbol={sym} /><strong>{coinOf(sym)}</strong></span><span className="mono lead-aside">{mark ? price(mark.mark) : "—"}</span></td>
+                    <td className="num mono hide-sm">{mark ? price(mark.mark) : "—"}</td>
+                    <td className="mono" data-label="Long-term">{tally("long")}</td>
+                    <td className="mono tone-text mint" data-label="Breakout">{tally("short")}</td>
+                    <td data-label="Realized" className={`num mono ${Number(pnl[sym]) < 0 ? "tone-text red" : pnl[sym] ? "tone-text mint" : "muted"}`}>{pnl[sym] ? money(pnl[sym]) : "—"}</td>
+                    <td className="wide" data-label="Latest">{latest ? <Link className="row-link" href={`/proposals?id=${latest.p.proposal_id}`}><FateBadge fate={latest.fate} /><span>{ladderLabel(latest.p)}</span></Link> : <span className="muted small">—</span>}</td>
                   </tr>
                 );
               })}
@@ -120,7 +120,7 @@ export default async function Strategy() {
             <section className="card kpi-strip three">
               <div className="kpi"><span className="kpi-label">Hit rate</span><span className="kpi-value"><CountUp text={pct(stats.win_rate)} /></span><span className="kpi-note">{stats.win_rate === null ? "" : `${stats.wins}W / ${stats.losses}L · ${stats.flat} flat`}</span></div>
               <div className="kpi"><span className="kpi-label">Average move</span><span className="kpi-value"><CountUp text={stats.average_move_pct !== null ? signedPct(stats.average_move_pct) : "—"} /></span><span className="kpi-note">{stats.best_move_pct !== null ? `best ${signedPct(stats.best_move_pct)} · worst ${signedPct(stats.worst_move_pct)}` : ""}</span></div>
-              <div className="kpi"><span className="kpi-label">Scored</span><span className="kpi-value"><CountUp text={String(stats.resolved)} /></span><span className="kpi-note">of {rows.filter((r) => r.segment === "system1").length}</span></div>
+              <div className="kpi"><span className="kpi-label">Scored</span><span className="kpi-value"><CountUp text={String(stats.resolved)} /></span><span className="kpi-note">/ {rows.filter((r) => r.segment === "system1").length}</span></div>
             </section>
           )}
           <div className="grid-2">

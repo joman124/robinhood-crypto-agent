@@ -1,15 +1,10 @@
 import { RelTime } from "@/components/Live";
 import type { Heartbeat } from "@/lib/types";
 
-const SERVICES: [string, string][] = [
-  ["robinhood", "Robinhood quotes"],
-  ["dashboard", "Dashboard sync"],
-];
-
 const COUNTS: [string, string][] = [
-  ["quotes", "quotes read"],
-  ["candidates", "proposals logged"],
-  ["proposed", "passing risk"],
+  ["quotes", "quotes"],
+  ["candidates", "proposals"],
+  ["proposed", "passed risk"],
   ["errors", "errors"],
 ];
 
@@ -31,8 +26,7 @@ export function Pipeline({ beat }: { beat: Heartbeat | null | undefined }) {
       <div className="panel-head">
         <h2>Shadow loop</h2>
         <span className="muted small">
-          {beat.mode ?? "shadow"} mode · {beat.cycles ?? 0} cycles since{" "}
-          <RelTime iso={beat.started_at} />
+          {beat.cycles ?? 0} cycles · <RelTime iso={beat.last_cycle_at} />
         </span>
       </div>
 
@@ -44,18 +38,6 @@ export function Pipeline({ beat }: { beat: Heartbeat | null | undefined }) {
           </div>
         ))}
       </div>
-
-      <ul className="services" aria-label="Services">
-        {SERVICES.map(([key, label]) => {
-          const on = Boolean(beat.services[key]);
-          return (
-            <li key={key} className={on ? "on" : "off"}>
-              <span aria-hidden="true">{on ? "✓" : "–"}</span> {label}
-              <span className="sr-only">{on ? " enabled" : " off"}</span>
-            </li>
-          );
-        })}
-      </ul>
 
       {beat.last_error && (
         <p className="alert warn compact">

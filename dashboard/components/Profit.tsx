@@ -16,16 +16,13 @@ export function ProfitHero({ s, accepted }: { s: PnlSummary; accepted: number })
   return (
     <section className={`card profit ${tone}`} aria-labelledby="profit-title">
       <div className="profit-main">
-        <p className="eyebrow" id="profit-title">Realized P&amp;L · trades you took</p>
+        <p className="eyebrow" id="profit-title">Realized P&amp;L</p>
         <p className={`profit-value tone-text ${tone}`}>
           <CountUp text={s.realized === null ? "$0.00" : signedMoney(s.realized)} />
         </p>
         <p className="muted small">
-          {s.trades.length
-            ? `${s.trades.length} trade${s.trades.length === 1 ? "" : "s"} filled${accepted ? ` · ${accepted} accepted, waiting on an order` : ""}`
-            : accepted
-              ? `${accepted} accepted, waiting on an order. Nothing has filled yet.`
-              : "No fills recorded yet. Accept a proposal; once the agent records its fill, its P&L lands here."}
+          {s.trades.length ? `${s.trades.length} filled` : "No fills yet"}
+          {accepted ? ` · ${accepted} accepted` : ""}
         </p>
       </div>
 
@@ -33,17 +30,15 @@ export function ProfitHero({ s, accepted }: { s: PnlSummary; accepted: number })
         <div>
           <dt>Open, est.</dt>
           <dd className={`tone-text ${pnlTone(s.open)}`}><CountUp text={signedMoney(s.open)} /></dd>
-          <small>marked at last sync</small>
         </div>
         <div>
           <dt>Today</dt>
           <dd className={`tone-text ${pnlTone(s.today)}`}><CountUp text={signedMoney(s.today)} /></dd>
-          <small>{s.tradedToday ? `${money(s.tradedToday.toFixed(2))} traded` : "realized, UTC day"}</small>
+          {s.tradedToday ? <small>{money(s.tradedToday.toFixed(2))} traded</small> : null}
         </div>
         <div>
           <dt>At work</dt>
           <dd><CountUp text={money(s.atWork.toFixed(2))} /></dd>
-          <small>in open buys</small>
         </div>
       </dl>
 
@@ -68,21 +63,19 @@ export function ProfitHero({ s, accepted }: { s: PnlSummary; accepted: number })
 export function TakenLedger({ s }: { s: PnlSummary }) {
   return (
     <section className="card flush">
-      <CardHead title="Trades you took">
-        <span className="eyebrow">Open P&amp;L is an estimate at the proposal price</span>
-      </CardHead>
+      <CardHead title="Trades you took" />
       {s.trades.length === 0 ? (
         <p className="muted small pad">None yet.</p>
       ) : (
         <div className="table-scroll">
-          <table className="grid-table">
+          <table className="grid-table cards">
             <thead>
-              <tr><th>Trade</th><th>Sleeve</th><th className="num">Filled</th><th className="num">In at</th><th className="num">Dollars</th><th className="num">P&amp;L</th></tr>
+              <tr><th>Trade</th><th>Sleeve</th><th className="num">Filled</th><th className="num">In at</th><th className="num">Dollars</th><th className="num" title="Open P&amp;L is estimated at the proposal price">P&amp;L</th></tr>
             </thead>
             <tbody>
               {s.trades.map((t) => (
                 <tr key={t.p.proposal_id}>
-                  <td>
+                  <td className="lead">
                     <Link className="asset" href={`/proposals?id=${t.p.proposal_id}`}>
                       <CoinMark symbol={t.p.symbol} size={28} />
                       <span>
@@ -91,11 +84,11 @@ export function TakenLedger({ s }: { s: PnlSummary }) {
                       </span>
                     </Link>
                   </td>
-                  <td className="small">{isLadder(t.p) ? ladderLabel(t.p) : "System 1"}</td>
-                  <td className="num mono">{t.qty || "—"}</td>
-                  <td className="num mono">{price(t.p.reference_price)}</td>
-                  <td className="num mono">{money(t.cost.toFixed(2))}</td>
-                  <td className="num">
+                  <td className="small" data-label="Sleeve">{isLadder(t.p) ? ladderLabel(t.p) : "System 1"}</td>
+                  <td className="num mono" data-label="Filled">{t.qty || "—"}</td>
+                  <td className="num mono" data-label="In at">{price(t.p.reference_price)}</td>
+                  <td className="num mono" data-label="Dollars">{money(t.cost.toFixed(2))}</td>
+                  <td className="num" data-label="P&L">
                     {t.move !== null ? (
                       <span className={`mono tone-text ${pnlTone(t.move)}`}>{signedMoney(t.move)}</span>
                     ) : (
@@ -118,7 +111,7 @@ export function SidebarPnl({ s }: { s: PnlSummary }) {
     <Link href="/" className="sidebar-pnl">
       <span className="eyebrow">Realized P&amp;L</span>
       <strong className={`tone-text ${pnlTone(s.realized)}`}>{s.realized === null ? "$0.00" : signedMoney(s.realized)}</strong>
-      <small className={`tone-text ${pnlTone(s.open)}`}>{s.open === null ? "no open positions marked" : `${signedMoney(s.open)} open, est.`}</small>
+      {s.open !== null && <small className={`tone-text ${pnlTone(s.open)}`}>{signedMoney(s.open)} open</small>}
     </Link>
   );
 }

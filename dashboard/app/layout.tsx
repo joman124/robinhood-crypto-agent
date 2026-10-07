@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { DM_Sans, Inter, Roboto_Mono } from "next/font/google";
 
 import "./globals.css";
@@ -15,6 +15,14 @@ export const metadata: Metadata = {
     "Trade proposals from the robinhood-crypto-agent, their risk verdicts, and accept/decline sign-off by proposal ID.",
   // A private operator console: keep it out of search indexes.
   robots: { index: false, follow: false },
+};
+
+/** Edge to edge on a phone: the bottom tab bar pads itself past the home indicator. */
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#06080b",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

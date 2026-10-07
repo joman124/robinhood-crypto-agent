@@ -5,7 +5,7 @@ import { useState } from "react";
 
 import { CsvButton } from "@/components/CsvButton";
 import { RelTime } from "@/components/Live";
-import { CoinMark, FateBadge } from "@/components/ui";
+import { CoinMark, FateBadge, Icon } from "@/components/ui";
 import type { Fated } from "@/lib/flow";
 import { coinOf, isLadder, ladderLabel, money, verdictOf } from "@/lib/format";
 
@@ -61,9 +61,8 @@ export function ProposalQueue({ rows, decidedIds, selectedId, initialTab }: {
   const tabs: [QueueTab, string][] = [["awaiting", "Your call"], ["decided", "Decided"], ["all", "All"]];
 
   return (
-    <section className="card flush queue">
+    <section className="card flush queue" aria-label="Proposal queue">
       <div className="queue-head">
-        <h2>Proposal queue</h2>
         <div className="pills" role="tablist" aria-label="Queue">
           {tabs.map(([key, label]) => (
             <button key={key} role="tab" aria-selected={tab === key} className={tab === key ? "pill on" : "pill"} onClick={() => reset(setTab)(key)}>
@@ -72,7 +71,7 @@ export function ProposalQueue({ rows, decidedIds, selectedId, initialTab }: {
           ))}
         </div>
         <div className="queue-filters">
-          <input type="search" placeholder="Search id, pair, rule…" aria-label="Search proposals" value={query} onChange={(e) => reset(setQuery)(e.target.value)} />
+          <input type="search" placeholder="Search" aria-label="Search proposals" value={query} onChange={(e) => reset(setQuery)(e.target.value)} />
           <select aria-label="Pair" value={pair} onChange={(e) => reset(setPair)(e.target.value)}>
             <option value={ANY}>Any pair</option>
             {pairs.map((s) => <option key={s} value={s}>{coinOf(s)}</option>)}
@@ -98,12 +97,14 @@ export function ProposalQueue({ rows, decidedIds, selectedId, initialTab }: {
               <Link
                 href={`/proposals?id=${p.proposal_id}&tab=${tab}`}
                 scroll={false}
+                // On a phone the review replaces the queue, so start it at the top.
+                onClick={() => window.matchMedia("(max-width: 900px)").matches && window.scrollTo(0, 0)}
                 className={p.proposal_id === selectedId ? "queue-item on" : "queue-item"}
                 aria-current={p.proposal_id === selectedId ? "true" : undefined}
               >
                 <CoinMark symbol={p.symbol} size={28} />
                 <span className="queue-copy">
-                  <strong>{p.side.toUpperCase()} · {coinOf(p.symbol)} {isLadder(p) ? ladderLabel(p) : "System 1"}</strong>
+                  <strong>{p.side.toUpperCase()} {coinOf(p.symbol)} · {isLadder(p) ? ladderLabel(p) : "System 1"}</strong>
                   <small className="mono">{p.proposal_id} · <RelTime iso={p.proposed_at} /></small>
                 </span>
                 <span className="queue-side">
@@ -119,14 +120,14 @@ export function ProposalQueue({ rows, decidedIds, selectedId, initialTab }: {
       <div className="queue-foot">
         {shown.length > PAGE_SIZE ? (
           <nav className="pager" aria-label="Pages">
-            <button className="btn small" disabled={current === 0} onClick={() => setPage(current - 1)}>Newer</button>
+            <button className="btn small" disabled={current === 0} onClick={() => setPage(current - 1)} aria-label="Newer"><Icon name="arrow-left" size={13} /></button>
             <span className="eyebrow">{current + 1} / {pages}</span>
-            <button className="btn small" disabled={current >= pages - 1} onClick={() => setPage(current + 1)}>Older</button>
+            <button className="btn small" disabled={current >= pages - 1} onClick={() => setPage(current + 1)} aria-label="Older"><Icon name="arrow-right" size={13} /></button>
           </nav>
         ) : (
-          <span className="eyebrow">{shown.length} shown</span>
+          <span className="eyebrow">{shown.length}</span>
         )}
-        <CsvButton proposals={shown.map((r) => r.p)} label="CSV" />
+        <span className="hide-sm"><CsvButton proposals={shown.map((r) => r.p)} label="CSV" /></span>
       </div>
     </section>
   );

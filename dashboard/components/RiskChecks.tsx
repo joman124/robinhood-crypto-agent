@@ -32,7 +32,7 @@ export function RiskChecks({ p, onlyFailed = false }: { p: Proposal; onlyFailed?
           key={f.rule}
           mark={n}
           label={RULES[f.rule] ?? ruleLabel(f.rule)}
-          detail={f.message ?? ruleLabel(f.rule)}
+          detail={f.message ?? (RULES[f.rule] ? ruleLabel(f.rule) : undefined)}
           state={f.passed ? "pass" : f.blocking ? "block" : "warn"}
         />
       ))}
