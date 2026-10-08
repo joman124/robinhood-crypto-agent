@@ -206,12 +206,12 @@ class StrategyConfig:
 
     @property
     def required_bars(self) -> int:
-        """Closed bars needed before the rule can say anything."""
+        """Closed bars the retired ladder's rule needed."""
         return max(1, self.trend_bars)
 
     @property
     def history_days(self) -> int:
-        """Days of bars to keep on hand: the trend window and two days' slack."""
+        """Days of hourly bars to import: the retired ladder's window plus two."""
         return self.required_bars * self.bar_interval_minutes // (24 * 60) + 2
 
 

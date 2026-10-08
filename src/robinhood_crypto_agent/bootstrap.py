@@ -1,13 +1,10 @@
 """Bootstrapping price history from Coinbase's public candles.
 
-Robinhood's crypto API has no historical bars (docs/data-constraints.md), and
-the trend ladder's average needs weeks of them: 50 days is 1,200 hourly bars.
-Coinbase publishes free candles for the same pairs, up to 300 bars a request,
-so ``fetch_coinbase_history`` pages back as far as the average needs.
-
-Imported bars are marked ``source=import``. They set the trend average and the
-anchor; proposals are always priced off a live Robinhood quote, whose spread
-these prices do not include.
+Robinhood's crypto API has no historical bars (docs/data-constraints.md).
+Coinbase publishes free candles, up to 300 a request: daily closes for the
+split (``daily.py``), hourly bars for the charts. Imported bars are marked
+``source=import``; proposals are priced off a live Robinhood quote, whose
+spread these prices do not include.
 """
 
 from __future__ import annotations

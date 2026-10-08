@@ -115,23 +115,12 @@ PowerShell and cmd, and needs no activation script:
 .venv\Scripts\rhca run --keep-awake    # the real run; Ctrl+C stops it
 ```
 
-`run` fetches the missing Coinbase bars itself before it starts, so there is
-nothing to remember. It fetches two kinds:
+`run` fetches what it needs from Coinbase before it starts:
 
-- **Daily closes** are what the split decides on. They are cached per coin
-  under `data/daily/`, with enough history for the 200-day average, and the
-  loop refetches each new close once Coinbase publishes it. The banner's
-  `daily closes` line shows the last close on hand for each coin:
-  `BTC-USD through YYYY-MM-DD, ...`.
-- **Hourly bars** no longer feed the strategy. They draw the dashboard's price
-  charts and score proposals for `rhca accuracy`. The first start fetches 52
-  days of them (sized by the retired ladder's `strategy.trend_days`), each
-  restart fills the gap since the loop last ran, and the banner's `history`
-  line says how many it imported.
+- **Daily closes**: what the split decides on, cached under `data/daily/`.
+- **Hourly bars**: for the dashboard's charts and `rhca accuracy` only.
 
-`--no-bootstrap` skips both. The first pass still fetches the daily closes it
-needs. `rhca bootstrap-history` runs the hourly import on its own if you want
-it without starting the loop.
+`--no-bootstrap` skips both; the first pass fetches the daily closes anyway.
 
 A symbol Coinbase cannot serve is reported and skipped rather than stopping the
 loop — `run` starts even when Coinbase is unreachable, just with whatever
@@ -152,17 +141,10 @@ not yet been confirmed against a live account. The first run is that check:
       one, the pair's `status` field came back spelled differently from the
       docs. Every proposal would then be blocked by `pair_tradable`, so fix the
       parser before running on.
-- [ ] The banner's `daily closes` line lists `BTC-USD`, `ETH-USD`, `SOL-USD`
-      and `XRP-USD`, each through the latest closed UTC day, and does not end
-      in `, N failed`. Each failure prints its reason on a `!` line below it.
-      `rhca status` still counts hourly bars against 1200. That count no
-      longer gates anything.
-- [ ] `rhca analyze --no-record` gives each coin either a proposal or, under
-      `NO PROPOSAL`, a `nothing to do on the YYYY-MM-DD close: ...` line with
-      each sleeve's reason, for example `short-term: no breakout -- closed
-      ... against the prior 20-day high ... and the 100-day average ...;
-      long-term: 0 of 10 tranches bought; waits for a close under its 200-day
-      average ... (closed ...)`.
+- [ ] The banner's `daily closes` line lists all four coins through the
+      latest closed UTC day, with no `failed`.
+- [ ] `rhca analyze --no-record` gives each coin a proposal or a
+      `nothing to do on the YYYY-MM-DD close: ...` line.
 
 Once it has run, replace the invented REST payloads in
 `tests/unit/test_robinhood_client.py` with trimmed live captures.

@@ -286,11 +286,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     print()
 
     coverages = [
-        store.coverage(
-            symbol,
-            interval_minutes=config.strategy.bar_interval_minutes,
-            required_bars=config.strategy.required_bars,
-        )
+        store.coverage(symbol, interval_minutes=config.strategy.bar_interval_minutes)
         for symbol in config.watchlist
     ]
     print(reports.render_coverage(coverages))
@@ -555,11 +551,7 @@ def cmd_import_history(args: argparse.Namespace) -> int:
         f"imported {len(candles)} bar(s) for {symbol} as {written} synthetic "
         "observation(s), marked source=import"
     )
-    coverage = store.coverage(
-        symbol,
-        interval_minutes=config.strategy.bar_interval_minutes,
-        required_bars=config.strategy.required_bars,
-    )
+    coverage = store.coverage(symbol, interval_minutes=config.strategy.bar_interval_minutes)
     print(f"  {coverage.describe()}")
     return EXIT_OK
 
@@ -1000,7 +992,7 @@ def import_recent_history(
     interval = config.strategy.bar_interval_minutes
     for symbol in config.watchlist:
         try:
-            # Enough for the trend average: its window plus two days' slack.
+            # Hourly bars: only the charts and outcome scoring read them.
             candles = fetch_coinbase_history(
                 symbol, interval_minutes=interval, days=config.strategy.history_days
             )
@@ -1013,9 +1005,7 @@ def import_recent_history(
         }
         missing = [c for c in candles if c.start not in existing]
         store.import_candles(missing)
-        coverage = store.coverage(
-            symbol, interval_minutes=interval, required_bars=config.strategy.required_bars
-        )
+        coverage = store.coverage(symbol, interval_minutes=interval)
         imported.append((symbol, len(missing), coverage.describe()))
     return imported, failures
 
@@ -1049,8 +1039,8 @@ def cmd_bootstrap_history(args: argparse.Namespace) -> int:
     if failures and not imported:
         raise AgentError("no symbol could be bootstrapped from Coinbase")
     print(
-        "\nImported bars are marked source=import. They set the anchor and the trend "
-        "average; proposals are always priced off a live Robinhood quote."
+        "\nImported bars are marked source=import. Only the charts and rhca accuracy "
+        "read them."
     )
     return EXIT_OK
 
@@ -1523,9 +1513,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     print(f"  forward test     : {describe_forward_test(config)}")
     print(f"  dashboard sync   : {'on' if services.dashboard else 'off'}")
-    # Bootstrapping here rather than asking for it beforehand: the trend
-    # average needs weeks of bars, and every restart leaves a gap between the
-    # last imported bar and the first polled one. Coinbase being unreachable
+    # Fetched here so nothing has to be remembered. Coinbase being unreachable
     # is not a reason to refuse to start.
     if args.no_bootstrap:
         print("  history          : bootstrap skipped (--no-bootstrap)")
@@ -1598,7 +1586,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     bootstrap = sub.add_parser(
         "bootstrap-history",
-        help="import Coinbase bars so the trend average and anchor exist at once",
+        help="import recent hourly Coinbase bars (charts and accuracy)",
     )
     bootstrap.set_defaults(func=cmd_bootstrap_history)
 
