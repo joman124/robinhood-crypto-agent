@@ -992,7 +992,7 @@ def import_recent_history(
     interval = config.strategy.bar_interval_minutes
     for symbol in config.watchlist:
         try:
-            # The dashboard's charts and outcome scoring read these, not the split.
+            # Hourly bars: only the charts and outcome scoring read them.
             candles = fetch_coinbase_history(
                 symbol, interval_minutes=interval, days=config.strategy.history_days
             )
@@ -1039,9 +1039,8 @@ def cmd_bootstrap_history(args: argparse.Namespace) -> int:
     if failures and not imported:
         raise AgentError("no symbol could be bootstrapped from Coinbase")
     print(
-        "\nImported bars are marked source=import. They feed the dashboard's charts and "
-        "rhca accuracy; the split decides on daily closes, and proposals are always "
-        "priced off a live Robinhood quote."
+        "\nImported bars are marked source=import. Only the charts and rhca accuracy "
+        "read them."
     )
     return EXIT_OK
 
@@ -1514,10 +1513,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     print(f"  forward test     : {describe_forward_test(config)}")
     print(f"  dashboard sync   : {'on' if services.dashboard else 'off'}")
-    # Bootstrapping here rather than asking for it beforehand: the split needs
-    # its daily closes on the first pass, and every restart leaves a gap in the
-    # hourly bars the dashboard charts. Coinbase being unreachable is not a
-    # reason to refuse to start.
+    # Fetched here so nothing has to be remembered. Coinbase being unreachable
+    # is not a reason to refuse to start.
     if args.no_bootstrap:
         print("  history          : bootstrap skipped (--no-bootstrap)")
     else:
@@ -1589,7 +1586,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     bootstrap = sub.add_parser(
         "bootstrap-history",
-        help="import recent hourly Coinbase bars for the dashboard's charts and rhca accuracy",
+        help="import recent hourly Coinbase bars (charts and accuracy)",
     )
     bootstrap.set_defaults(func=cmd_bootstrap_history)
 

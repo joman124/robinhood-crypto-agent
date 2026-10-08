@@ -1,13 +1,10 @@
 """Bootstrapping price history from Coinbase's public candles.
 
 Robinhood's crypto API has no historical bars (docs/data-constraints.md).
-Coinbase publishes free candles for the same pairs, up to 300 bars a request,
-so ``fetch_coinbase_history`` pages back as far as a caller asks: the split's
-daily closes (``daily.py``), and the hourly bars behind the dashboard's charts
-and outcome scoring.
-
-Imported bars are marked ``source=import``. Proposals are always priced off a
-live Robinhood quote, whose spread these prices do not include.
+Coinbase publishes free candles, up to 300 a request: daily closes for the
+split (``daily.py``), hourly bars for the charts. Imported bars are marked
+``source=import``; proposals are priced off a live Robinhood quote, whose
+spread these prices do not include.
 """
 
 from __future__ import annotations

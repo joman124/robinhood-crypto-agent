@@ -117,7 +117,7 @@ def render_risk(decision: RiskDecision, *, indent: str = "") -> list[str]:
 
 def render_coverage(coverages: Iterable[Coverage]) -> str:
     """Render price-history coverage for the watchlist."""
-    lines = ["hourly price history (dashboard charts and accuracy; the split reads daily closes):"]
+    lines = ["hourly bars (charts and accuracy only):"]
     for coverage in coverages:
         lines.append(f"  {coverage.describe()}")
         age = coverage.age_seconds

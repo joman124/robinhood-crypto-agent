@@ -65,9 +65,7 @@ Each stage may decline, and a decline carries a reason. A symbol always ends
 with either a proposal or an explanation — an empty result list with no
 explanation would hide the difference between "nothing looks good" and "this
 symbol has no data". With no order to make, the explanation gives each
-sleeve's reason: the close against the breakout's 20-day high and 100-day
-average (or the stop, while it holds), and the long-term tranches bought and
-the 200-day average the next one waits under.
+sleeve's reason.
 
 ## Modules
 
@@ -90,7 +88,7 @@ the 200-day average the next one waits under.
 | `audit.py` | Append-only log; the daily caps are computed from it |
 | `robinhood.py` | Read-only, Ed25519-signed Crypto Trading API client — no order methods |
 | `runner.py` | `rhca run`: cadences, once-per-bar dedupe, heartbeat, per-task failure isolation |
-| `bootstrap.py` | Coinbase candles: the daily closes behind `daily.py`, and the hourly bars for the dashboard's charts |
+| `bootstrap.py` | Coinbase candles: daily closes for the split, hourly bars for the charts |
 | `backtest.py` | `rhca backtest`: the retired ladder against its baselines, whole and in rolling windows |
 | `strategy/breakout.py` | The breakout: a daily trend rule, backtest and paper only |
 | `strategy/hodl.py` | The long-term sleeve: when to buy (buy low, weekly DCA, lump sum); never sells |

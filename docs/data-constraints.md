@@ -57,20 +57,12 @@ That is the honest state, and the agent says so:
 
 ```
 $ rhca status
-hourly price history (dashboard charts and accuracy; the split reads daily closes):
+hourly bars (charts and accuracy only):
   BTC-USD: no observations recorded
   ETH-USD: no observations recorded
 ```
 
-`rhca analyze` does not read this history: it decides on the daily closes
-above. A coin Coinbase will not serve is skipped with a reason rather than
-acted on blind:
-
-> `BTC-USD (0 bars): no daily bars from Coinbase: ...`
-
-With fewer closes than a rule needs, it buys nothing and says which rule:
-`short-term: the breakout needs 100 daily closes`, or `long-term: ...; the
-200-day average is not ready`.
+`rhca analyze` does not read it; the split decides on the daily closes above.
 
 ### 2. Gaps in polling are filled from Coinbase
 
@@ -82,8 +74,7 @@ gaps from Coinbase's hourly candles each time it starts.
 
 Two options, and they compose:
 
-**Accumulate.** Ingest quotes on a schedule. At 60-minute bars, accruing the
-52 days the import fetches would take 52 days of polling, so in practice:
+**Accumulate.** Ingest quotes on a schedule. That is slow, so in practice:
 
 **Bootstrap.** `rhca bootstrap-history` (and `rhca run` at startup) imports
 52 days of Coinbase's hourly candles. Or import OHLC bars from any external
