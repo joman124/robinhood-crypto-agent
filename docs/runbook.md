@@ -155,8 +155,6 @@ not yet been confirmed against a live account. The first run is that check:
 - [ ] The banner's `daily closes` line lists `BTC-USD`, `ETH-USD`, `SOL-USD`
       and `XRP-USD`, each through the latest closed UTC day, and does not end
       in `, N failed`. Each failure prints its reason on a `!` line below it.
-      `rhca status` still counts hourly bars against 1200. That count no
-      longer gates anything.
 - [ ] `rhca analyze --no-record` gives each coin either a proposal or, under
       `NO PROPOSAL`, a `nothing to do on the YYYY-MM-DD close: ...` line with
       each sleeve's reason, for example `short-term: no breakout -- closed

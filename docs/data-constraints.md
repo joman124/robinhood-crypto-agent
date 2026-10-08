@@ -57,7 +57,7 @@ That is the honest state, and the agent says so:
 
 ```
 $ rhca status
-price history coverage:
+hourly price history (dashboard charts and accuracy; the split reads daily closes):
   BTC-USD: no observations recorded
   ETH-USD: no observations recorded
 ```

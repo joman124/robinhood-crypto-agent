@@ -59,11 +59,6 @@ class Coverage:
     bars: int
     first_seen: datetime | None
     last_seen: datetime | None
-    required_bars: int
-
-    @property
-    def sufficient(self) -> bool:
-        return self.bars >= self.required_bars
 
     @property
     def age_seconds(self) -> float | None:
@@ -74,11 +69,7 @@ class Coverage:
     def describe(self) -> str:
         if self.observations == 0:
             return f"{self.symbol}: no observations recorded"
-        status = "ok" if self.sufficient else "INSUFFICIENT"
-        return (
-            f"{self.symbol}: {self.bars}/{self.required_bars} bars "
-            f"from {self.observations} observations [{status}]"
-        )
+        return f"{self.symbol}: {self.bars} bars from {self.observations} observations"
 
 
 def floor_to_interval(moment: datetime, interval_minutes: int) -> datetime:
@@ -289,9 +280,7 @@ class PriceStore:
             candles = candles[-limit:]
         return candles
 
-    def coverage(
-        self, symbol: str, *, interval_minutes: int = 60, required_bars: int = 30
-    ) -> Coverage:
+    def coverage(self, symbol: str, *, interval_minutes: int = 60) -> Coverage:
         """Report how much history exists, without pretending there is more."""
         quotes = self.observations(symbol)
         bars = self.candles(symbol, interval_minutes=interval_minutes)
@@ -301,7 +290,6 @@ class PriceStore:
             bars=len(bars),
             first_seen=quotes[0].observed_at if quotes else None,
             last_seen=quotes[-1].observed_at if quotes else None,
-            required_bars=required_bars,
         )
 
     def latest_quote(self, symbol: str) -> Quote | None:

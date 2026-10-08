@@ -63,13 +63,12 @@ def test_bars_are_anchored_to_the_day_not_to_first_observation(tmp_path):
     assert floor_to_interval(moment, 30).minute == 30
 
 
-def test_coverage_reports_insufficiency_honestly(tmp_path):
+def test_coverage_counts_bars_without_a_gate(tmp_path):
     store = PriceStore(tmp_path / "prices.jsonl")
     observations(store, 8)
-    coverage = store.coverage("BTC-USD", interval_minutes=60, required_bars=30)
-    assert not coverage.sufficient
-    assert "INSUFFICIENT" in coverage.describe()
+    coverage = store.coverage("BTC-USD", interval_minutes=60)
     assert coverage.observations == 8
+    assert coverage.describe() == f"BTC-USD: {coverage.bars} bars from 8 observations"
 
 
 def test_coverage_of_an_unknown_symbol_is_empty(tmp_path):
