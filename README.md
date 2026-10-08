@@ -117,7 +117,7 @@ tool response is never retyped or paraphrased.
 
 ```bash
 # The real-time loop (keys in .env -- see .env.example)
-rhca bootstrap-history          # 52 days of Coinbase bars, for the 50-day average
+rhca bootstrap-history          # 52 days of hourly Coinbase bars, for the charts
 rhca run --once                 # one pass of every task: the smoke test
 rhca run --keep-awake           # shadow mode until Ctrl+C
 
