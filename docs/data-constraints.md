@@ -19,8 +19,8 @@ There is **no crypto equivalent**. The only crypto price tool is
 ```
 
 `open_price` is the previous close — one prior data point, not a series. So
-there is no way to ask the server "what did BTC do over the last 50 days?",
-and the trend ladder needs exactly that.
+there is no way to ask the server "what did BTC do over the last 200 days?",
+and the split needs exactly that.
 
 This is not a gap that can be papered over. The split decides on daily
 closes: the breakout's 100-day average and 20-day high, and the long-term
@@ -31,7 +31,8 @@ request covers 300 days, cached under `data/daily/` and refetched once each
 close. They are the same bars `rhca backtest` and the forward test read, so
 live, paper and backtest decide on identical closes; proposals are still
 priced off a live Robinhood quote. The quote-built history below is what the
-retired trend ladder decided on, and still feeds the dashboard's charts.
+retired trend ladder decided on, and still feeds the dashboard's charts and
+`rhca accuracy`'s scoring.
 
 ## What this agent does instead
 
@@ -50,7 +51,7 @@ bar:           └────────  09:00  ───────┘ └�
 
 Three consequences, all made visible rather than hidden:
 
-### 1. A fresh checkout can evaluate nothing
+### 1. A fresh checkout has no hourly history
 
 That is the honest state, and the agent says so:
 
@@ -61,29 +62,28 @@ price history coverage:
   ETH-USD: no observations recorded
 ```
 
-`rhca analyze` skips such a symbol with a reason rather than acting on
-nothing:
+`rhca analyze` does not read this history: it decides on the daily closes
+above. A coin Coinbase will not serve is skipped with a reason rather than
+acted on blind:
 
-> `BTC-USD (0 bars): no price history. The MCP server has no crypto
-> historicals tool: rhca bootstrap-history imports Coinbase bars, and rhca run
-> records quotes as it goes.`
+> `BTC-USD (0 bars): no daily bars from Coinbase: ...`
 
-With some bars but fewer than the average needs, it buys nothing and says so:
-`its 50-day average needs 1200 bars and 300 are on hand`.
+With fewer closes than a rule needs, it buys nothing and says which rule:
+`short-term: the breakout needs 100 daily closes`, or `long-term: ...; the
+200-day average is not ready`.
 
 ### 2. Gaps in polling are filled from Coinbase
 
-A bar exists only for an hour in which a quote was recorded. The rule decides
-on each closed bar's close, and the trend average counts bars, so an hour the
-loop was not running would shorten the average's real span. `rhca run` fills
-such gaps from Coinbase's hourly candles each time it starts.
+A bar exists only for an hour in which a quote was recorded, so an hour the
+loop was not running would leave a hole in the charts. `rhca run` fills such
+gaps from Coinbase's hourly candles each time it starts.
 
 ### 3. History has to be bootstrapped or accumulated
 
 Two options, and they compose:
 
-**Accumulate.** Ingest quotes on a schedule. At 60-minute bars, the 1,200 bars
-the trend average wants would take 50 days to accrue, so in practice:
+**Accumulate.** Ingest quotes on a schedule. At 60-minute bars, accruing the
+52 days the import fetches would take 52 days of polling, so in practice:
 
 **Bootstrap.** `rhca bootstrap-history` (and `rhca run` at startup) imports
 52 days of Coinbase's hourly candles. Or import OHLC bars from any external

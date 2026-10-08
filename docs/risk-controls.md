@@ -63,12 +63,11 @@ a sell can return ~5% less. `per_trade_notional` checks the worst case after
 that collar, not the nominal — so a cap that passes still holds if the price
 moves on the way in.
 
-**Sells.** Every sell the trend ladder proposes closes a position it opened:
-a take-profit, or the trend exit. Two rules do not apply to a sell, because
-each limits *new* exposure and would only block closing a position:
+**Sells.** Every sell the split proposes is a breakout stop, closing a
+position the short-term sleeve opened. Two rules do not apply to a sell,
+because each limits *new* exposure and would only block closing a position:
 `per_trade_notional` and `daily_notional`. Both still run, and pass saying
-"not applied to a take-profit" (or "a trend exit") and what they would have
-found. Every other rule binds a sell as it binds a buy, the kill switch and
+"not applied to a breakout stop" and what they would have found. Every other rule binds a sell as it binds a buy, the kill switch and
 `sell_coverage` included.
 
 **Retired with System 1, 2026-09-27:** `signal_confidence` and
