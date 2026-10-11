@@ -2,6 +2,7 @@ import { LiveProvider } from "@/components/Live";
 import { AgentState, Nav, StatusAlerts, TopBar } from "@/components/ShellClient";
 import { SidebarPnl } from "@/components/Profit";
 import { SignOutButton } from "@/components/SignIn";
+import { BrandMark } from "@/components/ui";
 import type { Console } from "@/lib/console";
 import { pnlSummary } from "@/lib/pnl";
 
@@ -14,7 +15,7 @@ export function Shell({ c, children }: { c: Console; children: React.ReactNode }
       <div className="app">
         <aside className="sidebar">
           <div className="brand">
-            <span className="brand-mark" aria-hidden="true"><i /><i /></span>
+            <BrandMark />
             <span>
               <strong>The split</strong>
             </span>
