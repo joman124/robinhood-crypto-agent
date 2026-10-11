@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 
 import { signIn, signOut } from "@/app/actions";
+import { BrandMark } from "@/components/ui";
 
 export function SignInForm() {
   const [pending, startTransition] = useTransition();
@@ -20,7 +21,7 @@ export function SignInForm() {
           });
         }}
       >
-        <span className="brand-mark big" aria-hidden="true"><i /><i /></span>
+        <BrandMark big glow />
         <h1>The split</h1>
         <label className="sr-only" htmlFor="password">
           Password

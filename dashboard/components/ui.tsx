@@ -27,6 +27,47 @@ export function Icon({ name, size = 15 }: { name: IconName; size?: number }) {
   );
 }
 
+/** The logo's two chevrons, traced from the source artwork: green "<" over white ">". */
+const BRAND_LONG = "M39.3 1L2.6 23.4Q0 25 0 28L0 40Q0 43 2.6 44.6L39.3 67Q41 68 41 66L41 52Q41 51 40.1 50.5L16.5 36.1Q13.1 34 16.5 31.9L40.1 17.5Q41 17 41 16L41 2Q41 0 39.3 1Z";
+const BRAND_SHORT = "M45.7 99L82.4 76.6Q85 75 85 72L85 60Q85 57 82.4 55.4L45.7 33Q44 32 44 34L44 48Q44 49 44.9 49.5L68.5 63.9Q71.9 66 68.5 68.1L44.9 82.5Q44 83 44 84L44 98Q44 100 45.7 99Z";
+
+/**
+ * The logo, on its black tile. `glow` adds the soft edge light of the source
+ * artwork; leave it off where the mark is too small for a blur to read.
+ * Its gradient ids are fixed, so render at most one per page.
+ */
+export function BrandMark({ big, glow }: { big?: boolean; glow?: boolean }) {
+  return (
+    <span className={big ? "brand-mark big" : "brand-mark"} aria-hidden="true">
+      <svg viewBox="0 0 85 100">
+        <defs>
+          <linearGradient id="brand-long" x1="1" y1="0" x2="0" y2="1">
+            <stop offset="0" stopColor="#2cf5c4" />
+            <stop offset="1" stopColor="#05a273" />
+          </linearGradient>
+          <linearGradient id="brand-short" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stopColor="#f5f6f8" />
+            <stop offset="1" stopColor="#c3c6cc" />
+          </linearGradient>
+          {glow && (
+            <filter id="brand-glow" filterUnits="userSpaceOnUse" x="-12" y="-12" width="109" height="124">
+              <feGaussianBlur stdDeviation="3.5" />
+              <feMerge>
+                <feMergeNode />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+          )}
+        </defs>
+        <g filter={glow ? "url(#brand-glow)" : undefined}>
+          <path d={BRAND_LONG} fill="url(#brand-long)" />
+          <path d={BRAND_SHORT} fill="url(#brand-short)" />
+        </g>
+      </svg>
+    </span>
+  );
+}
+
 export type Tone = "mint" | "amber" | "red" | "sky" | "violet" | "neutral";
 
 export function Badge({ tone = "neutral", icon, children, title }: {
