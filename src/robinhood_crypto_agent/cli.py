@@ -1461,6 +1461,12 @@ def _keep_awake() -> bool:
 def cmd_run(args: argparse.Namespace) -> int:
     loaded = getattr(args, "dotenv_loaded", [])
     config = load_config(args.config_dir, data_dir=args.data_dir)
+    already = runner_mod.running_elsewhere(
+        files_mod.read_json(config.heartbeat_path),
+        stale_after_seconds=runner_mod.stale_after_seconds(config),
+    )
+    if already:
+        raise AgentError(already)
 
     robinhood = RobinhoodClient.from_env()
     if robinhood is None:

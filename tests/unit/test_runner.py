@@ -21,7 +21,7 @@ from robinhood_crypto_agent.models import (
     Quote,
     utcnow,
 )
-from robinhood_crypto_agent.runner import Runner, Services
+from robinhood_crypto_agent.runner import Runner, Services, running_elsewhere
 from robinhood_crypto_agent.store import StateCache
 from tests.conftest import FakeCoinbaseDaily
 
@@ -158,3 +158,22 @@ def test_the_heartbeat_names_the_keys_account_masked(config):
     ).cycle(force=True)
     heartbeat = json.loads(config.heartbeat_path.read_text())
     assert heartbeat["robinhood_account"] == "****1977"
+
+
+def test_a_second_loop_is_refused_while_the_first_is_alive(config):
+    """Started at sign-in, a loop must not run beside one started by hand."""
+    Runner(
+        config,
+        Services(
+            robinhood=FakeRobinhood(),
+            daily_history=FakeCoinbaseDaily({"BTC-USD": QUIET}, last=latest_close(utcnow())),
+        ),
+    ).cycle(force=True)
+    heartbeat = json.loads(config.heartbeat_path.read_text())
+    assert running_elsewhere(heartbeat, stale_after_seconds=180) is None  # this process wrote it
+
+    other = {**heartbeat, "pid": -1}
+    assert "already running (pid -1" in running_elsewhere(other, stale_after_seconds=180)
+    stale = {**other, "last_cycle_at": "2026-01-01T00:00:00+00:00"}
+    assert running_elsewhere(stale, stale_after_seconds=180) is None  # it died
+    assert running_elsewhere(None, stale_after_seconds=180) is None

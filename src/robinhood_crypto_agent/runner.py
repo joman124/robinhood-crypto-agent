@@ -309,6 +309,23 @@ def stale_after_seconds(config: AgentConfig) -> int:
     return max(180, 3 * config.pipeline.quote_interval_seconds)
 
 
+def running_elsewhere(heartbeat: dict[str, Any] | None, *, stale_after_seconds: float) -> str | None:
+    """Why not to start: another ``rhca run`` wrote the heartbeat moments ago.
+    Two loops would log every proposal, and every forward-test close, twice."""
+    if not heartbeat or heartbeat.get("pid") == os.getpid():
+        return None
+    try:
+        age = (utcnow() - parse_timestamp(str(heartbeat["last_cycle_at"]))).total_seconds()
+    except (KeyError, ValueError):
+        return None
+    if age > stale_after_seconds:
+        return None
+    return (
+        f"rhca run is already running (pid {heartbeat.get('pid')}, last cycle {_ago(age)}); "
+        "stop that one first -- two loops would log everything twice"
+    )
+
+
 def describe_heartbeat(heartbeat: dict[str, Any] | None, *, stale_after_seconds: float) -> list[str]:
     """``rhca status`` lines for the pipeline: alive or not, and what it did."""
     if heartbeat is None:

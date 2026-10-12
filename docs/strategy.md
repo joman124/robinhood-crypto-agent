@@ -517,6 +517,24 @@ Changing `config/shadow.yaml`, or the per-coin limit, restarts the test: each
 record carries the setup it was made under, and records from another setup
 are left out.
 
+### Had every passing fill been approved
+
+Each paper fill in a `shadow_day` record also carries every risk rule's
+verdict, as if it were a proposal. The same 14 rules, Robinhood's quote at
+that moment, and the paper account's own holdings and value. `rhca shadow`
+then takes every paper trade whose entry passed:
+
+- in at the ask `rhca run` read that close, out at the bid it read on the
+  close the trade sold;
+- a trade still open, or sold on a close `rhca run` missed, is valued at the
+  paper account's price: the close less half the round trip.
+
+It reports what those trades are worth beside what the paper account made on
+them. A trade on a close `rhca run` did not record has no verdict and is
+counted as not checked, not as taken. None of this is a proposal: a passing
+verdict on a paper fill is a record of what a human *could* have approved,
+and nothing reads it as approval. It is not one of the bar's checks.
+
 ### The bar
 
 Fixed on 2026-09-28, before any forward close existed. It is read after 90

@@ -25,6 +25,7 @@ from robinhood_crypto_agent.config import (
     load_config,
 )
 from robinhood_crypto_agent.errors import AgentError
+from robinhood_crypto_agent.execution.kill_switch import KillSwitch
 from robinhood_crypto_agent.models import Candle, Quote, utcnow
 from robinhood_crypto_agent.portfolio_backtest import Prepared, run_split
 from robinhood_crypto_agent.runner import Runner, Services, describe_heartbeat
@@ -243,6 +244,27 @@ class TestTracker:
         tracker(config, now=at(1), fetch=FakeCoinbase(through=START), robinhood=robinhood).update()
         [record] = shadow_days(config)
         assert record["fills"] and all(f["spread_pct"] is None for f in record["fills"])
+        assert all(f["risk"] is None for f in record["fills"])  # no quote, no verdict
+
+    def test_each_fill_gets_every_risk_rules_verdict(self, tmp_path):
+        config = shadow_config(tmp_path)  # the watchlist is BTC only
+        tracker(config, now=at(1), fetch=FakeCoinbase(through=START)).update()
+        [record] = shadow_days(config)
+        risk = {(f["sleeve"], f["symbol"]): f["risk"] for f in record["fills"]}
+        assert risk[("long-term", "BTC-USD")]["passed"] is True
+        assert risk[("short-term", "BTC-USD")]["passed"] is True
+        eth = risk[("long-term", "ETH-USD")]
+        assert eth["passed"] is False and eth["summary"] == "BLOCKED by watchlist"
+        assert len(eth["findings"]) == 14
+        assert "proposal_id" not in record
+        assert list(AuditLog(config.audit_path).events(kind=KIND_PROPOSAL)) == []
+
+    def test_the_kill_switch_blocks_every_paper_fill(self, tmp_path):
+        config = shadow_config(tmp_path)
+        KillSwitch(config.kill_switch_path).engage()
+        tracker(config, now=at(1), fetch=FakeCoinbase(through=START)).update()
+        [record] = shadow_days(config)
+        assert all("kill_switch" in f["risk"]["summary"] for f in record["fills"])
 
     def test_a_late_coinbase_bar_is_waited_for_then_recorded_without(self, tmp_path):
         config = shadow_config(tmp_path)
@@ -269,6 +291,8 @@ class TestReport:
         assert "1 of 1 logged days match  [pass so far]" in text
         assert "1.80% over 3 fill(s)  [pass so far]" in text
         assert "not logged live" in text  # the sell's day was never recorded
+        assert "risk PASS" in text and "risk BLOCKED by watchlist" in text
+        assert "Had every paper trade that passed risk been approved" in text
         assert "All three pass" not in text
 
     def test_a_logged_day_that_differs_from_the_replay_fails_faithful(self, tmp_path):
@@ -284,6 +308,34 @@ class TestReport:
         assert costs.passed is False
         assert in_range.passed is True
         assert sh.conclusion([faithful, costs, in_range]).startswith("It fails Faithful, Costs")
+
+    def test_what_if_takes_the_fills_that_passed_at_robinhoods_prices(self, tmp_path):
+        config = shadow_config(tmp_path)
+        tracker(config, now=at(1), fetch=FakeCoinbase(through=START)).update()  # START only
+        bars = {s: FakeCoinbase()(s, interval_minutes=1440, days=300) for s in ("BTC-USD", "ETH-USD")}
+        result = sh.replay(bars, config, through=START + timedelta(days=3))
+        long_btc, long_eth, short_btc = sh.what_if(result, logged(config))
+
+        assert (long_btc.sleeve, long_btc.trade.symbol, long_btc.note) == (
+            "long-term", "BTC-USD", "passes risk")
+        assert long_eth.worth is None and long_eth.blocked and "watchlist" in long_eth.note
+        trade = short_btc.trade
+        # In at the 100.9 ask rhca run read; out on a close it did not record,
+        # so at the paper account's price.
+        assert short_btc.worth == trade.cost / D("100.9") * (trade.proceeds / trade.quantity)
+
+        text = "\n".join(sh.render_what_if([long_btc, long_eth, short_btc]))
+        assert "taken: 2 trade(s)" in text
+        assert "not taken: 1 blocked by risk, 0 not checked" in text
+        assert "none of these is a proposal" in text
+
+    def test_what_if_does_not_take_a_trade_nobody_checked(self, tmp_path):
+        config = shadow_config(tmp_path)
+        bars = {s: FakeCoinbase()(s, interval_minutes=1440, days=300) for s in ("BTC-USD", "ETH-USD")}
+        result = sh.replay(bars, config, through=START + timedelta(days=3))
+        rows = sh.what_if(result, {})
+        assert rows and all(r.worth is None and not r.blocked for r in rows)
+        assert all(r.note.startswith("not checked") for r in rows)
 
     def test_nothing_to_report_before_the_first_close(self, tmp_path):
         config = shadow_config(tmp_path)
@@ -349,7 +401,7 @@ class TestCli:
         args = ["--config-dir", str(config_dir), "--data-dir", str(tmp_path / "data"), "shadow"]
         assert main(args) == EXIT_OK
         out = capsys.readouterr().out
-        assert "FORWARD TEST" in out and "short-term  BTC-USD" not in out
+        assert "FORWARD TEST" in out and "short-term  BTC-USD   bought" not in out  # sold
         assert "2026-10-04 short-term  sell BTC-USD" in out
 
     def test_rhca_shadow_needs_a_forward_test(self, tmp_path, capsys):
