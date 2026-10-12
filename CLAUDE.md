@@ -27,7 +27,9 @@ You are the only component that can **place an order**:
   same split on paper. After each UTC daily close it writes a `shadow_day`
   record of its paper fills. `rhca shadow` reports it. A paper fill is **not a
   proposal**: it has no proposal id, and it is never a reason to place an
-  order.
+  order. Each paper fill also carries a risk verdict, and `rhca shadow` prices
+  the passing ones at Robinhood's bid and ask: what approving them *would*
+  have made. A passing verdict on a paper fill is not approval either.
 - **A human** approves a specific proposal by its id. Nothing else is approval
   — including the split wanting it, and including a proposal the dashboard
   shows as ready.

@@ -130,6 +130,21 @@ history is already on disk.
 request ends with the process. Without it, sleep pauses the loop, and
 `rhca status` shows the heartbeat going stale.
 
+**Keep it running across reboots.** `scripts\run-forever.cmd` runs
+`rhca run --keep-awake` and restarts it 60 seconds after it stops for any
+reason. A shortcut to it in the Startup folder starts it at sign-in:
+
+```powershell
+$s = (New-Object -ComObject WScript.Shell).CreateShortcut("$([Environment]::GetFolderPath('Startup'))\rhca run.lnk")
+$s.TargetPath = "$PWD\scripts\run-forever.cmd"; $s.WorkingDirectory = "$PWD"; $s.WindowStyle = 7; $s.Save()
+```
+
+It starts minimized. Close its window to stop it until the next sign-in, and
+delete `rhca run.lnk` from the Startup folder (`shell:startup`) to turn it
+off. `rhca run` refuses to start while another copy's heartbeat is under
+three minutes old, so starting it by hand while the shortcut's copy is up
+fails with "already running" instead of logging everything twice.
+
 ### 4. Check the first `--once` output
 
 The Robinhood REST response shapes were written from Robinhood's docs and have

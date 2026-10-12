@@ -15,9 +15,14 @@ Replaying from the start each day, rather than carrying state forward, keeps
 the paper account identical to what the backtest code computes for the same
 days: there is one implementation of each rule, and no state to drift.
 
+Each paper fill is also put through the risk engine as if it were a proposal,
+against the paper account, so the record says whether a human *could* have
+approved it. ``rhca shadow`` then prices the fills that passed at the ask and
+bid Robinhood showed: what the split would have made had each been approved.
+
 **Nothing here trades.** A shadow day is not a proposal: it carries no
 proposal id, ``rhca approve`` cannot find it, and no code path leads from it
-to an order. The paper account exists to learn, before any money is at stake,
+to an order. A risk verdict on a paper fill is a record, not an approval. The paper account exists to learn, before any money is at stake,
 whether the split behaves live as it did in its backtest, at Robinhood's real
 spread.
 """
@@ -31,21 +36,35 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from .audit import KIND_SHADOW_DAY, AuditLog
+from .agent import EXIT_REASON
+from .audit import KIND_SHADOW_DAY, AuditLog, DailyActivity
 from .backtest import DEFAULT_ROUND_TRIP_PCT, money, pct
 from .bootstrap import fetch_coinbase_history
 from .config import AgentConfig, ShadowConfig
 from .daily import latest_close
 from .errors import AgentError
-from .models import Candle, Quote, parse_timestamp, utcnow
+from .execution.kill_switch import KillSwitch, KillSwitchState
+from .models import (
+    Candle,
+    PairConstraints,
+    Position,
+    Quote,
+    RiskDecision,
+    parse_timestamp,
+    utcnow,
+)
 from .numeric import ZERO, format_decimal, round_money, to_decimal
 from .portfolio_backtest import (
     PortfolioResult,
     Prepared,
     SplitResult,
+    Trade,
     run_equal_hold,
     run_split,
 )
+from .risk import RiskContext, RiskEngine, summarize
+from .sizing import size_buy, size_sell
+from .store import StateCache
 from .strategy.breakout import Breakout, day_views
 from .strategy.hodl import Accumulate
 
@@ -227,6 +246,77 @@ def spread_pct(quote: Quote) -> Decimal | None:
     return (quote.ask - quote.bid) / mid * 100 if mid > ZERO else None
 
 
+def risk_checks(
+    result: Replay,
+    day: datetime,
+    quotes: Mapping[str, Quote],
+    pairs: Mapping[str, PairConstraints],
+    kill_state: KillSwitchState,
+    config: AgentConfig,
+) -> dict[str, RiskDecision]:
+    """Every risk rule's verdict on each of ``day``'s paper fills, by fill key.
+
+    Each fill goes through the engine a proposal goes through, priced off
+    Robinhood's quote, against the paper account: what it held that morning,
+    its value at the last close, and the fills before this one that day. A
+    fill with no quote gets no verdict. A verdict is a record, not an approval.
+    """
+    engine = RiskEngine(config)
+    split = result.split
+    held: dict[str, Decimal] = {}
+    for trade in split.short.trades + split.long.trades:
+        if trade.entry_day < day and (trade.exit_day is None or trade.exit_day >= day):
+            held[trade.symbol] = held.get(trade.symbol, ZERO) + trade.quantity
+    before = [equity for when, equity in split.combined.equity_curve if when < day]
+    value = before[-1] if before else split.combined.capital
+    notional, realized, count = ZERO, ZERO, 0
+    verdicts: dict[str, RiskDecision] = {}
+    for fill in result.fills_on(day):
+        quote = quotes.get(fill.symbol)
+        if quote is None:
+            continue
+        buy = fill.side == "buy"
+        constraints = pairs.get(fill.symbol) or PairConstraints.permissive(fill.symbol)
+        sizing = (
+            size_buy(fill.symbol, dollars=fill.dollars, reference_price=quote.ask,
+                     constraints=constraints, limits=config.risk)
+            if buy
+            else size_sell(fill.symbol, quantity=fill.quantity, reference_price=quote.bid,
+                           constraints=constraints)
+        )
+        activity = DailyActivity(
+            day=day.date(), executed_notional=notional, execution_count=count,
+            realized_pnl=realized, proposal_count=0, symbols_traded=(),
+        )
+        context = RiskContext(
+            config=config, quote=quote, constraints=constraints, activity=activity,
+            kill_switch=kill_state, positions={s: Position(s, q) for s, q in held.items()},
+            portfolio_value=value,
+        )
+        verdicts[fill.key] = engine.evaluate(
+            fill.symbol, sizing, context, exit_reason=None if buy else EXIT_REASON
+        )
+        notional += fill.dollars
+        count += 1
+        held[fill.symbol] = held.get(fill.symbol, ZERO) + (fill.quantity if buy else -fill.quantity)
+        if not buy:
+            realized += sum(
+                (t.pnl for t in split.short.trades if t.symbol == fill.symbol and t.exit_day == day),
+                ZERO,
+            )
+    return verdicts
+
+
+def _verdict(decision: RiskDecision | None) -> dict[str, Any] | None:
+    if decision is None:
+        return None
+    return {
+        "passed": decision.passed,
+        "summary": summarize(decision),
+        "findings": [f.to_dict() for f in decision.findings],
+    }
+
+
 def _account(result: PortfolioResult) -> dict[str, str]:
     return {
         "capital": str(round_money(result.capital)),
@@ -235,9 +325,14 @@ def _account(result: PortfolioResult) -> dict[str, str]:
 
 
 def day_record(
-    result: Replay, day: datetime, quotes: Mapping[str, Quote], config: AgentConfig
+    result: Replay,
+    day: datetime,
+    quotes: Mapping[str, Quote],
+    config: AgentConfig,
+    verdicts: Mapping[str, RiskDecision] | None = None,
 ) -> dict[str, Any]:
     """The ``shadow_day`` audit record for one close."""
+    verdicts = verdicts or {}
     shadow_fills = []
     for fill in result.fills_on(day):
         quote = quotes.get(fill.symbol)
@@ -253,6 +348,7 @@ def day_record(
                 "bid": format_decimal(quote.bid) if quote else None,
                 "ask": format_decimal(quote.ask) if quote else None,
                 "spread_pct": format_decimal(spread.quantize(Decimal("0.0001"))) if spread else None,
+                "risk": _verdict(verdicts.get(fill.key)),
             }
         )
     split = result.split
@@ -328,7 +424,18 @@ class ShadowTracker:
             )
         result = replay(daily, self.config, through=through)
         today = result.fills_on(through)
-        record = day_record(result, through, self._quotes({f.symbol for f in today}), self.config)
+        quotes = self._quotes({f.symbol for f in today})
+        verdicts = (
+            risk_checks(
+                result, through, quotes,
+                StateCache(self.config.data_dir / "market_state.json").pairs(),
+                KillSwitch(self.config.kill_switch_path).state(),
+                self.config,
+            )
+            if quotes
+            else {}
+        )
+        record = day_record(result, through, quotes, self.config, verdicts)
         if late:
             record["missing"] = late
         self.audit.append(KIND_SHADOW_DAY, record)
@@ -367,6 +474,114 @@ def logged_days(audit: AuditLog, config: AgentConfig) -> dict[str, dict[str, Any
         for r in audit.events(kind=KIND_SHADOW_DAY)
         if r.get("setup") == current
     }
+
+
+def _logged_fill(
+    logged: Mapping[str, Mapping[str, Any]], day: datetime, key: str
+) -> Mapping[str, Any] | None:
+    """The fill ``rhca run`` recorded under ``key`` on ``day``: ``None`` when it
+    did not record the day at all, ``{}`` when the day has no such fill."""
+    record = logged.get(day.date().isoformat())
+    if record is None:
+        return None
+    return next(
+        (
+            f for f in record.get("fills") or []
+            if f"{f.get('sleeve')}|{f.get('symbol')}|{f.get('side')}" == key
+        ),
+        {},
+    )
+
+
+@dataclass(frozen=True)
+class WhatIf:
+    """One paper trade, had a human approved its entry whenever it passed risk."""
+
+    sleeve: str
+    trade: Trade
+    #: The entry's risk verdict, or why there is none.
+    note: str
+    #: Its worth (or what it sold for) at Robinhood's prices; ``None`` when not taken.
+    worth: Decimal | None = None
+    #: Blocked by the risk check, as against never checked.
+    blocked: bool = False
+
+
+def what_if(result: Replay, logged: Mapping[str, Mapping[str, Any]]) -> list[WhatIf]:
+    """Every paper trade, taken at Robinhood's prices where its entry passed risk.
+
+    In: the paper dollars, at the ask ``rhca run`` read that close. Out: the
+    bid it read on the close the trade sold. A trade still open -- or sold on a
+    close ``rhca run`` did not record -- is valued as the paper account values
+    it: the close, less half the round trip.
+    """
+    trades = [(SHORT_TERM, t) for t in result.split.short.trades]
+    trades += [(LONG_TERM, t) for t in result.split.long.trades]
+    rows: list[WhatIf] = []
+    for sleeve, trade in sorted(trades, key=lambda st: (st[1].entry_day, st[0], st[1].symbol)):
+        entry = _logged_fill(logged, trade.entry_day, f"{sleeve}|{trade.symbol}|buy")
+        risk = (entry or {}).get("risk")
+        if entry is None:
+            rows.append(WhatIf(sleeve, trade, "not checked: rhca run did not record this close"))
+            continue
+        if not risk or not entry.get("ask"):
+            rows.append(WhatIf(sleeve, trade, "not checked: no Robinhood quote or verdict"))
+            continue
+        if not risk.get("passed"):
+            rows.append(WhatIf(sleeve, trade, str(risk.get("summary") or "BLOCKED"), blocked=True))
+            continue
+        quantity = trade.cost / to_decimal(entry["ask"], field="ask")
+        # ponytail: the stop is counted as sold even if its own verdict was a
+        # block (only the kill switch or a spread over the limit can block one).
+        # Ceiling: a blocked stop held on would be worth more or less than this.
+        exit_fill = (
+            _logged_fill(logged, trade.exit_day, f"{sleeve}|{trade.symbol}|sell")
+            if trade.exit_day is not None
+            else None
+        )
+        price = (
+            to_decimal(exit_fill["bid"], field="bid")
+            if exit_fill and exit_fill.get("bid")
+            else trade.proceeds / trade.quantity
+        )
+        rows.append(WhatIf(sleeve, trade, "passes risk", worth=quantity * price))
+    return rows
+
+
+def render_what_if(rows: Sequence[WhatIf]) -> list[str]:
+    """``rhca shadow``'s section on taking every paper trade that passed risk."""
+    lines = [
+        "",
+        "  Had every paper trade that passed risk been approved, at Robinhood's prices",
+        "  (hypothetical: none of these is a proposal, and none can be approved)",
+    ]
+    if not rows:
+        return lines + ["  no paper trades yet"]
+    for row in rows:
+        trade = row.trade
+        if row.worth is None:
+            outcome = "not taken"
+        else:
+            state = "open" if trade.open else f"sold {trade.exit_day:%Y-%m-%d}"
+            outcome = f"{state}, {money(row.worth)} ({money(row.worth - trade.cost)})"
+        lines.append(
+            f"  {trade.entry_day:%Y-%m-%d} {row.sleeve:<11} {trade.symbol:<9}"
+            f"{money(trade.cost):>9} in  {row.note}; {outcome}"
+        )
+    taken = [r for r in rows if r.worth is not None]
+    blocked = sum(1 for r in rows if r.blocked)
+    unchecked = len(rows) - len(taken) - blocked
+    if taken:
+        cost = sum((r.trade.cost for r in taken), ZERO)
+        worth = sum((r.worth for r in taken if r.worth is not None), ZERO)
+        paper = sum((r.trade.pnl for r in taken), ZERO)
+        lines.append(
+            f"  taken: {len(taken)} trade(s), {money(cost)} in, worth {money(worth)} now: "
+            f"{money(worth - cost)} ({pct((worth / cost - 1) * 100)}); "
+            f"the paper account made {money(paper)} on the same trades"
+        )
+    lines.append(f"  not taken: {blocked} blocked by risk, {unchecked} not checked")
+    return lines
 
 
 def check_bar(
@@ -501,26 +716,22 @@ def render(
     if result.fills:
         lines += ["", f"  paper fills ({len(result.fills)})"]
     for fill in result.fills:
-        record = logged.get(fill.day.date().isoformat())
-        note = "not logged live: rhca run did not record this day"
-        if record is not None:
-            match = next(
-                (
-                    f for f in record.get("fills") or []
-                    if f"{f.get('sleeve')}|{f.get('symbol')}|{f.get('side')}" == fill.key
-                ),
-                None,
-            )
-            spread = (match or {}).get("spread_pct")
-            note = (
-                "NOT in rhca run's record for this day"
-                if match is None
-                else f"logged live, Robinhood spread {spread}%" if spread else "logged live"
-            )
+        match = _logged_fill(logged, fill.day, fill.key)
+        if match is None:
+            note = "not logged live: rhca run did not record this day"
+        elif not match:
+            note = "NOT in rhca run's record for this day"
+        else:
+            spread = match.get("spread_pct")
+            note = f"logged live, Robinhood spread {spread}%" if spread else "logged live"
+            if match.get("risk"):
+                note += f", risk {match['risk'].get('summary')}"
         lines.append(
             f"  {fill.day:%Y-%m-%d} {fill.sleeve:<11} {fill.side:<5}{fill.symbol:<9}"
             f"{money(fill.dollars):>10} at the {format_decimal(fill.close)} close  ({note})"
         )
+
+    lines += render_what_if(what_if(result, logged))
 
     checks = check_bar(result, window, logged)
     done = result.closes >= BAR_DAYS
