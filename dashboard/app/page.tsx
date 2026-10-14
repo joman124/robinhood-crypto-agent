@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { CsvButton } from "@/components/CsvButton";
+import { ForwardTest } from "@/components/ForwardTest";
 import { RelTime } from "@/components/Live";
 import { CountUp } from "@/components/motion";
 import { Pipeline } from "@/components/Pipeline";
@@ -40,6 +41,8 @@ export default async function CommandCenter() {
         <ProfitHero s={pnl} accepted={count("accepted")} />
         <AwaitingCard first={awaiting.at(-1)} total={awaiting.length} tolerance={payload?.limits?.price_drift_tolerance_pct} />
       </div>
+
+      {payload?.forward_test && <ForwardTest t={payload.forward_test} />}
 
       <TakenLedger s={pnl} />
 

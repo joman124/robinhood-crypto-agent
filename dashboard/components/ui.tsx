@@ -146,9 +146,11 @@ export function CoinMark({ symbol, size = 34 }: { symbol: string; size?: number 
 /** A numbered or ticked line with a pass/block badge: risk rules and guarantees. */
 export function CheckRow({ mark, label, detail, state, tone }: {
   mark: React.ReactNode; label: React.ReactNode; detail?: React.ReactNode;
-  state: "pass" | "block" | "warn"; tone?: "flat";
+  state: "pass" | "block" | "warn" | "pending"; tone?: "flat";
 }) {
-  const badge = { pass: ["mint", "Pass"], block: ["red", "Block"], warn: ["amber", "Warn"] } as const;
+  const badge = {
+    pass: ["mint", "Pass"], block: ["red", "Block"], warn: ["amber", "Warn"], pending: ["neutral", "Not yet"],
+  } as const;
   return (
     <li className={`check-row ${state} ${tone ?? ""}`}>
       <span className="check-mark">{mark}</span>

@@ -29,7 +29,9 @@ You are the only component that can **place an order**:
   proposal**: it has no proposal id, and it is never a reason to place an
   order. Each paper fill also carries a risk verdict, and `rhca shadow` prices
   the passing ones at Robinhood's bid and ask: what approving them *would*
-  have made. A passing verdict on a paper fill is not approval either.
+  have made. A passing verdict on a paper fill is not approval either. The
+  dashboard's forward-test card shows the same paper trades: none has a
+  proposal id, so none can be approved from it.
 - **A human** approves a specific proposal by its id. Nothing else is approval
   — including the split wanting it, and including a proposal the dashboard
   shows as ready.

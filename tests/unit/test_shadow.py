@@ -24,6 +24,7 @@ from robinhood_crypto_agent.config import (
     StrategyConfig,
     load_config,
 )
+from robinhood_crypto_agent.dashboard import FORWARD_TEST_FIELDS, build_payload
 from robinhood_crypto_agent.errors import AgentError
 from robinhood_crypto_agent.execution.kill_switch import KillSwitch
 from robinhood_crypto_agent.models import Candle, Quote, utcnow
@@ -294,6 +295,44 @@ class TestReport:
         assert "risk PASS" in text and "risk BLOCKED by watchlist" in text
         assert "Had every paper trade that passed risk been approved" in text
         assert "All three pass" not in text
+        assert "rhca run recorded 1 of them live; it missed 2026-10-02 to 2026-10-04" in text
+        assert "How far each coin is from a trade, at the 2026-10-04 close" in text
+
+    def test_missed_closes_run_together(self):
+        days = ["2026-10-05", "2026-09-28", "2026-09-29", "2026-09-30"]
+        assert sh.day_ranges(days) == "2026-09-28 to 2026-09-30, 2026-10-05"
+        assert sh.day_ranges([]) == ""
+
+    def test_triggers_say_how_far_each_coin_is_from_a_trade(self, tmp_path):
+        config = shadow_config(tmp_path, mode="dip")
+        bars = {
+            "BTC-USD": daily(BTC, "BTC-USD"),
+            "ETH-USD": daily([50] * 230 + [40] * 4, "ETH-USD"),  # under its average
+        }
+        result = sh.replay(bars, config, through=START + timedelta(days=2))
+        btc, eth = sh.triggers(result, config)
+
+        # The breakout bought BTC on the start day: its stop, not an entry.
+        assert btc.enter_over is None and btc.stop_under < btc.close == D(115)
+        # Above its 200-day average: the long-term sleeve waits for a fall.
+        assert btc.buy_under == (D(100) * 197 + 110 + 112 + 115) / 200 and btc.bought == 0
+        # Under it: one tranche bought, the next a week later.
+        assert (eth.bought, eth.tranches, eth.buy_from) == (1, 10, START + timedelta(days=7))
+        assert eth.enter_over == D(50) and eth.stop_under is None
+
+        text = "\n".join(sh.render_triggers([btc, eth], result.through))
+        assert "long-term buys under 100.1" in text and "(-12.9%), 0 of 10 bought" in text
+        assert "breakout holds it, sells under" in text
+        assert "under 49.8500 now, 1 of 10 bought, not before 2026-10-08" in text
+        assert "breakout buys over 50.0000 (+25.0%)" in text
+
+    def test_a_sleeve_that_ignores_price_has_no_line_to_wait_for(self, tmp_path):
+        config = shadow_config(tmp_path, mode="dca")
+        bars = {s: FakeCoinbase()(s, interval_minutes=1440, days=300) for s in ("BTC-USD", "ETH-USD")}
+        result = sh.replay(bars, config, through=START + timedelta(days=3))
+        assert all(t.buy_under is None for t in sh.triggers(result, config))
+        text = "\n".join(sh.render_triggers(sh.triggers(result, config), result.through))
+        assert "long-term: 1 of 10 bought" in text
 
     def test_a_logged_day_that_differs_from_the_replay_fails_faithful(self, tmp_path):
         config = shadow_config(tmp_path)
@@ -380,6 +419,42 @@ class TestRunner:
                    for line in describe_heartbeat(heartbeat, stale_after_seconds=600))
         lines = sh.describe_status(config, snapshot)
         assert "1 close(s) since" in lines[0] and "breakout holds BTC-USD" in lines[1]
+        assert len(lines) == 2  # nothing missed
+
+        assert snapshot["coverage"] == {"recorded": 1, "missed": 0, "missed_days": ""}
+        assert snapshot["bar"]["checks"][0]["passed"] is True
+        assert snapshot["bar"]["conclusion"] is None  # not 90 closes yet
+        assert {(r["sleeve"], r["symbol"]) for r in snapshot["what_if"]} == {
+            ("long-term", "BTC-USD"), ("long-term", "ETH-USD"), ("short-term", "BTC-USD")}
+        btc = snapshot["triggers"][0]
+        assert btc["symbol"] == "BTC-USD" and btc["stop_under"] and btc["enter_over"] is None
+
+    def test_a_restart_rewrites_the_snapshot_without_recording_again(self, tmp_path):
+        config, start = self.config(tmp_path)
+
+        def fetch(symbol, *, interval_minutes, days):
+            return daily(BTC[:231] if symbol == "BTC-USD" else ETH, symbol, last=start)
+
+        Runner(config, Services(robinhood=FakeRobinhood(), daily_history=fetch)).cycle(force=True)
+        config.shadow_path.unlink()  # as if written by an older version
+        restarted = Runner(config, Services(robinhood=FakeRobinhood(), daily_history=fetch))
+        restarted.cycle(force=True)
+        assert json.loads(config.shadow_path.read_text())["closes"] == 1
+        assert len(shadow_days(config)) == 1
+        assert restarted._counts["forward_test_days"] == 0
+
+    def test_the_dashboard_gets_the_snapshot_of_this_test_only(self, tmp_path):
+        config, start = self.config(tmp_path)
+
+        def fetch(symbol, *, interval_minutes, days):
+            return daily(BTC[:231] if symbol == "BTC-USD" else ETH, symbol, last=start)
+
+        Runner(config, Services(robinhood=FakeRobinhood(), daily_history=fetch)).cycle(force=True)
+        test = build_payload(config, audit=AuditLog(config.audit_path))["forward_test"]
+        assert test["closes"] == 1 and test["accounts"]["split"]["capital"] == "500.00"
+        assert "setup" not in test and set(test) == set(FORWARD_TEST_FIELDS)
+        changed = shadow_config(tmp_path, mode="lump", start=start)
+        assert build_payload(changed, audit=AuditLog(config.audit_path))["forward_test"] is None
 
     def test_without_a_forward_test_there_is_no_task(self, tmp_path):
         config = AgentConfig(watchlist=("BTC-USD",), data_dir=tmp_path / "data")

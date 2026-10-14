@@ -120,6 +120,7 @@ class Runner:
             ("quotes", "candidates", "proposed", "forward_test_days", "errors"), 0
         )
         self._last_error: dict[str, str] | None = None
+        self._snapshot_due = True
         self._resume_from_audit()
 
     # -- the loop ------------------------------------------------------------
@@ -229,12 +230,26 @@ class Runner:
         )
 
     def _forward_test(self) -> None:
-        """Record the latest UTC daily close of the paper split account, once."""
-        result = self.shadow.update() if self.shadow is not None else None
+        """Record the latest UTC daily close of the paper split account, once,
+        and rewrite the snapshot ``rhca status`` and the dashboard read: after
+        each recorded close, and once on start, so a restart shows it at once."""
+        if self.shadow is None:
+            return
+        result = self.shadow.update()
+        if result is not None:
+            self._counts["forward_test_days"] += 1
+            self._log_close(result)
+        elif self._snapshot_due:
+            result = self.shadow.latest()
         if result is None:
             return
-        self._counts["forward_test_days"] += 1
-        write_json_atomic(self.config.shadow_path, shadow_mod.snapshot(result, self.config))
+        logged = shadow_mod.logged_days(self.audit, self.config)
+        write_json_atomic(
+            self.config.shadow_path, shadow_mod.snapshot(result, self.config, logged)
+        )
+        self._snapshot_due = False
+
+    def _log_close(self, result: shadow_mod.Replay) -> None:
         day = f"{result.through:%Y-%m-%d}"
         fills = result.fills_on(result.through)
         for fill in fills:
