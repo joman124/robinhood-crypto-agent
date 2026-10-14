@@ -133,6 +133,68 @@ export interface Stats {
   worst_move_pct: string | null;
 }
 
+/** A forward-test account, in paper dollars sized by config/shadow.yaml. */
+export interface PaperAccount {
+  capital: string;
+  equity: string;
+}
+
+export interface BarCheck {
+  name: string;
+  /** null while there is nothing yet to judge. */
+  passed: boolean | null;
+  detail: string;
+}
+
+/** One paper trade, had every entry that passed risk been approved. */
+export interface WhatIfRow {
+  day: string;
+  sleeve: string;
+  symbol: string;
+  cost: string;
+  /** The entry's risk verdict, or why there is none. */
+  note: string;
+  blocked: boolean;
+  /** Its worth (or what it sold for) at Robinhood's prices; null when not taken. */
+  worth: string | null;
+  paper_pnl: string;
+  sold: string | null;
+}
+
+/** How far a coin's last daily close is from what would make either rule trade. */
+export interface Trigger {
+  symbol: string;
+  close: string;
+  /** The long-term sleeve buys under this (its 200-day average); null when it won't. */
+  buy_under: string | null;
+  bought: number;
+  /** 0 when the long-term sleeve does not hold the coin. */
+  tranches: number;
+  buy_from: string | null;
+  /** The breakout buys over this; null while it holds the coin. */
+  enter_over: string | null;
+  /** The breakout's trailing stop, while it holds the coin. */
+  stop_under: string | null;
+}
+
+/**
+ * The forward test: the split on paper, written by `rhca run` after each daily
+ * close. Nothing in it is a proposal. Fields after `open` are null on a
+ * snapshot written before 2026-10-13.
+ */
+export interface ForwardTest {
+  start: string;
+  through: string;
+  closes: number;
+  updated_at: string;
+  accounts: Partial<Record<"long-term" | "short-term" | "split" | "hold", PaperAccount>>;
+  open: string[];
+  bar: { days: number; read_on: string; checks: BarCheck[]; conclusion: string | null } | null;
+  what_if: WhatIfRow[] | null;
+  coverage: { recorded: number; missed: number; missed_days: string } | null;
+  triggers: Trigger[] | null;
+}
+
 export interface Payload {
   version: number;
   generated_at: string;
@@ -166,6 +228,8 @@ export interface Payload {
   market?: Record<string, { mark: string; observed_at: string }>;
   kill_switch?: { engaged: boolean; reason: string | null; engaged_at: string | null };
   pipeline?: Heartbeat | null;
+  /** Absent before 2026-10-13; null when the test is off or not yet recorded. */
+  forward_test?: ForwardTest | null;
 }
 
 export interface Decision {

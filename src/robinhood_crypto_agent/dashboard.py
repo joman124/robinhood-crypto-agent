@@ -16,6 +16,9 @@ behind them, and a dashboard that never receives that data cannot leak it.
 
 The split's realized P&L per symbol is sent, as today's realized P&L already
 is: it is how the split is measured. What it holds, and what that cost, is not.
+
+The forward test's dollars are sent: they are the paper account's, whose size
+is config/shadow.yaml's, and say nothing about the real one.
 """
 
 from __future__ import annotations
@@ -25,11 +28,13 @@ from decimal import Decimal
 from typing import Any, Sequence
 
 from . import net
+from . import shadow as shadow_mod
 from .audit import KIND_EXECUTION, KIND_NOTE, KIND_PROPOSAL, AuditLog
 from .config import AgentConfig
 from .decisions import Decision, decision_from_dict
 from .errors import AgentError
 from .execution.kill_switch import KillSwitch
+from .files import read_json
 from .ledger import split_book
 from .models import ProposalStatus, utcnow
 from .numeric import abs_pct_drift, format_decimal, round_money, to_decimal
@@ -92,6 +97,21 @@ PROPOSAL_FIELDS = (
     "regime",
     "system2_decision",
     "system2_confidence",
+)
+
+
+#: The forward-test snapshot fields the dashboard gets (``shadow.snapshot``).
+FORWARD_TEST_FIELDS = (
+    "start",
+    "through",
+    "closes",
+    "updated_at",
+    "accounts",
+    "open",
+    "bar",
+    "what_if",
+    "coverage",
+    "triggers",
 )
 
 
@@ -214,7 +234,19 @@ def build_payload(
             "engaged_at": kill.engaged_at.isoformat() if kill.engaged_at else None,
         },
         "pipeline": _pipeline(config),
+        "forward_test": _forward_test(config),
     }
+
+
+def _forward_test(config: AgentConfig) -> dict[str, Any] | None:
+    """The forward test as ``rhca run`` last wrote it. ``None`` when the test
+    is off, or the snapshot belongs to an earlier setup (a restarted test)."""
+    if config.shadow is None:
+        return None
+    snap = read_json(config.shadow_path)
+    if snap is None or snap.get("setup") != shadow_mod.setup(config):
+        return None
+    return {field: snap.get(field) for field in FORWARD_TEST_FIELDS}
 
 
 def _proposal_detail(record: dict[str, Any]) -> dict[str, Any]:
@@ -317,7 +349,6 @@ def _executions_by_proposal(audit: AuditLog) -> dict[str, dict[str, Any]]:
 def _pipeline(config: AgentConfig) -> dict[str, Any] | None:
     """The shadow loop's heartbeat. The last error's text is withheld: an API
     error can echo back whatever the request carried."""
-    from .files import read_json
     from .runner import stale_after_seconds  # runner imports this module
 
     beat = read_json(config.heartbeat_path)

@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 import statistics
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -66,7 +66,7 @@ from .risk import RiskContext, RiskEngine, summarize
 from .sizing import size_buy, size_sell
 from .store import StateCache
 from .strategy.breakout import Breakout, day_views
-from .strategy.hodl import Accumulate
+from .strategy.hodl import DIP, Accumulate, moving_averages
 
 log = logging.getLogger("rhca.shadow")
 
@@ -219,6 +219,31 @@ def replay(
     return Replay(through, split, hold, prepared, rule, paper_fills(split, closes))
 
 
+def read_on(config: AgentConfig) -> datetime:
+    """The day the bar is read: after its ``BAR_DAYS``-th close."""
+    return _shadow(config).start + DAY * BAR_DAYS
+
+
+def window(result: Replay, config: AgentConfig) -> Replay:
+    """The replay cut at the bar's last close -- all of it until then. The bar
+    judges its first ``BAR_DAYS`` closes, not whatever ran on after them."""
+    bar_last = read_on(config) - DAY
+    if result.through <= bar_last:
+        return result
+    return replay({s: p.daily for s, p in result.prepared.items()}, config, through=bar_last)
+
+
+def load(config: AgentConfig, *, fetch: Fetch | None = None, now: datetime) -> Replay:
+    """The paper account through the last daily close every coin has."""
+    shadow = _shadow(config)
+    daily = fetch_daily(shadow.symbols, days=history_days(config, now=now), fetch=fetch)
+    missing = sorted(s for s, bars in daily.items() if not bars)
+    if missing:
+        raise AgentError(f"Coinbase returned no daily bars for {', '.join(missing)}")
+    through = min(latest_close(now), *(bars[-1].start for bars in daily.values()))
+    return replay(daily, config, through=through)
+
+
 def paper_fills(
     split: SplitResult, closes: Mapping[str, Mapping[datetime, Decimal]]
 ) -> list[PaperFill]:
@@ -366,10 +391,16 @@ def day_record(
     }
 
 
-def snapshot(result: Replay, config: AgentConfig) -> dict[str, Any]:
-    """What ``rhca status`` shows, written after each recorded day."""
+def snapshot(
+    result: Replay, config: AgentConfig, logged: Mapping[str, Mapping[str, Any]]
+) -> dict[str, Any]:
+    """What ``rhca status`` and the dashboard show, written after each recorded
+    day: the accounts, the bar, the what-if, the closes ``rhca run`` missed,
+    and how far each coin is from a trade."""
     shadow = _shadow(config)
     split = result.split
+    checks = check_bar(result, window(result, config), logged)
+    missed = missed_days(result, logged)
     return {
         "updated_at": utcnow().isoformat(),
         "setup": setup(config),
@@ -383,7 +414,58 @@ def snapshot(result: Replay, config: AgentConfig) -> dict[str, Any]:
             "hold": _account(result.hold),
         },
         "open": sorted({f"{t.symbol}" for t in split.short.trades if t.open}),
+        "bar": {
+            "days": BAR_DAYS,
+            "read_on": f"{read_on(config):%Y-%m-%d}",
+            "checks": [{"name": c.name, "passed": c.passed, "detail": c.detail} for c in checks],
+            "conclusion": conclusion(checks) if result.closes >= BAR_DAYS else None,
+        },
+        "what_if": [_what_if_row(row) for row in what_if(result, logged)],
+        "coverage": {
+            "recorded": result.closes - len(missed),
+            "missed": len(missed),
+            "missed_days": day_ranges(missed),
+        },
+        "triggers": [_trigger_row(t) for t in triggers(result, config)],
     }
+
+
+def _what_if_row(row: WhatIf) -> dict[str, Any]:
+    trade = row.trade
+    return {
+        "day": f"{trade.entry_day:%Y-%m-%d}",
+        "sleeve": row.sleeve,
+        "symbol": trade.symbol,
+        "cost": str(round_money(trade.cost)),
+        "note": row.note,
+        "blocked": row.blocked,
+        "worth": str(round_money(row.worth)) if row.worth is not None else None,
+        "paper_pnl": str(round_money(trade.pnl)),
+        "sold": f"{trade.exit_day:%Y-%m-%d}" if trade.exit_day is not None else None,
+    }
+
+
+def _trigger_row(trigger: Trigger) -> dict[str, Any]:
+    return {
+        "symbol": trigger.symbol,
+        "close": _price_text(trigger.close),
+        "buy_under": _price_text(trigger.buy_under),
+        "bought": trigger.bought,
+        "tranches": trigger.tranches,
+        "buy_from": f"{trigger.buy_from:%Y-%m-%d}" if trigger.buy_from else None,
+        "enter_over": _price_text(trigger.enter_over),
+        "stop_under": _price_text(trigger.stop_under),
+    }
+
+
+def _round_price(value: Decimal) -> Decimal:
+    """To the cent from $100, to four places from $1, to six under it: fine
+    enough that a distance worked out from it is the one the report gives."""
+    return round_money(value, 2 if value >= 100 else 4 if value >= 1 else 6)
+
+
+def _price_text(value: Decimal | None) -> str | None:
+    return None if value is None else format_decimal(_round_price(value))
 
 
 class ShadowTracker:
@@ -441,6 +523,15 @@ class ShadowTracker:
         self.audit.append(KIND_SHADOW_DAY, record)
         self._recorded.add(record["day"])
         return result
+
+    def latest(self) -> Replay | None:
+        """The paper account through the last close, recording nothing: what
+        ``rhca run`` rewrites the snapshot from when it starts. ``None`` before
+        the first close the test counts."""
+        now = self._now()
+        if latest_close(now) < _shadow(self.config).start:
+            return None
+        return load(self.config, fetch=self._fetch, now=now)
 
     def _quotes(self, symbols: set[str]) -> dict[str, Quote]:
         """Robinhood's bid and ask now, for the coins traded on paper today.
@@ -651,6 +742,134 @@ def check_bar(
     return checks
 
 
+def missed_days(result: Replay, logged: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    """The closes so far ``rhca run`` did not record. No Robinhood quote was
+    read on them, so their fills can be neither priced nor checked -- and a
+    quote cannot be read after the fact."""
+    days = (f"{day:%Y-%m-%d}" for day, _ in result.split.combined.equity_curve)
+    return [day for day in days if day not in logged]
+
+
+def day_ranges(days: Sequence[str]) -> str:
+    """``2026-09-28 to 2026-10-01, 2026-10-05``: runs of days run together."""
+    spans: list[tuple[date, date]] = []
+    for day in sorted(date.fromisoformat(d) for d in days):
+        if spans and day - spans[-1][1] == DAY:
+            spans[-1] = (spans[-1][0], day)
+        else:
+            spans.append((day, day))
+    return ", ".join(str(a) if a == b else f"{a} to {b}" for a, b in spans)
+
+
+@dataclass(frozen=True)
+class Trigger:
+    """How far one coin's last close is from the line that makes a rule trade."""
+
+    symbol: str
+    close: Decimal
+    #: The long-term sleeve buys a tranche on a close under this, the 200-day
+    #: average. ``None`` when it ignores price or has nothing left to buy.
+    buy_under: Decimal | None
+    bought: int
+    #: The coin's long-term tranches; 0 when the sleeve does not hold it.
+    tranches: int
+    #: The first close the next tranche may buy on, a week after the last.
+    buy_from: datetime | None
+    #: The breakout buys on a close over this: the higher of its prior 20-day
+    #: high and its 100-day average. ``None`` while it holds the coin.
+    enter_over: Decimal | None
+    #: The chandelier stop, while the breakout holds the coin.
+    stop_under: Decimal | None
+
+
+def triggers(result: Replay, config: AgentConfig) -> list[Trigger]:
+    """Each coin, at the last close: how far from what would make either rule
+    trade. Both act only on a daily close, so this holds until the next one."""
+    shadow = _shadow(config)
+    _, plan = rules(config)
+    count = long_tranches(config)
+    in_long = set(shadow.long_symbols or shadow.symbols)
+    held = {t.symbol: t for t in result.split.short.trades if t.open}
+    rows: list[Trigger] = []
+    for symbol, prepared in sorted(result.prepared.items()):
+        view = prepared.views.get(result.through)
+        if view is None:
+            continue
+        buys = [t.entry_day for t in result.split.long.trades if t.symbol == symbol]
+        tranches = count if symbol in in_long else 0
+        buy_under = (
+            moving_averages(prepared.daily, plan.average_days).get(result.through)
+            if plan.mode == DIP and len(buys) < tranches
+            else None
+        )
+        trade = held.get(symbol)
+        stop = None
+        if trade is not None:
+            highest = max(
+                b.close for b in prepared.daily if trade.entry_day <= b.start <= result.through
+            )
+            stop = result.rule.stop(highest, view)
+        rows.append(
+            Trigger(
+                symbol,
+                view.close,
+                buy_under=buy_under,
+                bought=len(buys),
+                tranches=tranches,
+                buy_from=max(buys) + DAY * plan.every_days if buys else None,
+                enter_over=None if trade else max(view.prior_high, view.average),
+                stop_under=stop,
+            )
+        )
+    return rows
+
+
+def away(close: Decimal, line: Decimal) -> str:
+    """How far the price must move from ``close`` to reach ``line``."""
+    return pct((line / close - 1) * 100)
+
+
+def _price(value: Decimal) -> str:
+    return f"{_round_price(value):,}"
+
+
+def render_triggers(rows: Sequence[Trigger], through: datetime) -> list[str]:
+    """``rhca shadow``'s section on how far each coin is from a trade."""
+    lines = [
+        "",
+        f"  How far each coin is from a trade, at the {through:%Y-%m-%d} close "
+        "(both rules act only on a daily close)",
+    ]
+    for t in rows:
+        if t.tranches == 0:
+            long_term = "long-term: not this coin"
+        elif t.bought >= t.tranches:
+            long_term = f"long-term: all {t.tranches} tranches bought"
+        elif t.buy_under is None:
+            long_term = f"long-term: {t.bought} of {t.tranches} bought"
+        else:
+            where = (
+                "now" if t.close < t.buy_under else f"({away(t.close, t.buy_under)})"
+            )
+            long_term = (
+                f"long-term buys under {_price(t.buy_under)} {where}, "
+                f"{t.bought} of {t.tranches} bought"
+            )
+            if t.buy_from is not None and t.buy_from > through:
+                long_term += f", not before {t.buy_from:%Y-%m-%d}"
+        if t.stop_under is not None:
+            breakout = (
+                f"breakout holds it, sells under {_price(t.stop_under)} "
+                f"({away(t.close, t.stop_under)})"
+            )
+        elif t.enter_over is not None:
+            breakout = f"breakout buys over {_price(t.enter_over)} ({away(t.close, t.enter_over)})"
+        else:
+            breakout = "breakout: -"
+        lines.append(f"  {t.symbol:<9}{_price(t.close):>12}  {long_term}; {breakout}")
+    return lines
+
+
 def _row(name: str, result: PortfolioResult) -> str:
     return (
         f"  {name:<30}{money(result.capital):>10}{money(result.final_equity):>11}"
@@ -664,7 +883,7 @@ def render(
 ) -> str:
     shadow = _shadow(config)
     split = result.split
-    bar_day = shadow.start + DAY * (BAR_DAYS - 1)
+    missed = missed_days(result, logged)
     lines = [
         "=" * 110,
         "FORWARD TEST: THE SPLIT ON PAPER",
@@ -672,7 +891,13 @@ def render(
         "Paper only: nothing here is a proposal or an order. docs/strategy.md, 'The forward test'.",
         f"Counting from the {shadow.start:%Y-%m-%d} daily close: {result.closes} close(s) so far, "
         f"through {result.through:%Y-%m-%d}. The bar is read after {BAR_DAYS} closes, on "
-        f"{bar_day + DAY:%Y-%m-%d}.",
+        f"{read_on(config):%Y-%m-%d}.",
+        f"rhca run recorded {result.closes - len(missed)} of them live"
+        + (
+            f"; it missed {day_ranges(missed)}, so no Robinhood price exists for those."
+            if missed
+            else "."
+        ),
         f"{money(split.long.capital)} long-term "
         f"({Accumulate(mode=shadow.long_mode).describe(long_tranches(config))})",
         f"{money(split.short.capital)} short-term in the breakout; every fill crosses half the "
@@ -731,6 +956,7 @@ def render(
             f"{money(fill.dollars):>10} at the {format_decimal(fill.close)} close  ({note})"
         )
 
+    lines += render_triggers(triggers(result, config), result.through)
     lines += render_what_if(what_if(result, logged))
 
     checks = check_bar(result, window, logged)
@@ -780,16 +1006,8 @@ def report(
             f"The forward test counts from the {shadow.start:%Y-%m-%d} daily close; there is "
             f"nothing to report until {shadow.start + DAY:%Y-%m-%d} 00:00 UTC."
         )
-    daily = fetch_daily(shadow.symbols, days=history_days(config, now=now), fetch=fetch)
-    missing = sorted(s for s, bars in daily.items() if not bars)
-    if missing:
-        raise AgentError(f"Coinbase returned no daily bars for {', '.join(missing)}")
-    # Report through the last close every coin has.
-    through = min(through, *(bars[-1].start for bars in daily.values()))
-    result = replay(daily, config, through=through)
-    bar_last = shadow.start + DAY * (BAR_DAYS - 1)
-    window = result if through <= bar_last else replay(daily, config, through=bar_last)
-    return render(result, window, config, logged_days(audit, config))
+    result = load(config, fetch=fetch, now=now)
+    return render(result, window(result, config), config, logged_days(audit, config))
 
 
 def describe_status(config: AgentConfig, payload: Mapping[str, Any] | None) -> list[str]:
@@ -819,9 +1037,15 @@ def describe_status(config: AgentConfig, payload: Mapping[str, Any] | None) -> l
     except ValueError:
         age = ""
     held = ", ".join(payload.get("open") or []) or "nothing"
-    return [
+    lines = [
         f"forward test   : {payload.get('closes', '?')} close(s) since {payload.get('start')}, "
         f"through {payload.get('through')}{age} (paper only; `rhca shadow` for the report)",
         f"  {account('split')} = {account(LONG_TERM)} + {account(SHORT_TERM)}; "
         f"{account('hold')}; breakout holds {held}",
     ]
+    coverage = payload.get("coverage") or {}
+    if coverage.get("missed"):
+        lines.append(
+            f"  rhca run missed {coverage['missed']} of them: {coverage.get('missed_days')}"
+        )
+    return lines

@@ -535,6 +535,25 @@ counted as not checked, not as taken. None of this is a proposal: a passing
 verdict on a paper fill is a record of what a human *could* have approved,
 and nothing reads it as approval. It is not one of the bar's checks.
 
+### How far from a trade, and what was missed
+
+`rhca shadow` also gives each coin's distance, at the last close, from what
+would make either rule trade. For the long-term sleeve that is the close under
+the 200-day average it buys below. For the breakout it is the entry line (the
+higher of the prior 20-day high and the 100-day average), or the trailing stop
+while the breakout holds the coin. Both rules act only on a daily close, so
+the distances hold until the next one. They explain an empty what-if: no paper
+trade happens until a coin crosses one of these lines.
+
+It also lists the closes `rhca run` did not record. Those have no Robinhood
+quote, so their fills can be neither priced nor checked, and the quote cannot
+be read afterwards. `docs/runbook.md` covers keeping the loop up across
+reboots.
+
+`rhca run` writes all of this, with the bar and the what-if, to
+`data/shadow.json` after each close and once when it starts. `rhca status`
+and the dashboard's Command Center read it there.
+
 ### The bar
 
 Fixed on 2026-09-28, before any forward close existed. It is read after 90

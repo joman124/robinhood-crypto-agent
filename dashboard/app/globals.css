@@ -528,6 +528,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--s
 .meter { display: block; height: 6px; border-radius: 999px; background: var(--raised); overflow: hidden; min-width: 60px; }
 .meter-fill { display: block; height: 100%; border-radius: inherit; transform-origin: left; animation: grow-x 1s var(--ease) both; }
 .meter-fill.red { background: var(--red); }
+.meter-fill.violet { background: var(--violet); }
 
 /* ---------- command center ---------- */
 

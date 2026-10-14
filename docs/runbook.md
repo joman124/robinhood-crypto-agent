@@ -132,18 +132,35 @@ request ends with the process. Without it, sleep pauses the loop, and
 
 **Keep it running across reboots.** `scripts\run-forever.cmd` runs
 `rhca run --keep-awake` and restarts it 60 seconds after it stops for any
-reason. A shortcut to it in the Startup folder starts it at sign-in:
+reason. `scripts\install-boot-task.ps1` registers a scheduled task that runs
+it at boot, before anyone signs in, and at sign-in if it is not already up.
+Run it once from PowerShell opened with **Run as administrator**, in the repo:
 
 ```powershell
-$s = (New-Object -ComObject WScript.Shell).CreateShortcut("$([Environment]::GetFolderPath('Startup'))\rhca run.lnk")
-$s.TargetPath = "$PWD\scripts\run-forever.cmd"; $s.WorkingDirectory = "$PWD"; $s.WindowStyle = 7; $s.Save()
+powershell -ExecutionPolicy Bypass -File scripts\install-boot-task.ps1
+Start-ScheduledTask -TaskName "rhca run"
 ```
 
-It starts minimized. Close its window to stop it until the next sign-in, and
-delete `rhca run.lnk` from the Startup folder (`shell:startup`) to turn it
-off. `rhca run` refuses to start while another copy's heartbeat is under
-three minutes old, so starting it by hand while the shortcut's copy is up
-fails with "already running" instead of logging everything twice.
+Every daily close the loop is down for is a forward-test day with no
+Robinhood price, and that price cannot be read afterwards. `rhca shadow` lists
+the closes it missed. The task runs without a window, so its output goes to
+`data\rhca-run.log`. `rhca status` and the dashboard say whether it is up.
+
+To stop it, end the task, then the `rhca run` it started:
+
+```powershell
+Stop-ScheduledTask -TaskName "rhca run"
+Stop-Process -Id (Get-Content data\heartbeat.json | ConvertFrom-Json).pid
+```
+
+It starts again at the next boot or sign-in.
+`Unregister-ScheduledTask -TaskName "rhca run" -Confirm:$false` turns it off.
+
+The script also deletes the older Startup-folder shortcut (`shell:startup\rhca
+run.lnk`), which started the loop only at sign-in. `rhca run` refuses to start
+while another copy's heartbeat is under three minutes old, so a second copy
+(started by hand, or by the old shortcut) fails with "already running" instead
+of logging everything twice.
 
 ### 4. Check the first `--once` output
 
