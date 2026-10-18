@@ -213,6 +213,31 @@ code {
 .agent-state-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .agent-state strong { font: 500 15px/1.3 var(--font-display); }
 
+.trigger-gaps { padding: 2px; }
+.trigger-gaps .eyebrow { margin: 0 4px 6px; }
+.trigger-gaps ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.trigger-gaps li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  column-gap: 8px;
+  padding: 5px 4px;
+  border-radius: var(--r-inner);
+}
+.trigger-gaps li:hover { background: var(--card); }
+.tg-coin { display: flex; align-items: center; gap: 6px; }
+.tg-coin strong { font: 500 12px/1 var(--font-display); }
+.tg-gap { font-size: 12px; letter-spacing: -0.01em; text-align: right; }
+.tg-detail {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--ink-3);
+}
+
 .operator { margin-top: auto; display: flex; align-items: center; gap: 10px; }
 .operator strong { font-size: 12px; font-weight: 500; }
 .operator .link { margin-left: auto; font-size: 11px; white-space: nowrap; }
@@ -884,7 +909,7 @@ html { -webkit-text-size-adjust: 100%; }
     /* Opaque, no backdrop-filter: a filter here would trap the fixed tab bar inside the header. */
     background: var(--rail);
   }
-  .brand > span:not(.brand-mark), .agent-state, .operator > span { display: none; }
+  .brand > span:not(.brand-mark), .agent-state, .trigger-gaps, .operator > span { display: none; }
   .brand-mark { width: 28px; height: 28px; border-radius: 8px; }
   .sidebar-pnl { flex-direction: row; align-items: baseline; padding: 0; gap: 8px; border: 0; background: none; white-space: nowrap; min-width: 0; }
   .sidebar-pnl .eyebrow { display: none; }

@@ -1,6 +1,7 @@
 import { LiveProvider } from "@/components/Live";
 import { AgentState, Nav, StatusAlerts, TopBar } from "@/components/ShellClient";
 import { SidebarPnl } from "@/components/Profit";
+import { TriggerGaps } from "@/components/TriggerGaps";
 import { SignOutButton } from "@/components/SignIn";
 import { BrandMark } from "@/components/ui";
 import type { Console } from "@/lib/console";
@@ -23,6 +24,7 @@ export function Shell({ c, children }: { c: Console; children: React.ReactNode }
           <Nav awaiting={awaiting} />
           <SidebarPnl s={pnlSummary(c.payload)} />
           <AgentState payload={c.payload} />
+          <TriggerGaps triggers={c.payload?.forward_test?.triggers} />
           <div className="operator">
             <span className="avatar" aria-hidden="true">OP</span>
             <span>
