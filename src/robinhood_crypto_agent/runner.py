@@ -36,6 +36,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from . import dashboard as dashboard_mod
+from . import net
 from . import shadow as shadow_mod
 from .agent import Agent, MarketState, split_annotations
 from .audit import KIND_PROPOSAL, AuditLog
@@ -55,6 +56,12 @@ log = logging.getLogger("rhca.run")
 
 MODE_SHADOW = "shadow"
 
+#: How often the loop tells the outside watchdog it is alive. Set the check's
+#: period to match, so a stopped loop or a powered-off PC alerts within
+#: period + grace.
+HEALTHCHECK_INTERVAL_SECONDS = 300
+HEALTHCHECK_TIMEOUT_SECONDS = 10
+
 
 @dataclass
 class Services:
@@ -65,6 +72,9 @@ class Services:
     #: Daily bars for the split and the forward test; ``None`` reads
     #: Coinbase's public candles.
     daily_history: shadow_mod.Fetch | None = None
+    #: A dead-man's switch (e.g. healthchecks.io) pinged while the loop is up.
+    #: Nothing on this PC can raise an alarm once the PC is off; the watchdog can.
+    healthcheck_url: str | None = None
 
 
 class Runner:
@@ -113,7 +123,9 @@ class Runner:
             self._tasks.append(
                 ("forward test", shadow_mod.CHECK_INTERVAL_SECONDS, self._forward_test)
             )
-        self._due = {name: 0.0 for name, _, _ in self._tasks}
+        if services.healthcheck_url:
+            self._tasks.append(("healthcheck", HEALTHCHECK_INTERVAL_SECONDS, self._ping))
+        self._due ={name: 0.0 for name, _, _ in self._tasks}
         self._started_at = utcnow()
         self._cycles = 0
         self._counts = dict.fromkeys(
@@ -276,6 +288,17 @@ class Runner:
         for decision in result.new_decisions:
             log.info("dashboard decision: %s %s", decision.kind.value, decision.proposal_id)
 
+    def _ping(self) -> None:
+        try:
+            net.request(
+                "GET", str(self.services.healthcheck_url), timeout=HEALTHCHECK_TIMEOUT_SECONDS
+            )
+        except net.HttpError as exc:
+            # Anyone holding the URL can report the loop alive, so it stays out
+            # of the log, the heartbeat and the dashboard payload.
+            reason = f"HTTP {exc.status}" if exc.status else "no connection"
+            raise AgentError(f"healthcheck ping failed ({reason})") from None
+
     # -- state ---------------------------------------------------------------
 
     def _resume_from_audit(self) -> None:
@@ -304,6 +327,7 @@ class Runner:
                     "robinhood": True,
                     "dashboard": services.dashboard is not None,
                     "forward_test": self.shadow is not None,
+                    "healthcheck": bool(services.healthcheck_url),
                 },
             },
         )

@@ -146,6 +146,15 @@ Robinhood price, and that price cannot be read afterwards. `rhca shadow` lists
 the closes it missed. The task runs without a window, so its output goes to
 `data\rhca-run.log`. `rhca status` and the dashboard say whether it is up.
 
+**Get told when it stops.** `rhca status` and the dashboard only help when
+you look, and nothing on the PC can report that the PC is off. A free
+[healthchecks.io](https://healthchecks.io) check can: create one with
+**Period 5 minutes** and **Grace 10 minutes**, put its ping URL in `.env` as
+`RHCA_HEALTHCHECK_URL`, and restart the loop. It pings every 5 minutes, so
+any outage longer than about 15 minutes sends you an email (or a phone push,
+under the check's Integrations). A failed ping counts as an error in
+`rhca status` and is logged without the URL.
+
 To stop it, end the task, then the `rhca run` it started:
 
 ```powershell

@@ -116,6 +116,7 @@ CREDENTIAL_ENVS = (
     ROBINHOOD_PRIVATE_KEY_ENV,
     "RHCA_DASHBOARD_URL",
     "RHCA_DASHBOARD_TOKEN",
+    "RHCA_HEALTHCHECK_URL",
 )
 
 
@@ -1484,6 +1485,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     services = runner_mod.Services(
         robinhood=robinhood,
         dashboard=(dashboard_url, dashboard_token) if dashboard_url and dashboard_token else None,
+        healthcheck_url=os.environ.get("RHCA_HEALTHCHECK_URL", "").strip() or None,
     )
 
     # A legacy Windows console encoding would otherwise turn a stray character
