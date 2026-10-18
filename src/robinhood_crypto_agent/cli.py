@@ -132,7 +132,7 @@ def read_dotenv(path: Path) -> dict[str, str]:
     if not path.is_file():
         return {}
     values = {}
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():  # -sig: Notepad's BOM
         key = _dotenv_key(raw)
         if not key:
             continue
@@ -164,10 +164,10 @@ def set_dotenv_value(path: Path, key: str, value: str) -> None:
     other keys keep their comments.
     """
     if path.is_file():
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
     else:
         example = path.with_name(".env.example")
-        lines = example.read_text(encoding="utf-8").splitlines() if example.is_file() else []
+        lines = example.read_text(encoding="utf-8-sig").splitlines() if example.is_file() else []
     for index, line in enumerate(lines):
         if _dotenv_key(line) == key:
             lines[index] = f"{key}={value}"
@@ -178,21 +178,27 @@ def set_dotenv_value(path: Path, key: str, value: str) -> None:
 
 
 def _read_json(source: str | None) -> Any:
-    """Read JSON from a path, or from stdin when the source is ``-``/absent."""
+    """Read JSON from a path, or from stdin when the source is ``-``/absent.
+
+    Bytes go to ``json.loads``, which detects UTF-8 (BOM or not, as Notepad
+    saves it) and UTF-16 (Windows PowerShell 5.1's ``>``) -- never the Windows
+    code page a bare ``read_text()`` would decode with.
+    """
     if source in (None, "-"):
-        text = sys.stdin.read()
+        raw = sys.stdin.buffer.read()
     else:
         path = Path(str(source))
         if not path.exists():
             raise AgentError(f"{path} does not exist")
-        text = path.read_text()
-    text = text.strip()
-    if not text:
+        raw = path.read_bytes()
+    if not raw.strip():
         raise AgentError("no JSON input provided")
     try:
-        return json.loads(text)
+        return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise AgentError(f"input is not valid JSON: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise AgentError(f"input is not UTF-8 or UTF-16 text ({exc}); save it as UTF-8") from exc
 
 
 def _env_file(args: argparse.Namespace) -> Path:
