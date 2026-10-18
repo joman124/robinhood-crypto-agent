@@ -546,6 +546,63 @@ class ShadowTracker:
         return {q.symbol: q for q in quotes if q.symbol in symbols}
 
 
+@dataclass(frozen=True)
+class Backfill:
+    """What a backfill did: the missed closes it recorded, and the ones it left
+    alone because they filled -- a filled close cannot be priced after the fact,
+    so it is kept missing, never fabricated. ``result`` is the replay the
+    snapshot is rewritten from."""
+
+    appended: list[str]
+    skipped: list[str]
+    result: Replay
+
+    def describe(self) -> list[str]:
+        lines = [
+            f"backfilled {len(self.appended)} missed close(s)"
+            + (f": {day_ranges(self.appended)}" if self.appended else " (none were missing)")
+        ]
+        if self.skipped:
+            lines.append(
+                f"left {len(self.skipped)} filled close(s) missing -- Robinhood's spread then "
+                f"cannot be read now, so they are not invented: {day_ranges(self.skipped)}"
+            )
+        return lines
+
+
+def backfill(
+    config: AgentConfig, audit: AuditLog, *, fetch: Fetch | None = None, now: datetime | None = None
+) -> Backfill:
+    """Record every fill-free close ``rhca run`` missed, once.
+
+    A missed close carries no Robinhood quote, and one cannot be read after the
+    fact (:func:`missed_days`). A close with no paper fill has nothing
+    quote-dependent to capture, so its record is exactly what a live recording
+    would have written: backfilling it invents nothing. A missed close that
+    *did* fill is left missing and reported, never fabricated. Idempotent: a
+    close already recorded is skipped, so re-running adds nothing.
+    """
+    now = now or utcnow()
+    result = load(config, fetch=fetch, now=now)
+    missed = set(missed_days(result, logged_days(audit, config)))
+    bars = {s: p.daily for s, p in result.prepared.items()}
+    appended: list[str] = []
+    skipped: list[str] = []
+    for when, _ in result.split.combined.equity_curve:
+        day_text = f"{when:%Y-%m-%d}"
+        if day_text not in missed:
+            continue
+        day_result = replay(bars, config, through=when)
+        if day_result.fills_on(when):
+            skipped.append(day_text)
+            continue
+        record = day_record(day_result, when, {}, config)
+        record["backfilled"] = True
+        audit.append(KIND_SHADOW_DAY, record)
+        appended.append(day_text)
+    return Backfill(appended, skipped, result)
+
+
 # -- the report --------------------------------------------------------------
 
 

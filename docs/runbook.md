@@ -146,6 +146,15 @@ Robinhood price, and that price cannot be read afterwards. `rhca shadow` lists
 the closes it missed. The task runs without a window, so its output goes to
 `data\rhca-run.log`. `rhca status` and the dashboard say whether it is up.
 
+**Get told when it stops.** `rhca status` and the dashboard only help when
+you look, and nothing on the PC can report that the PC is off. A free
+[healthchecks.io](https://healthchecks.io) check can: create one with
+**Period 5 minutes** and **Grace 10 minutes**, put its ping URL in `.env` as
+`RHCA_HEALTHCHECK_URL`, and restart the loop. It pings every 5 minutes, so
+any outage longer than about 15 minutes sends you an email (or a phone push,
+under the check's Integrations). A failed ping counts as an error in
+`rhca status` and is logged without the URL.
+
 To stop it, end the task, then the `rhca run` it started:
 
 ```powershell
@@ -420,6 +429,13 @@ every paper fill, what is held, and the three checks of its bar:
 The bar is read after 90 daily closes, on 2026-12-27 (`strategy.md`, "The
 forward test"). Until then every verdict says "so far". Keep `rhca run`
 running: a day it was not running is not compared, only replayed.
+
+**Recording missed closes.** A close `rhca run` missed has no Robinhood
+quote, and one cannot be read afterwards. But on a close where the split made
+no paper fill there was nothing to price, so its record is exactly what a
+live run would have written. `rhca shadow --backfill` records every such
+close, then prints the report. A missed close that did fill stays missing and
+is listed; nothing is invented. Running it again adds nothing.
 
 **A paper fill is not a proposal.** It has no proposal id, and nothing here
 trades it. If `rhca shadow` shows a buy, that is the paper account's, not a

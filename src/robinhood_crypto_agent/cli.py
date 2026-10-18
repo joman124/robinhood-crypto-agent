@@ -43,6 +43,7 @@ from . import portfolio_backtest as portfolio_mod
 from . import reports
 from . import runner as runner_mod
 from . import shadow as shadow_mod
+from . import summary as summary_mod
 from .agent import Agent, MarketState, split_rules
 from .audit import AuditLog, day_from
 from .bootstrap import fetch_coinbase_history
@@ -116,6 +117,7 @@ CREDENTIAL_ENVS = (
     ROBINHOOD_PRIVATE_KEY_ENV,
     "RHCA_DASHBOARD_URL",
     "RHCA_DASHBOARD_TOKEN",
+    "RHCA_HEALTHCHECK_URL",
 )
 
 
@@ -1429,7 +1431,24 @@ def split_settings(
 def cmd_shadow(args: argparse.Namespace) -> int:
     """The forward test's paper account, replayed from Coinbase's daily closes."""
     config = load_config(args.config_dir, data_dir=args.data_dir)
-    print(shadow_mod.report(config, AuditLog(config.audit_path)))
+    audit = AuditLog(config.audit_path)
+    if args.backfill:
+        outcome = shadow_mod.backfill(config, audit)
+        files_mod.write_json_atomic(
+            config.shadow_path,
+            shadow_mod.snapshot(outcome.result, config, shadow_mod.logged_days(audit, config)),
+        )
+        for line in outcome.describe():
+            print(line)
+        print()
+    print(shadow_mod.report(config, audit))
+    return EXIT_OK
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    """The forward test summarized from the audit log alone -- no network."""
+    config = load_config(args.config_dir, data_dir=args.data_dir)
+    print(summary_mod.render(config, AuditLog(config.audit_path)))
     return EXIT_OK
 
 
@@ -1484,6 +1503,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     services = runner_mod.Services(
         robinhood=robinhood,
         dashboard=(dashboard_url, dashboard_token) if dashboard_url and dashboard_token else None,
+        healthcheck_url=os.environ.get("RHCA_HEALTHCHECK_URL", "").strip() or None,
     )
 
     # A legacy Windows console encoding would otherwise turn a stray character
@@ -1588,7 +1608,18 @@ def build_parser() -> argparse.ArgumentParser:
         "shadow",
         help="the forward test: the split account on paper, against its bar (never orders)",
     )
+    shadow.add_argument(
+        "--backfill",
+        action="store_true",
+        help="record every fill-free close rhca run missed, then report (paper only)",
+    )
     shadow.set_defaults(func=cmd_shadow)
+
+    report = sub.add_parser(
+        "report",
+        help="the forward test at a glance, read from the log (no price fetch, no broker)",
+    )
+    report.set_defaults(func=cmd_report)
 
     bootstrap = sub.add_parser(
         "bootstrap-history",

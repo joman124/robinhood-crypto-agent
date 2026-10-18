@@ -10,6 +10,7 @@ from decimal import Decimal
 
 import pytest
 
+from robinhood_crypto_agent import runner as runner_mod
 from robinhood_crypto_agent.audit import KIND_PROPOSAL, AuditLog
 from robinhood_crypto_agent.config import AgentConfig, RiskLimits
 from robinhood_crypto_agent.daily import latest_close
@@ -94,7 +95,9 @@ def test_a_breakout_is_proposed_and_logged_as_the_splits(config):
     assert record["trigger_reason"].startswith("breakout entry: closed")
     heartbeat = json.loads(config.heartbeat_path.read_text())
     assert heartbeat["counts"]["proposed"] == 1
-    assert heartbeat["services"] == {"robinhood": True, "dashboard": False, "forward_test": False}
+    assert heartbeat["services"] == {
+        "robinhood": True, "dashboard": False, "forward_test": False, "healthcheck": False
+    }
 
 
 def test_a_proposal_is_logged_once_an_hour_even_across_a_restart(config):
@@ -120,6 +123,30 @@ def test_one_failing_task_does_not_stop_the_others(config):
     assert heartbeat["last_error"]["task"] == "pairs"
     assert heartbeat["counts"]["quotes"] == 1
     assert len(proposals(config)) == 1
+
+
+HEALTHCHECK = "https://hc-ping.com/00000000-secret-uuid"
+
+
+def test_the_loop_pings_its_healthcheck_and_keeps_a_failure_s_url_out_of_the_heartbeat(
+    config, monkeypatch
+):
+    pinged = []
+    monkeypatch.setattr(
+        runner_mod.net, "request", lambda method, url, **kw: pinged.append((method, url))
+    )
+    make_runner(config, path=QUIET, healthcheck_url=HEALTHCHECK).cycle(force=True)
+    assert pinged == [("GET", HEALTHCHECK)]
+    assert json.loads(config.heartbeat_path.read_text())["services"]["healthcheck"] is True
+
+    def down(method, url, **kw):
+        raise runner_mod.net.HttpError(f"{method} {url} failed: timed out")
+
+    monkeypatch.setattr(runner_mod.net, "request", down)
+    make_runner(config, path=QUIET, healthcheck_url=HEALTHCHECK).cycle(force=True)
+    heartbeat = config.heartbeat_path.read_text()
+    assert "healthcheck ping failed (no connection)" in heartbeat
+    assert "secret-uuid" not in heartbeat
 
 
 def agentic_snapshot(config):

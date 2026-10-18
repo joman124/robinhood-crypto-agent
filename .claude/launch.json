@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "set RHCA_DASHBOARD_TOKEN=dev-token&& set DASHBOARD_PASSWORD=dev&& npm --prefix dashboard run dev -- -p 3100"],
+      "port": 3100
+    }
+  ]
+}

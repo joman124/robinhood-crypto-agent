@@ -148,6 +148,10 @@ rhca backtest --days 1460 --roll-window 90 --strategies split
 # The forward test: the split on paper since 2026-09-28, against its bar
 rhca shadow
 
+# The same forward test at a glance, read from the log (no price fetch, no broker):
+# paper P&L, max drawdown, an ASCII equity curve, and proposals/pass-rate by coin
+rhca report
+
 # Push proposals + outcomes to the dashboard, pull back your accept/decline
 rhca dashboard-sync --url https://your-project.vercel.app --token "$TOKEN"
 
