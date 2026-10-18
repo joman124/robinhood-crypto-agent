@@ -43,6 +43,7 @@ from . import portfolio_backtest as portfolio_mod
 from . import reports
 from . import runner as runner_mod
 from . import shadow as shadow_mod
+from . import summary as summary_mod
 from .agent import Agent, MarketState, split_rules
 from .audit import AuditLog, day_from
 from .bootstrap import fetch_coinbase_history
@@ -1434,6 +1435,13 @@ def cmd_shadow(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    """The forward test summarized from the audit log alone -- no network."""
+    config = load_config(args.config_dir, data_dir=args.data_dir)
+    print(summary_mod.render(config, AuditLog(config.audit_path)))
+    return EXIT_OK
+
+
 def describe_forward_test(config: AgentConfig) -> str:
     """The ``rhca run`` banner's line for the forward test."""
     shadow = config.shadow
@@ -1591,6 +1599,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="the forward test: the split account on paper, against its bar (never orders)",
     )
     shadow.set_defaults(func=cmd_shadow)
+
+    report = sub.add_parser(
+        "report",
+        help="the forward test at a glance, read from the log (no price fetch, no broker)",
+    )
+    report.set_defaults(func=cmd_report)
 
     bootstrap = sub.add_parser(
         "bootstrap-history",
