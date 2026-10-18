@@ -252,6 +252,11 @@ class TestKeygen:
         env.write_text("# c\nROBINHOOD_API_KEY=\nexport TYPESAFE_API_KEY=\"abc\"\n")
         assert read_dotenv(env) == {"TYPESAFE_API_KEY": "abc"}
 
+    def test_a_notepad_bom_does_not_corrupt_the_first_key(self, tmp_path):
+        env = tmp_path / ".env"
+        env.write_text("ROBINHOOD_API_KEY=abc\n", encoding="utf-8-sig")
+        assert read_dotenv(env) == {"ROBINHOOD_API_KEY": "abc"}
+
 
 class TestAccountPin:
     """RHCA_CRYPTO_ACCOUNT pins the main crypto account, the only one a key reads."""

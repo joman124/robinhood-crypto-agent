@@ -138,6 +138,14 @@ def test_present_but_invalid_config_is_an_error_not_a_fallback(tmp_path):
         load_config(tmp_path)
 
 
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16"])
+def test_a_hand_saved_config_loads_whatever_the_windows_encoding(tmp_path, encoding):
+    (tmp_path / "agent.yaml").write_text(
+        "# BTC only — for now\nwatchlist: [BTC-USD]\n", encoding=encoding
+    )
+    assert load_config(tmp_path).watchlist == ("BTC-USD",)
+
+
 def test_watchlist_is_canonicalized_and_deduplicated(tmp_path):
     write(tmp_path, agent={"watchlist": ["BTCUSD", "btc-usd", "ETH/USD"]})
     assert load_config(tmp_path).watchlist == ("BTC-USD", "ETH-USD")

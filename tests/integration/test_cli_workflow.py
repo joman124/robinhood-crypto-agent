@@ -470,6 +470,32 @@ def test_the_run_banner_flags_an_agentic_balance_never_ingested(workspace, tmp_p
     assert describe_ingested_balance(state).startswith("crypto buying power $340.00, 0 position(s)")
 
 
+@pytest.mark.parametrize(
+    "encoding",
+    ["utf-8", "utf-8-sig", "utf-16"],  # plain; Notepad's BOM; Windows PowerShell 5.1's `>`
+)
+def test_ingest_reads_a_hand_saved_response_in_any_windows_encoding(
+    workspace, capsys, tmp_path, encoding
+):
+    from robinhood_crypto_agent.cli import _read_json
+
+    guide = "Use crypto buying power — not the top-level figure."
+    text = json.dumps({**LIVE_PORTFOLIO, "guide": guide}, ensure_ascii=False)
+    path = tmp_path / "saved.json"
+    path.write_bytes(text.encode(encoding))
+    assert _read_json(str(path))["guide"] == guide  # no cp1252 mojibake
+    assert workspace.run("ingest", "portfolio", "-f", str(path)) == EXIT_OK
+    assert "crypto buying power $340.00" in capsys.readouterr().out
+
+
+def test_a_code_page_file_is_refused_with_a_hint_to_save_as_utf8(workspace, capsys, tmp_path):
+    text = json.dumps({**LIVE_PORTFOLIO, "guide": "a — b"}, ensure_ascii=False)
+    path = tmp_path / "ansi.json"
+    path.write_bytes(text.encode("cp1252"))  # Notepad's "ANSI"
+    assert workspace.run("ingest", "portfolio", "-f", str(path)) == EXIT_ERROR
+    assert "save it as UTF-8" in capsys.readouterr().err
+
+
 def test_ingest_accounts_caches_the_account_the_agent_can_trade(workspace, capsys, tmp_path):
     from robinhood_crypto_agent.store import StateCache
 

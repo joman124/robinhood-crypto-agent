@@ -416,7 +416,8 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     except ModuleNotFoundError as exc:  # pragma: no cover - dependency is declared
         raise ConfigError("PyYAML is required to read YAML config files") from exc
     try:
-        loaded = yaml.safe_load(path.read_text()) or {}
+        # Bytes, so PyYAML reads the BOM (UTF-8 or UTF-16), not the Windows code page.
+        loaded = yaml.safe_load(path.read_bytes()) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"{path}: invalid YAML: {exc}") from exc
     if not isinstance(loaded, dict):
