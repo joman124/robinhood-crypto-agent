@@ -430,6 +430,13 @@ The bar is read after 90 daily closes, on 2026-12-27 (`strategy.md`, "The
 forward test"). Until then every verdict says "so far". Keep `rhca run`
 running: a day it was not running is not compared, only replayed.
 
+**Recording missed closes.** A close `rhca run` missed has no Robinhood
+quote, and one cannot be read afterwards. But on a close where the split made
+no paper fill there was nothing to price, so its record is exactly what a
+live run would have written. `rhca shadow --backfill` records every such
+close, then prints the report. A missed close that did fill stays missing and
+is listed; nothing is invented. Running it again adds nothing.
+
 **A paper fill is not a proposal.** It has no proposal id, and nothing here
 trades it. If `rhca shadow` shows a buy, that is the paper account's, not a
 trade to make.

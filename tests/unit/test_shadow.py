@@ -282,6 +282,42 @@ def logged(config):
     return sh.logged_days(AuditLog(config.audit_path), config)
 
 
+def flat_daily(last):
+    """A fetch of flat closes: no coin ever crosses a line, so nothing fills."""
+    def fetch(symbol, *, interval_minutes, days):
+        return daily([100] * 240 if symbol == "BTC-USD" else [50] * 240, symbol, last=last)
+    return fetch
+
+
+class TestBackfill:
+    def test_it_records_the_fill_free_closes_that_were_missed(self, tmp_path):
+        config = shadow_config(tmp_path, mode="dip")
+        fetch = flat_daily(START + timedelta(days=4))
+        tracker(config, now=at(1), fetch=fetch).update()  # records 2026-10-01 only
+        tracker(config, now=at(5), fetch=fetch).update()  # records 2026-10-05 only
+        audit = AuditLog(config.audit_path)
+
+        outcome = sh.backfill(config, audit, fetch=fetch, now=at(5))
+        assert outcome.appended == ["2026-10-02", "2026-10-03", "2026-10-04"]
+        assert outcome.skipped == []
+        assert {r["day"] for r in shadow_days(config) if r.get("backfilled")} == {
+            "2026-10-02", "2026-10-03", "2026-10-04"}
+        assert all(r["fills"] == [] for r in shadow_days(config))
+        assert sh.missed_days(outcome.result, logged(config)) == []
+
+        # Idempotent: a second pass finds nothing missing and records nothing.
+        assert sh.backfill(config, audit, fetch=fetch, now=at(5)).appended == []
+        assert len(shadow_days(config)) == 5
+
+    def test_it_will_not_fabricate_a_missed_close_that_filled(self, tmp_path):
+        config = shadow_config(tmp_path)  # dca + the default BTC breakout: closes fill
+        fetch = FakeCoinbase(through=START + timedelta(days=3))
+        outcome = sh.backfill(config, AuditLog(config.audit_path), fetch=fetch, now=at(4))
+        assert outcome.skipped == ["2026-10-01", "2026-10-04"]  # buys, then the stop
+        assert outcome.appended == ["2026-10-02", "2026-10-03"]
+        assert all(r["day"] in ("2026-10-02", "2026-10-03") for r in shadow_days(config))
+
+
 class TestReport:
     def test_the_bar_reads_provisional_until_ninety_closes(self, tmp_path):
         config = shadow_config(tmp_path)
@@ -478,6 +514,26 @@ class TestCli:
         out = capsys.readouterr().out
         assert "FORWARD TEST" in out and "short-term  BTC-USD   bought" not in out  # sold
         assert "2026-10-04 short-term  sell BTC-USD" in out
+
+    def test_rhca_shadow_backfill_records_missed_closes_and_rewrites_the_snapshot(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "shadow.yaml").write_text(
+            "shadow:\n  start: 2026-10-01\n  symbols: [BTC-USD, ETH-USD]\n  long_mode: dip\n"
+        )
+        fetch = flat_daily(START + timedelta(days=2))  # closes 10-01, 10-02, 10-03
+        monkeypatch.setattr("robinhood_crypto_agent.shadow.fetch_coinbase_history", fetch)
+        monkeypatch.setattr("robinhood_crypto_agent.shadow.utcnow", lambda: at(4))
+        data_dir = tmp_path / "data"
+        args = ["--config-dir", str(config_dir), "--data-dir", str(data_dir), "shadow", "--backfill"]
+
+        assert main(args) == EXIT_OK
+        out = capsys.readouterr().out
+        assert "backfilled 3 missed close(s): 2026-10-01 to 2026-10-03" in out
+        snapshot = json.loads((data_dir / "shadow.json").read_text())
+        assert snapshot["coverage"] == {"recorded": 3, "missed": 0, "missed_days": ""}
 
     def test_rhca_shadow_needs_a_forward_test(self, tmp_path, capsys):
         args = ["--config-dir", str(tmp_path), "--data-dir", str(tmp_path / "data"), "shadow"]
