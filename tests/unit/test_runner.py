@@ -96,7 +96,8 @@ def test_a_breakout_is_proposed_and_logged_as_the_splits(config):
     heartbeat = json.loads(config.heartbeat_path.read_text())
     assert heartbeat["counts"]["proposed"] == 1
     assert heartbeat["services"] == {
-        "robinhood": True, "dashboard": False, "forward_test": False, "healthcheck": False
+        "robinhood": True, "dashboard": False, "forward_test": False,
+        "healthcheck": False, "push": False,
     }
 
 
@@ -147,6 +148,52 @@ def test_the_loop_pings_its_healthcheck_and_keeps_a_failure_s_url_out_of_the_hea
     heartbeat = config.heartbeat_path.read_text()
     assert "healthcheck ping failed (no connection)" in heartbeat
     assert "secret-uuid" not in heartbeat
+
+
+PUSH_WEBHOOK = "https://ntfy.sh/rhca-secret-topic"
+
+
+def test_the_first_proposal_per_coin_pushes_once_even_across_a_restart(config, monkeypatch):
+    """The dead-zone-ending alert: one push the first time the split proposes a
+    coin, never again -- not this hour, and not after a restart."""
+    sent = []
+    monkeypatch.setattr(
+        runner_mod.push_mod, "notify", lambda url, title, msg: sent.append((url, title, msg)) or True
+    )
+    runner = make_runner(config, push_webhook=PUSH_WEBHOOK)
+    runner.cycle(force=True)
+    runner.cycle(force=True)  # same hour: logged once, pushed once
+    make_runner(config, push_webhook=PUSH_WEBHOOK).cycle(force=True)  # a restart
+
+    assert len(sent) == 1
+    url, title, message = sent[0]
+    assert url == PUSH_WEBHOOK
+    assert "first BTC-USD proposal" in title
+    assert "BTC-USD -- short-term entry buy" in message
+    assert "breakout entry" in message  # the one-liner on what fired
+    assert "approve by id" in message
+
+
+def test_no_push_without_a_webhook(config, monkeypatch):
+    sent = []
+    monkeypatch.setattr(runner_mod.push_mod, "notify", lambda *a: sent.append(a) or True)
+    make_runner(config).cycle(force=True)  # proposes, but no webhook configured
+    assert proposals(config) and sent == []
+
+
+def test_a_failed_push_is_retried_on_the_next_proposal(config, monkeypatch):
+    """A push that fails leaves the coin un-announced, so the next hour's
+    proposal tries again rather than losing the alert to a blip."""
+    attempts = []
+    monkeypatch.setattr(
+        runner_mod.push_mod, "notify", lambda url, title, msg: attempts.append(title) or False
+    )
+    runner = make_runner(config, push_webhook=PUSH_WEBHOOK)
+    runner.cycle(force=True)
+    # A fresh hour re-logs the proposal; the failed push is retried.
+    runner._last_key.clear()
+    runner.cycle(force=True)
+    assert len(attempts) == 2
 
 
 def agentic_snapshot(config):

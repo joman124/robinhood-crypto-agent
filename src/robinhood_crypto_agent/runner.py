@@ -37,6 +37,7 @@ from typing import Any, Callable
 
 from . import dashboard as dashboard_mod
 from . import net
+from . import push as push_mod
 from . import shadow as shadow_mod
 from .agent import Agent, MarketState, split_annotations
 from .audit import KIND_PROPOSAL, AuditLog
@@ -69,6 +70,10 @@ class Services:
 
     robinhood: RobinhoodClient
     dashboard: tuple[str, str] | None = None
+    #: Where to push the one-time alert when the split first proposes a coin
+    #: (``STREAK_PUSH_WEBHOOK``, the same channel as life-dashboard). ``None``
+    #: leaves the forward test silent; nothing else changes.
+    push_webhook: str | None = None
     #: Daily bars for the split and the forward test; ``None`` reads
     #: Coinbase's public candles.
     daily_history: shadow_mod.Fetch | None = None
@@ -240,6 +245,30 @@ class Runner:
             "ready to approve" if proposal.risk.passed else "blocked by risk",
             proposal.reason,
         )
+        self._announce_first(proposal, annotations)
+
+    def _announce_first(self, proposal: Proposal, annotations: dict[str, Any]) -> None:
+        """Push once, the first time the split proposes a coin in this test.
+
+        The forward test sat in the dead zone for weeks; this is the alert that
+        it finally fired, so the owner need not watch the dashboard daily. One
+        push per coin: the audit log's shadow-era proposals seed what was
+        already announced (:meth:`_resume_from_audit`), so a restart never
+        repeats it. A send that fails is retried on the next hourly proposal.
+        """
+        webhook = self.services.push_webhook
+        if not webhook or proposal.symbol in self._notified:
+            return
+        title = f"Shadow loop: first {proposal.symbol} proposal"
+        message = (
+            f"The split wants its first trade since the forward test began.\n"
+            f"{proposal.symbol} -- {annotations.get('sleeve')} {annotations.get('rule')} "
+            f"{proposal.side.value}, ${format_decimal(proposal.notional)} paper\n"
+            f"{proposal.reason}\n"
+            f"Paper only: a proposal to approve by id, not an order."
+        )
+        if push_mod.notify(webhook, title, message):
+            self._notified.add(proposal.symbol)
 
     def _forward_test(self) -> None:
         """Record the latest UTC daily close of the paper split account, once,
@@ -302,13 +331,18 @@ class Runner:
     # -- state ---------------------------------------------------------------
 
     def _resume_from_audit(self) -> None:
-        """Rebuild the once-an-hour keys from the log, so a restart does not
-        re-log this hour's proposals."""
+        """Rebuild the once-an-hour keys and the first-proposal alert set from
+        the log, so a restart re-logs neither this hour's proposals nor a push
+        already sent. A coin with any shadow-era proposal has already had its
+        alert, whether or not the push itself went through."""
         self._last_key: dict[str, str] = {}
+        self._notified: set[str] = set()
         for record in self.audit.events(kind=KIND_PROPOSAL):
             key = record.get("candidate_key")
             if key and record.get("strategy") == STRATEGY_SPLIT:
                 self._last_key[str(key).rpartition("|")[0]] = str(key)
+            if record.get("mode") == MODE_SHADOW and record.get("symbol"):
+                self._notified.add(str(record["symbol"]))
 
     def _write_heartbeat(self) -> None:
         services = self.services
@@ -328,6 +362,7 @@ class Runner:
                     "dashboard": services.dashboard is not None,
                     "forward_test": self.shadow is not None,
                     "healthcheck": bool(services.healthcheck_url),
+                    "push": services.push_webhook is not None,
                 },
             },
         )

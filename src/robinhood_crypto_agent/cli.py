@@ -40,6 +40,7 @@ from . import backtest as backtest_mod
 from . import dashboard as dashboard_mod
 from . import files as files_mod
 from . import portfolio_backtest as portfolio_mod
+from . import push as push_mod
 from . import reports
 from . import runner as runner_mod
 from . import shadow as shadow_mod
@@ -118,6 +119,7 @@ CREDENTIAL_ENVS = (
     "RHCA_DASHBOARD_URL",
     "RHCA_DASHBOARD_TOKEN",
     "RHCA_HEALTHCHECK_URL",
+    "STREAK_PUSH_WEBHOOK",
 )
 
 
@@ -1510,6 +1512,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         robinhood=robinhood,
         dashboard=(dashboard_url, dashboard_token) if dashboard_url and dashboard_token else None,
         healthcheck_url=os.environ.get("RHCA_HEALTHCHECK_URL", "").strip() or None,
+        push_webhook=os.environ.get(push_mod.WEBHOOK_ENV, "").strip() or None,
     )
 
     # A legacy Windows console encoding would otherwise turn a stray character
