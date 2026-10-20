@@ -196,6 +196,73 @@ def test_a_failed_push_is_retried_on_the_next_proposal(config, monkeypatch):
     assert len(attempts) == 2
 
 
+def near_trigger(symbol, close, **lines):
+    from robinhood_crypto_agent.shadow import Trigger
+
+    return Trigger(
+        symbol, Decimal(str(close)),
+        buy_under=lines.get("buy_under"), bought=0, tranches=10, buy_from=None,
+        enter_over=lines.get("enter_over"), stop_under=lines.get("stop_under"),
+    )
+
+
+def test_a_coin_nearing_a_trigger_pushes_once_per_line(config, monkeypatch):
+    """Advance warning: one push when a close lands within 5% of a trigger
+    line, and not again at the same close."""
+    rows = [
+        near_trigger("BTC-USD", 100, buy_under=Decimal("97")),   # -3%, within
+        near_trigger("ETH-USD", 100, enter_over=Decimal("110")),  # +10%, too far
+    ]
+    monkeypatch.setattr(runner_mod.shadow_mod, "triggers", lambda result, cfg: rows)
+    sent = []
+    monkeypatch.setattr(
+        runner_mod.push_mod, "notify", lambda url, title, msg: sent.append((title, msg)) or True
+    )
+    runner = make_runner(config, push_webhook=PUSH_WEBHOOK)
+    runner._announce_near(object())
+    runner._announce_near(object())  # same close: no repeat
+
+    assert len(sent) == 1
+    title, message = sent[0]
+    assert "BTC-USD within 5% of a trigger" in title
+    assert "long-term buys under 97" in message and "(-3.0%)" in message
+
+
+def test_a_coin_already_near_at_restart_is_not_re_announced(config, monkeypatch):
+    """The dedup is seeded from the persisted triggers, so a coin already within
+    5% at the last recorded close had its push and a restart repeats none."""
+    config.data_dir.mkdir(parents=True, exist_ok=True)
+    config.shadow_path.write_text(json.dumps({"triggers": [
+        {"symbol": "BTC-USD", "close": "100", "buy_under": "97",
+         "enter_over": None, "stop_under": None},
+    ]}))
+    monkeypatch.setattr(
+        runner_mod.shadow_mod, "triggers",
+        lambda result, cfg: [near_trigger("BTC-USD", 100, buy_under=Decimal("97"))],
+    )
+    sent = []
+    monkeypatch.setattr(runner_mod.push_mod, "notify", lambda *a: sent.append(a) or True)
+    runner = make_runner(config, push_webhook=PUSH_WEBHOOK)
+    assert "BTC-USD|buy_under" in runner._near_notified
+    runner._announce_near(object())
+    assert sent == []
+
+
+def test_a_failed_near_push_is_retried_at_the_next_close(config, monkeypatch):
+    monkeypatch.setattr(
+        runner_mod.shadow_mod, "triggers",
+        lambda result, cfg: [near_trigger("BTC-USD", 100, buy_under=Decimal("97"))],
+    )
+    attempts = []
+    monkeypatch.setattr(
+        runner_mod.push_mod, "notify", lambda url, title, msg: attempts.append(title) or False
+    )
+    runner = make_runner(config, push_webhook=PUSH_WEBHOOK)
+    runner._announce_near(object())
+    runner._announce_near(object())  # un-marked, so retried
+    assert len(attempts) == 2
+
+
 def agentic_snapshot(config):
     """What `rhca ingest positions` and `rhca ingest portfolio` cache."""
     cache = StateCache(config.data_dir / "market_state.json")

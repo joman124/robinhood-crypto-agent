@@ -53,7 +53,7 @@ from .models import (
     parse_timestamp,
     utcnow,
 )
-from .numeric import ZERO, format_decimal, round_money, to_decimal
+from .numeric import ZERO, format_decimal, opt_decimal, round_money, to_decimal
 from .portfolio_backtest import (
     PortfolioResult,
     Prepared,
@@ -925,6 +925,63 @@ def render_triggers(rows: Sequence[Trigger], through: datetime) -> list[str]:
             breakout = "breakout: -"
         lines.append(f"  {t.symbol:<9}{_price(t.close):>12}  {long_term}; {breakout}")
     return lines
+
+
+#: A close this close to a trigger line (either side) raises the advance alert.
+NEAR_PCT = Decimal(5)
+
+#: The trigger lines a "getting close" alert watches, and how ``rhca shadow``
+#: already names each, so the push reads like the report.
+_NEAR_LINES = (
+    ("buy_under", "long-term buys under"),
+    ("enter_over", "breakout buys over"),
+    ("stop_under", "breakout stop under"),
+)
+
+
+def near_gap(close: Decimal | None, line: Decimal | None) -> Decimal | None:
+    """The signed % move from ``close`` to ``line``, or ``None`` when either is
+    missing or the line is more than :data:`NEAR_PCT` away on either side."""
+    if not close or line is None:
+        return None
+    gap = (line / close - 1) * 100
+    return gap if abs(gap) <= NEAR_PCT else None
+
+
+def near_alerts(rows: Sequence[Trigger]) -> list[tuple[str, str, str]]:
+    """Each coin-line within :data:`NEAR_PCT` of its close, as (key, title,
+    message) ready for a one-time advance push. ``key`` is the stable
+    ``symbol|line`` dedup id; the rest is human text in the report's wording."""
+    alerts: list[tuple[str, str, str]] = []
+    for t in rows:
+        for line, phrase in _NEAR_LINES:
+            value = getattr(t, line)
+            gap = near_gap(t.close, value)
+            if gap is None:
+                continue
+            alerts.append(
+                (
+                    f"{t.symbol}|{line}",
+                    f"Shadow loop: {t.symbol} within {NEAR_PCT:g}% of a trigger",
+                    f"{t.symbol} is near a trigger: close {_price(t.close)}, "
+                    f"{phrase} {_price(value)} ({pct(gap)}). A daily close past it "
+                    f"trades the split -- paper, not an order.",
+                )
+            )
+    return alerts
+
+
+def near_keys(snapshot: Mapping[str, Any]) -> set[str]:
+    """The ``symbol|line`` keys already within :data:`NEAR_PCT` in a persisted
+    ``shadow.json``, so a restart re-announces none of them -- the same durable,
+    stateless dedup the first-proposal alert takes from the audit log."""
+    keys: set[str] = set()
+    for row in snapshot.get("triggers") or []:
+        close = opt_decimal(row.get("close"))
+        for line, _ in _NEAR_LINES:
+            if near_gap(close, opt_decimal(row.get(line))) is not None:
+                keys.add(f"{row.get('symbol')}|{line}")
+    return keys
 
 
 def _row(name: str, result: PortfolioResult) -> str:

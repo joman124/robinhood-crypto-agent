@@ -430,6 +430,46 @@ class TestReport:
         assert "Not yet judged" in text  # no day was ever logged live
 
 
+class TestNearAlerts:
+    """The advance "getting close" alert: distance to a trigger line, the
+    one-time push per coin-line, and the dedup seeded from a persisted snapshot."""
+
+    def trig(self, symbol="BTC-USD", close="100", **lines):
+        return sh.Trigger(
+            symbol, D(close),
+            buy_under=lines.get("buy_under"), bought=0, tranches=10, buy_from=None,
+            enter_over=lines.get("enter_over"), stop_under=lines.get("stop_under"),
+        )
+
+    def test_near_gap_is_the_move_to_the_line_only_within_five_percent(self):
+        assert sh.near_gap(D(100), D(97)) == -3  # price must fall 3% to reach it
+        assert sh.near_gap(D(100), D(103)) == 3
+        assert sh.near_gap(D(100), D(106)) is None  # beyond NEAR_PCT
+        assert sh.near_gap(D(100), None) is None
+        assert sh.near_gap(D(0), D(1)) is None
+
+    def test_near_alerts_fire_once_per_coin_line_in_the_reports_words(self):
+        rows = [
+            self.trig("BTC-USD", "100", buy_under=D("97")),   # -3%, within
+            self.trig("ETH-USD", "100", enter_over=D("110")),  # +10%, too far
+        ]
+        [(key, title, message)] = sh.near_alerts(rows)
+        assert key == "BTC-USD|buy_under"
+        assert "within 5% of a trigger" in title
+        assert "long-term buys under 97" in message and "(-3.0%)" in message
+        assert "paper, not an order" in message
+
+    def test_near_keys_seed_the_dedup_from_a_persisted_snapshot(self):
+        snapshot = {"triggers": [
+            {"symbol": "BTC-USD", "close": "100", "buy_under": "97",
+             "enter_over": None, "stop_under": None},
+            {"symbol": "ETH-USD", "close": "100", "buy_under": None,
+             "enter_over": "110", "stop_under": None},  # too far: not seeded
+        ]}
+        assert sh.near_keys(snapshot) == {"BTC-USD|buy_under"}
+        assert sh.near_keys({}) == set()
+
+
 class TestRunner:
     def config(self, tmp_path):
         start = sh.latest_close(utcnow())

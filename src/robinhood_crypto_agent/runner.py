@@ -44,7 +44,7 @@ from .audit import KIND_PROPOSAL, AuditLog
 from .config import AgentConfig
 from .daily import DailyBars
 from .errors import AgentError
-from .files import write_json_atomic
+from .files import read_json, write_json_atomic
 from .ledger import STRATEGY_SPLIT
 from .models import Proposal, parse_timestamp, utcnow
 from .numeric import format_decimal, round_money
@@ -270,6 +270,24 @@ class Runner:
         if push_mod.notify(webhook, title, message):
             self._notified.add(proposal.symbol)
 
+    def _announce_near(self, result: shadow_mod.Replay) -> None:
+        """Advance warning: push once when a daily close lands within
+        ``NEAR_PCT`` of a trigger line, before the split actually trades it --
+        time to re-read the exit criteria rather than react to a signal cold.
+        One push per coin-line; the persisted triggers seed what was already
+        near (:meth:`_resume_from_audit`), so a restart repeats none. A failed
+        send leaves the key unmarked, so the next close retries it."""
+        webhook = self.services.push_webhook
+        if not webhook:
+            return
+        for key, title, message in shadow_mod.near_alerts(
+            shadow_mod.triggers(result, self.config)
+        ):
+            if key in self._near_notified:
+                continue
+            if push_mod.notify(webhook, title, message):
+                self._near_notified.add(key)
+
     def _forward_test(self) -> None:
         """Record the latest UTC daily close of the paper split account, once,
         and rewrite the snapshot ``rhca status`` and the dashboard read: after
@@ -280,6 +298,7 @@ class Runner:
         if result is not None:
             self._counts["forward_test_days"] += 1
             self._log_close(result)
+            self._announce_near(result)
         elif self._snapshot_due:
             result = self.shadow.latest()
         if result is None:
@@ -343,6 +362,11 @@ class Runner:
                 self._last_key[str(key).rpartition("|")[0]] = str(key)
             if record.get("mode") == MODE_SHADOW and record.get("symbol"):
                 self._notified.add(str(record["symbol"]))
+        # Advance "getting close" alerts dedup off the persisted triggers, not
+        # the audit log: a coin-line already within NEAR_PCT at the last close
+        # has had its push, so a restart repeats none.
+        snapshot = read_json(self.config.shadow_path)
+        self._near_notified = shadow_mod.near_keys(snapshot) if snapshot else set()
 
     def _write_heartbeat(self) -> None:
         services = self.services
