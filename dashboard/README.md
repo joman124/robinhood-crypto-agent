@@ -53,14 +53,16 @@ runs the fate, segment and P&L self-checks.
 
 ## What it does and does not do
 
-**It does not place orders, and it holds no Robinhood credentials.**
+**It holds no Robinhood credentials, but Accept places a real order.**
 
-Accepting a proposal here *records your decision*. The agent picks that decision
-up on its next `rhca dashboard-sync` and still runs it through the full approval
-gate before anything is submitted: the kill switch, a fresh price-drift check
-against the live quote, remaining-quantity accounting across tranches, and
-order-contract validation. A web button is an input to that gate, never a
-bypass of it.
+Accepting a proposal here *records your decision*. `rhca run` on your PC pulls
+it within a minute and, if it passes the full approval gate, places that one
+limit order on your main crypto account (`execution/desk.py`): the kill switch,
+a fresh price-drift check against the live quote, no risk override, the daily
+notional cap, and a 15-minute limit on how old the accept may be. A web button
+is an input to that gate, never a bypass of it. Each order sent, refused,
+filled or canceled is pushed to `STREAK_PUSH_WEBHOOK`. Undo after the order is
+sent does not cancel it: cancel it in the Robinhood app.
 
 Two consequences worth stating plainly:
 

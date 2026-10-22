@@ -13,7 +13,8 @@ export type AirlockCheck = { label: string; detail: string; ok: boolean };
 /**
  * The final confirmation. Accept needs the proposal id typed back, so a
  * decision is always about one named proposal, never "the one on screen".
- * It records a decision; it never places an order, and says so.
+ * It records a decision. `rhca run` places an accepted one as a real order
+ * within a minute, after the approval gate (src/.../execution/desk.py).
  */
 export function Airlock({ proposal, decision, canDecide, blocker, syncedAt, checks }: {
   proposal: Proposal;
@@ -123,6 +124,10 @@ export function Airlock({ proposal, decision, canDecide, blocker, syncedAt, chec
             </button>
           </div>
           {blocker && <p className="small tone-text amber" id="confirm-hint">{blocker}</p>}
+          <p className="muted small">
+            Accept places this limit order on your Robinhood account within a minute. Undo
+            does not cancel a sent order: cancel it in the Robinhood app.
+          </p>
         </div>
       )}
       {error && <p className="small tone-text red" role="alert">{error}</p>}

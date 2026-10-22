@@ -8,6 +8,7 @@ nanoseconds). The values are illustrative, not anyone's account.
 import base64
 import os
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -100,10 +101,19 @@ class TestPrivateKey:
         assert RobinhoodClient.from_env(env) is not None
 
 
-def test_the_client_has_no_way_to_place_or_cancel_an_order():
-    """Shadow mode's guarantee is structural: there is nothing here to call."""
+def test_one_way_to_place_an_order_none_to_cancel_and_only_the_desk_calls_it():
+    """The guarantee is structural: one write, behind the owner's accept."""
     public = [name for name in dir(RobinhoodClient) if not name.startswith("_")]
-    assert not [n for n in public if any(w in n for w in ("order", "cancel", "place", "trade"))]
+    writes = [n for n in public if any(w in n for w in ("cancel", "place", "trade"))]
+    assert writes == ["place_order"]
+
+    src = Path(__file__).parents[2] / "src" / "robinhood_crypto_agent"
+    callers = sorted(
+        p.relative_to(src).as_posix()
+        for p in src.rglob("*.py")
+        if ".place_order(" in p.read_text(encoding="utf-8")
+    )
+    assert callers == ["execution/desk.py"]
 
 
 class TestRestShapes:

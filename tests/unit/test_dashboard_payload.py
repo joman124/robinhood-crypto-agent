@@ -7,9 +7,11 @@ from decimal import Decimal
 
 import pytest
 
+from robinhood_crypto_agent import dashboard as dashboard_mod
 from robinhood_crypto_agent.audit import KIND_PROPOSAL, AuditLog
 from robinhood_crypto_agent.config import AgentConfig
 from robinhood_crypto_agent.dashboard import (
+    MAX_PAYLOAD_PROPOSALS,
     PROPOSAL_FIELDS,
     build_payload,
     fetch_decisions,
@@ -39,6 +41,9 @@ def config(tmp_path):
     return AgentConfig(
         watchlist=("BTC-USD",), rhs_account_number="123456789", data_dir=tmp_path / "data"
     )
+
+
+SPLIT_ENTRY = {"strategy": "split", "sleeve": "short-term", "rule": "entry"}
 
 
 def proposal(proposal_id="abc123def456", *, passed=True, when=None):
@@ -84,7 +89,7 @@ class TestPayloadPrivacy:
         audit.record_proposal(proposal())
         payload = build_payload(config, audit=audit, store=PriceStore(config.price_store_path))
         derived = {
-            "proposed_at", "outcome", "actionable", "signals", "notes", "plan",
+            "proposed_at", "outcome", "actionable", "blocker", "signals", "notes", "plan",
             "risk_findings", "drift_pct", "execution",
         }
         assert set(payload["proposals"][0]) <= set(PROPOSAL_FIELDS) | derived
@@ -156,7 +161,7 @@ class TestPayloadShape:
 
     def test_passing_proposals_are_actionable(self, config):
         audit = AuditLog(config.audit_path)
-        audit.record_proposal(proposal())
+        audit.record_proposal(proposal(), SPLIT_ENTRY)
         payload = build_payload(config, audit=audit)
         assert payload["proposals"][0]["actionable"] is True
 
@@ -244,6 +249,37 @@ class TestPayloadShape:
             audit.record_proposal(proposal(f"{i:012x}"))
         payload = build_payload(config, audit=audit, limit=2)
         assert len(payload["proposals"]) == 2
+
+    def test_a_sync_sends_only_the_newest_rows(self, config):
+        """375 rows (1.4 MB) every sync exhausted the free Upstash plan."""
+        audit = AuditLog(config.audit_path)
+        for i in range(MAX_PAYLOAD_PROPOSALS + 10):
+            audit.record_proposal(proposal(f"{i:012x}"))
+        rows = build_payload(config, audit=audit, limit=MAX_PAYLOAD_PROPOSALS)["proposals"]
+        assert {r["proposal_id"] for r in rows} == {
+            f"{i:012x}" for i in range(10, MAX_PAYLOAD_PROPOSALS + 10)
+        }
+
+    def test_only_the_newest_split_proposal_for_a_trade_can_be_accepted(self, config):
+        """Matches the order desk, which refuses a superseded one."""
+        audit = AuditLog(config.audit_path)
+        audit.record_proposal(proposal("aaaaaaaaaaaa"), SPLIT_ENTRY)
+        audit.record_proposal(proposal("bbbbbbbbbbbb"), SPLIT_ENTRY)
+        rows = {r["proposal_id"]: r for r in build_payload(config, audit=audit)["proposals"]}
+        assert rows["bbbbbbbbbbbb"]["actionable"] and rows["bbbbbbbbbbbb"]["blocker"] is None
+        assert not rows["aaaaaaaaaaaa"]["actionable"]
+        assert "Superseded by bbbbbbbbbbbb" in rows["aaaaaaaaaaaa"]["blocker"]
+
+    def test_an_hour_old_or_non_split_proposal_cannot_be_accepted(self, config, monkeypatch):
+        audit = AuditLog(config.audit_path)
+        audit.record_proposal(proposal("aaaaaaaaaaaa"), SPLIT_ENTRY)
+        audit.record_proposal(proposal("cccccccccccc"))  # not the split's
+        later = utcnow() + timedelta(hours=2)
+        monkeypatch.setattr(dashboard_mod, "utcnow", lambda: later)
+        rows = {r["proposal_id"]: r for r in build_payload(config, audit=audit)["proposals"]}
+        assert "Over an hour old" in rows["aaaaaaaaaaaa"]["blocker"]
+        assert "Only the split's" in rows["cccccccccccc"]["blocker"]
+        assert not any(r["actionable"] for r in rows.values())
 
 
 class TestTransportSafety:

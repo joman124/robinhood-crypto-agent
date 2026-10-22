@@ -221,7 +221,8 @@ class AuditLog:
         """
         day = day or utcnow().date()
         executed_notional = ZERO
-        execution_count = 0
+        # One order can be several records -- sent, then each fill -- so count orders.
+        orders: set[tuple[Any, Any]] = set()
         proposal_count = 0
         symbols: list[str] = []
         pnl_by_source: dict[str, Decimal] = {}
@@ -253,7 +254,7 @@ class AuditLog:
                     # A rejected order moved no money, so it must not consume
                     # the daily notional budget.
                     continue
-                execution_count += 1
+                orders.add((record.get("proposal_id"), record.get("tranche_index")))
                 executed_notional += to_decimal(record.get("notional", 0), field="notional")
                 symbol = record.get("symbol")
                 if symbol:
@@ -262,7 +263,7 @@ class AuditLog:
         return DailyActivity(
             day=day,
             executed_notional=executed_notional,
-            execution_count=execution_count,
+            execution_count=len(orders),
             realized_pnl=sum(pnl_by_source.values(), ZERO),
             proposal_count=proposal_count,
             symbols_traded=tuple(dict.fromkeys(symbols)),

@@ -69,8 +69,9 @@ export async function decide(
     return {
       ok: false,
       error:
+        proposal.blocker ??
         "the risk engine blocked this proposal, so it cannot be accepted here. " +
-        "Overriding a risk block is a deliberate act from the terminal.",
+          "Overriding a risk block is a deliberate act from the terminal.",
     };
   }
   if (kind === "accept" && payload?.kill_switch?.engaged) {

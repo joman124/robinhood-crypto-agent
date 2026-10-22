@@ -457,19 +457,6 @@ def test_ingest_portfolio_reads_the_live_shape_and_crypto_buying_power(
     assert state.crypto_buying_power() == Decimal("340.0000")
 
 
-def test_the_run_banner_flags_an_agentic_balance_never_ingested(workspace, tmp_path):
-    from robinhood_crypto_agent.cli import describe_ingested_balance
-    from robinhood_crypto_agent.store import StateCache
-
-    state = StateCache(workspace.data_dir / "market_state.json")
-    assert "NEVER INGESTED" in describe_ingested_balance(state)
-
-    path = tmp_path / "live_portfolio.json"
-    path.write_text(json.dumps(LIVE_PORTFOLIO))
-    workspace.run("ingest", "portfolio", "-f", str(path))
-    assert describe_ingested_balance(state).startswith("crypto buying power $340.00, 0 position(s)")
-
-
 @pytest.mark.parametrize(
     "encoding",
     ["utf-8", "utf-8-sig", "utf-16"],  # plain; Notepad's BOM; Windows PowerShell 5.1's `>`

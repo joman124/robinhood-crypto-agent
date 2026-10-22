@@ -24,6 +24,7 @@ is config/shadow.yaml's, and say nothing about the real one.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Sequence
 
@@ -33,10 +34,11 @@ from .audit import KIND_EXECUTION, KIND_NOTE, KIND_PROPOSAL, AuditLog
 from .config import AgentConfig
 from .decisions import Decision, decision_from_dict
 from .errors import AgentError
+from .execution.desk import MAX_PROPOSAL_AGE, slot_of
 from .execution.kill_switch import KillSwitch
 from .files import read_json
-from .ledger import split_book
-from .models import ProposalStatus, utcnow
+from .ledger import STRATEGY_SPLIT, split_book
+from .models import ProposalStatus, parse_timestamp, utcnow
 from .numeric import abs_pct_drift, format_decimal, round_money, to_decimal
 from .outcomes import (
     DEFAULT_HORIZON_BARS,
@@ -75,6 +77,12 @@ MAX_TEXT = 300
 #: Proposal fields the dashboard is allowed to see. Everything else in the
 #: audit record -- including anything an account snapshot might carry -- is
 #: dropped rather than filtered later.
+#: Proposal rows a sync sends. The payload is one Upstash value, written every
+#: sync and read on every page view; sending all 375 of System 1's rows (1.4 MB)
+#: exhausted the free plan on 2026-10-20. The stats still count every proposal,
+#: and the audit log keeps them all.
+MAX_PAYLOAD_PROPOSALS = 25
+
 PROPOSAL_FIELDS = (
     "proposal_id",
     "symbol",
@@ -157,18 +165,12 @@ def build_payload(
     executions = _executions_by_proposal(audit)
 
     records = list(audit.events(kind=KIND_PROPOSAL))
-    if limit is not None and limit > 0:
-        records = records[-limit:]
+    first_sent = max(len(records) - limit, 0) if limit is not None and limit > 0 else 0
+    # Later records overwrite earlier ones, so this is each trade's newest.
+    newest = {slot_of(r): r.get("proposal_id") for r in records if r.get("strategy") == STRATEGY_SPLIT}
+    now = utcnow()
 
-    for record in records:
-        row = {field: record.get(field) for field in PROPOSAL_FIELDS}
-        row["proposed_at"] = record.get("recorded_at")
-        row.update(_proposal_detail(record))
-        row["drift_pct"] = _drift(
-            record.get("reference_price"), marks.get(canonical(str(record.get("symbol", ""))))
-        )
-        row["execution"] = executions.get(str(record.get("proposal_id")))
-
+    for index, record in enumerate(records):
         symbol = str(record.get("symbol", ""))
         outcome = outcome_from_proposal_record(
             record,
@@ -177,17 +179,27 @@ def build_payload(
             hurdle_pct=hurdle_pct,
         )
         if outcome is not None:
-            outcomes.append(outcome)
-            row["outcome"] = outcome.to_dict()
-        else:
-            row["outcome"] = None
+            outcomes.append(outcome)  # the stats count every proposal ...
+        if index < first_sent:
+            continue  # ... the rows only the newest: see MAX_PAYLOAD_PROPOSALS
+
+        row = {field: record.get(field) for field in PROPOSAL_FIELDS}
+        row["proposed_at"] = record.get("recorded_at")
+        row.update(_proposal_detail(record))
+        row["drift_pct"] = _drift(
+            record.get("reference_price"), marks.get(canonical(str(record.get("symbol", ""))))
+        )
+        row["execution"] = executions.get(str(record.get("proposal_id")))
+        row["outcome"] = outcome.to_dict() if outcome is not None else None
 
         # Blocked proposals (and System 1's never-escalated and declined
         # candidates) are shown for the record, but only a live proposal gets
-        # an Accept button.
-        row["actionable"] = bool(record.get("risk_passed")) and (
+        # an Accept button -- and only one the order desk would send.
+        passed = bool(record.get("risk_passed")) and (
             record.get("status", ProposalStatus.PROPOSED.value) == ProposalStatus.PROPOSED.value
         )
+        row["blocker"] = _desk_blocker(record, newest, now) if passed else None
+        row["actionable"] = passed and row["blocker"] is None
         proposals.append(row)
 
     proposals.sort(key=lambda r: str(r.get("proposed_at") or ""), reverse=True)
@@ -247,6 +259,25 @@ def _forward_test(config: AgentConfig) -> dict[str, Any] | None:
     if snap is None or snap.get("setup") != shadow_mod.setup(config):
         return None
     return {field: snap.get(field) for field in FORWARD_TEST_FIELDS}
+
+
+def _desk_blocker(
+    record: dict[str, Any], newest: dict[Any, Any], now: datetime
+) -> str | None:
+    """Why the order desk would refuse an accept of this passing proposal, or
+    ``None``. The desk re-checks all of it; this keeps the button honest."""
+    if record.get("strategy") != STRATEGY_SPLIT:
+        return "Only the split's proposals can be placed."
+    latest = newest.get(slot_of(record))
+    if latest != record.get("proposal_id"):
+        return f"Superseded by {latest}: accept the newest proposal for this trade."
+    try:
+        age = now - parse_timestamp(str(record.get("recorded_at")))
+    except ValueError:
+        return "No time recorded, so its age cannot be checked."
+    if age > MAX_PROPOSAL_AGE:
+        return "Over an hour old: the split re-proposes a trade each hour while it still wants it."
+    return None
 
 
 def _proposal_detail(record: dict[str, Any]) -> dict[str, Any]:
@@ -439,7 +470,7 @@ def sync(
     token: str,
     horizon_bars: int = DEFAULT_HORIZON_BARS,
     hurdle_pct: Decimal = DEFAULT_HURDLE_PCT,
-    limit: int | None = None,
+    limit: int | None = MAX_PAYLOAD_PROPOSALS,
     repo_url: str | None = None,
 ) -> SyncResult:
     """Push proposals up, pull decisions back, and note each *new* decision once.

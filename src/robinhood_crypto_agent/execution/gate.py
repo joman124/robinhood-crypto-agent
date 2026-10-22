@@ -26,7 +26,9 @@ The rules it enforces, and why each one exists:
   proposal and approve that.
 
 The gate returns a *payload*, not a filled order. Calling the MCP tool remains
-a separate, deliberate act.
+a separate, deliberate act. The order desk (``desk.py``) runs the same checks
+through :meth:`ApprovalGate.clear` before it sends an order the owner accepted
+on the dashboard.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from decimal import Decimal
 from ..audit import AuditLog
 from ..config import AgentConfig
 from ..errors import ApprovalError, KillSwitchEngaged
+from ..ledger import FINAL_STATES
 from ..mcp.contract import CRYPTO_TOOLS
 from ..models import (
     ExecutionMode,
@@ -114,6 +117,46 @@ class ApprovalGate:
         independent things would have to fail for a web button to override a
         risk block.
         """
+        overridden, drift, notes = self.clear(
+            proposal,
+            approval_text=approval_text,
+            live_quote=live_quote,
+            tranche_index=tranche_index,
+            allow_override=allow_override,
+        )
+        request = build_order_request(
+            proposal,
+            config=self.config,
+            tranche_index=tranche_index,
+            tool=tool,
+            ref_id=ref_id,
+            constraints=constraints,
+        )
+
+        return ExecutionAuthorization(
+            proposal_id=proposal.proposal_id,
+            tranche_index=tranche_index,
+            request=request,
+            overridden=overridden,
+            drift_pct=drift,
+            notes=notes,
+        )
+
+    def clear(
+        self,
+        proposal: Proposal,
+        *,
+        approval_text: str,
+        live_quote: Quote,
+        tranche_index: int = 0,
+        allow_override: bool = True,
+    ) -> tuple[bool, Decimal, list[str]]:
+        """Every check :meth:`authorize` makes, without building a payload.
+
+        Returns ``(overridden, drift_pct, notes)``, or raises explaining why
+        not. The order desk calls this directly: it sends the Robinhood API's
+        order body, not the MCP tool's.
+        """
         notes: list[str] = []
 
         if self.config.execution_mode is not ExecutionMode.PROPOSE_ONLY:
@@ -147,24 +190,7 @@ class ApprovalGate:
         drift = self._check_drift(proposal, live_quote)
         remaining = self._check_remaining(proposal, tranche_index)
         notes.append(f"{remaining} {proposal.symbol} remains unfilled on this proposal")
-
-        request = build_order_request(
-            proposal,
-            config=self.config,
-            tranche_index=tranche_index,
-            tool=tool,
-            ref_id=ref_id,
-            constraints=constraints,
-        )
-
-        return ExecutionAuthorization(
-            proposal_id=proposal.proposal_id,
-            tranche_index=tranche_index,
-            request=request,
-            overridden=overridden,
-            drift_pct=drift,
-            notes=notes,
-        )
+        return overridden, drift, notes
 
     # -- checks -----------------------------------------------------------
 
@@ -234,6 +260,15 @@ class ApprovalGate:
         return drift
 
     def _check_remaining(self, proposal: Proposal, tranche_index: int) -> Decimal:
+        latest: dict[object, str] = {}
+        for record in self.audit.executions_for(proposal.proposal_id):
+            latest[record.get("tranche_index")] = str(record.get("state", "")).lower()
+        if latest.get(tranche_index, "") not in FINAL_STATES | {""}:
+            # Filled quantity alone would read a working order as nothing done.
+            raise ApprovalError(
+                f"an order for tranche {tranche_index} of proposal {proposal.proposal_id} "
+                "is still working; a second one would double it"
+            )
         planned = proposal.plan.total_quantity
         already = self.audit.filled_quantity_for(proposal.proposal_id)
         remaining = planned - already

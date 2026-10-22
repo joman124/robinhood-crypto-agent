@@ -75,6 +75,15 @@ of a bug is still a bad proposal, and `rhca run` is the shadow-mode evidence
 phase this document asks for. The order call is the Phase 2 change. It belongs
 behind `ApprovalGate` with the `AutoPolicy` above, not added to the client.
 
+**Decision, 2026-10-20.** The owner chose to approve orders with the
+dashboard's Accept button and to trade the main crypto account, the one the
+key reaches. `robinhood.py` gained one order call, `place_order`, made only by
+the order desk (`execution/desk.py`) after an accept naming that proposal
+clears `ApprovalGate`. That is still a human naming the id, so this is not
+Phase 2: nothing here stands in for the human, and every promotion criterion
+below still applies before anything does. The blast radius is now "a bad
+order", bounded by the per-trade and daily caps, not "a bad proposal".
+
 ### 3. A dead-man's switch
 
 In propose-only, a loop that silently stops is harmless — you just get no

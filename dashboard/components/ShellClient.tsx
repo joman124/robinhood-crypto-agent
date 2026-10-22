@@ -63,7 +63,7 @@ export function AgentState({ payload }: { payload: Payload | null }) {
   return (
     <div className="agent-state">
       <div className="agent-state-head">
-        <span className="eyebrow">Shadow loop</span>
+        <span className="eyebrow">Live loop</span>
         <span className={`dot ${face.tone} ${loop === "running" ? "pulse" : ""}`} aria-hidden="true" />
       </div>
       <strong>{face.label}</strong>
@@ -91,7 +91,7 @@ export function TopBar({ payload, readOnly, memory }: { payload: Payload | null;
         </span>
       </div>
       <div className="topbar-badges">
-        <Badge tone="red" icon="triangle-alert" title="Real money. This console records decisions; it never places an order.">Real money</Badge>
+        <Badge tone="red" icon="triangle-alert" title="Real money. Accepting a proposal places a real order within a minute.">Real money</Badge>
         <span className="hide-sm"><Badge tone="sky" icon="eye">{mode.replace(/_/g, "-")}</Badge></span>
         {readOnly && <Badge tone="amber" icon="lock-keyhole" title="DASHBOARD_PASSWORD is not set">Read-only</Badge>}
         {memory && <Badge tone="amber" icon="info" title="No KV store: decisions are lost on a cold start">Memory</Badge>}

@@ -139,6 +139,7 @@ export function verdictOf(p: Proposal): Verdict | null {
  * The gate re-checks all of it against a fresh quote regardless.
  */
 export function acceptBlocker(p: Proposal, payload: Payload | null): string | null {
+  if (p.blocker) return p.blocker;
   if (!p.actionable) {
     return p.risk_passed === false
       ? "The risk engine blocked this. Overriding it is a typed act in the terminal."

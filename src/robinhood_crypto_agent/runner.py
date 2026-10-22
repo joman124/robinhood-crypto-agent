@@ -1,8 +1,10 @@
-"""``rhca run``: the real-time loop, in shadow mode.
+"""``rhca run``: the real-time loop.
 
     Coinbase daily closes + Robinhood quotes -> the split + 14 risk rules -> proposal
                                                                                |
                                             logged, and synced to the dashboard
+                                                                               |
+                  the owner accepts it by id on the dashboard -> the order desk -> order
 
     Coinbase daily closes -> the split account, on paper -> one shadow_day record
                              (the forward test, config/shadow.yaml; ``shadow.py``)
@@ -13,9 +15,10 @@ proposal once an hour, priced off the quote then, for as long as the rule
 still wants it: a fresh one each hour keeps its price inside the approval
 gate's drift tolerance.
 
-"Shadow" means exactly one thing: there is no code path from here to an order.
-The Robinhood client is read-only, and a proposal is a row in the audit log
-that a human can take through the approval gate -- or not.
+The only path from here to an order is the owner's accept on the dashboard,
+naming one proposal (``execution/desk.py``). The split trades the API key's
+account -- the owner's main crypto account -- so its cash and holdings are read
+from the key too.
 
 The forward test is paper all the way down: it writes ``shadow_day`` records,
 never proposals, so nothing it does can reach the approval gate.
@@ -33,6 +36,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Callable
 
 from . import dashboard as dashboard_mod
@@ -44,18 +48,21 @@ from .audit import KIND_PROPOSAL, AuditLog
 from .config import AgentConfig
 from .daily import DailyBars
 from .errors import AgentError
+from .execution.desk import OrderDesk
 from .files import read_json, write_json_atomic
 from .ledger import STRATEGY_SPLIT
 from .models import Proposal, parse_timestamp, utcnow
-from .numeric import format_decimal, round_money
+from .numeric import ZERO, format_decimal, round_money
 from .robinhood import RobinhoodClient
 from .store import PriceStore, StateCache
 from .store.prices import floor_to_interval
 from .store.state import SECTION_POSITIONS
+from .symbols import canonical
 
 log = logging.getLogger("rhca.run")
 
-MODE_SHADOW = "shadow"
+#: Proposals logged before 2026-10-20, when the loop could not order, say "shadow".
+MODE_LIVE = "live"
 
 #: How often the loop tells the outside watchdog it is alive. Set the check's
 #: period to match, so a stopped loop or a powered-off PC alerts within
@@ -70,9 +77,10 @@ class Services:
 
     robinhood: RobinhoodClient
     dashboard: tuple[str, str] | None = None
-    #: Where to push the one-time alert when the split first proposes a coin
+    #: Where to push alerts: the split's first proposal of a coin, a coin
+    #: nearing a trigger, and every order sent, refused, filled or ended
     #: (``STREAK_PUSH_WEBHOOK``, the same channel as life-dashboard). ``None``
-    #: leaves the forward test silent; nothing else changes.
+    #: sends none; nothing else changes.
     push_webhook: str | None = None
     #: Daily bars for the split and the forward test; ``None`` reads
     #: Coinbase's public candles.
@@ -107,6 +115,7 @@ class Runner:
             audit=self.audit,
             daily=DailyBars(config.data_dir / "daily", fetch=services.daily_history),
         )
+        self.desk = OrderDesk(config, self.audit, services.robinhood, pairs=self.cache.pairs)
         self._clock = clock
         self._sleep = sleep
 
@@ -114,7 +123,9 @@ class Runner:
         self._tasks: list[tuple[str, int, Callable[[], None]]] = [
             ("quotes", pipeline.quote_interval_seconds, self._poll_quotes),
             ("pairs", pipeline.account_interval_seconds, self._poll_pairs),
+            ("account", pipeline.account_interval_seconds, self._poll_account),
             ("evaluate", pipeline.quote_interval_seconds, self._evaluate),
+            ("orders", pipeline.quote_interval_seconds, self._orders),
             ("sync", pipeline.sync_interval_seconds, self._sync),
         ]
         self.shadow = (
@@ -189,17 +200,48 @@ class Runner:
         self._counts["quotes"] += len(quotes)
 
     def _poll_pairs(self) -> None:
-        # Only market data comes from the API key. Its account is the owner's
-        # main crypto account, not the Agentic one orders go to, so its
-        # holdings and buying power stay out of the cache: `rhca ingest
-        # positions` and `rhca ingest portfolio` supply the Agentic account's,
-        # and a cycle here must not overwrite them.
         pairs = self.services.robinhood.trading_pairs(self.config.watchlist)
         for pair in pairs:
             if not pair.tradable or pair.halted:
                 # Every proposal for it will fail pair_tradable; say why up front.
                 log.warning("%s is reported untradable or halted by Robinhood", pair.symbol)
         self.cache.put_pairs(pairs)
+
+    def _poll_account(self) -> None:
+        """The account the split trades -- the key's, the owner's main crypto
+        account: its cash, and every coin it holds valued at the mark, for the
+        per-coin limit and for sizing sells."""
+        robinhood = self.services.robinhood
+        account = robinhood.account()
+        if account is None or account.buying_power is None:
+            raise AgentError("Robinhood returned no buying power for the API key's account")
+        positions = [p for p in robinhood.holdings() if p.quantity > ZERO]
+        marks = self._marks([p.symbol for p in positions])
+        unvalued = [p.symbol for p in positions if p.symbol not in marks]
+        if unvalued:
+            # Valued at nothing: the account looks smaller, so the per-coin
+            # limit only gets stricter.
+            log.warning("no quote to value %s; counted at $0", ", ".join(unvalued))
+        held = sum((p.quantity * marks.get(p.symbol, ZERO) for p in positions), ZERO)
+        self.cache.put_positions(positions)
+        self.cache.put_crypto_buying_power(account.buying_power)
+        self.cache.put_portfolio_value(account.buying_power + held)
+
+    def _marks(self, symbols: list[str]) -> dict[str, Decimal]:
+        """Each coin's mark; one coin Robinhood will not quote is skipped, not fatal."""
+        robinhood = self.services.robinhood
+        if not symbols:
+            return {}  # an empty query would quote every pair Robinhood lists
+        try:
+            return {canonical(q.symbol): q.mark for q in robinhood.best_bid_ask(symbols)}
+        except AgentError:
+            marks: dict[str, Decimal] = {}
+            for symbol in symbols:
+                try:
+                    marks.update((canonical(q.symbol), q.mark) for q in robinhood.best_bid_ask([symbol]))
+                except AgentError as exc:
+                    log.warning("could not quote %s: %s", symbol, exc)
+            return marks
 
     def _evaluate(self) -> None:
         quotes = self.cache.quotes()
@@ -232,7 +274,7 @@ class Runner:
         self._counts["candidates"] += 1
         self.audit.record_proposal(
             proposal,
-            {"source": "rhca run", "mode": MODE_SHADOW, "candidate_key": key, **annotations},
+            {"source": "rhca run", "mode": MODE_LIVE, "candidate_key": key, **annotations},
         )
         if proposal.risk.passed:
             self._counts["proposed"] += 1
@@ -252,20 +294,24 @@ class Runner:
 
         The forward test sat in the dead zone for weeks; this is the alert that
         it finally fired, so the owner need not watch the dashboard daily. One
-        push per coin: the audit log's shadow-era proposals seed what was
+        push per coin: the audit log's split proposals seed what was
         already announced (:meth:`_resume_from_audit`), so a restart never
         repeats it. A send that fails is retried on the next hourly proposal.
         """
         webhook = self.services.push_webhook
         if not webhook or proposal.symbol in self._notified:
             return
-        title = f"Shadow loop: first {proposal.symbol} proposal"
+        title = f"Split: first {proposal.symbol} proposal"
         message = (
-            f"The split wants its first trade since the forward test began.\n"
+            f"The split wants its first {proposal.symbol} trade.\n"
             f"{proposal.symbol} -- {annotations.get('sleeve')} {annotations.get('rule')} "
-            f"{proposal.side.value}, ${format_decimal(proposal.notional)} paper\n"
+            f"{proposal.side.value}, ${format_decimal(proposal.notional)}\n"
             f"{proposal.reason}\n"
-            f"Paper only: a proposal to approve by id, not an order."
+            + (
+                f"Accept {proposal.proposal_id} on the dashboard to place it."
+                if proposal.risk.passed
+                else "Blocked by risk, so it cannot be accepted."
+            )
         )
         if push_mod.notify(webhook, title, message):
             self._notified.add(proposal.symbol)
@@ -326,6 +372,22 @@ class Runner:
             result.closes,
         )
 
+    def _orders(self) -> None:
+        """Follow the orders already sent, then send what the owner accepted.
+        Each batch is announced before the next step can fail: its records are
+        already written, so an alert lost here would never be sent."""
+        self._announce(self.desk.follow())
+        if self.services.dashboard is not None:
+            base_url, token = self.services.dashboard
+            decisions = dashboard_mod.fetch_decisions(base_url=base_url, token=token)
+            self._announce(self.desk.act(decisions))
+
+    def _announce(self, events: list[Any]) -> None:
+        for event in events:
+            log.info("%s: %s", event.title, event.message)
+            if self.services.push_webhook:
+                push_mod.notify(self.services.push_webhook, event.title, event.message)
+
     def _sync(self) -> None:
         if self.services.dashboard is None:
             return
@@ -352,15 +414,19 @@ class Runner:
     def _resume_from_audit(self) -> None:
         """Rebuild the once-an-hour keys and the first-proposal alert set from
         the log, so a restart re-logs neither this hour's proposals nor a push
-        already sent. A coin with any shadow-era proposal has already had its
+        already sent. A coin with any split proposal has already had its
         alert, whether or not the push itself went through."""
         self._last_key: dict[str, str] = {}
         self._notified: set[str] = set()
         for record in self.audit.events(kind=KIND_PROPOSAL):
+            if record.get("strategy") != STRATEGY_SPLIT:
+                # System 1's proposals: every watchlist coin has some, so
+                # counting them would mean the split's first never pushes.
+                continue
             key = record.get("candidate_key")
-            if key and record.get("strategy") == STRATEGY_SPLIT:
+            if key:
                 self._last_key[str(key).rpartition("|")[0]] = str(key)
-            if record.get("mode") == MODE_SHADOW and record.get("symbol"):
+            if record.get("symbol"):
                 self._notified.add(str(record["symbol"]))
         # Advance "getting close" alerts dedup off the persisted triggers, not
         # the audit log: a coin-line already within NEAR_PCT at the last close
@@ -374,7 +440,7 @@ class Runner:
             self.config.heartbeat_path,
             {
                 "pid": os.getpid(),
-                "mode": MODE_SHADOW,
+                "mode": MODE_LIVE,
                 "started_at": self._started_at.isoformat(),
                 "last_cycle_at": utcnow().isoformat(),
                 "cycles": self._cycles,

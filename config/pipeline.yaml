@@ -9,5 +9,5 @@ pipeline:
   # Cadences. Robinhood does not publish its rate limit; community clients
   # budget ~100 requests/minute, and one quote poll covers the whole watchlist.
   quote_interval_seconds: 60
-  account_interval_seconds: 600    # trading pairs (balance, holdings: rhca ingest)
+  account_interval_seconds: 600    # trading pairs, buying power and holdings
   sync_interval_seconds: 300       # dashboard push/pull, when configured

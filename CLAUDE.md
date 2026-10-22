@@ -4,25 +4,31 @@ Operating rules for Claude when running this agent.
 
 ## ⚠️ This repo trades real money
 
-`place_crypto_order` places a **real order against a real account**. There is
-no paper-trading mode and no sandbox endpoint. Every rule below exists because
-the failure it prevents would cost the user actual money.
+Accepting a proposal on the dashboard places a **real order against a real
+account**, and so does `place_crypto_order`. There is no paper-trading mode and
+no sandbox endpoint. Every rule below exists because the failure it prevents
+would cost the user actual money.
 
 ## Your role
 
-You are the only component that can **place an order**:
+Since 2026-10-20 the split trades the owner's **main crypto account**, and the
+only way its orders are placed is the owner's Accept on the dashboard:
 
-- **You** call the `RobinHood` MCP tools, including the order tools. No code in
-  this repository can place or cancel an order.
+- **The owner** accepts one proposal by typing its id on the dashboard.
+- **`rhca run`** pulls that accept within a minute and its order desk
+  (`execution/desk.py`) runs it through `ApprovalGate` and places that one
+  limit order through the Robinhood Crypto API, on the API key's account --
+  the main one. It follows the order to its fill and records every step in the
+  audit log. It never places an order without that accept.
 - **The CLI** (`rhca`) holds the strategy, the risk limits, and the audit log.
-  It gives you proposals and validated payloads.
-- **`rhca run`** is a shadow-mode loop that runs on its own. It *reads* from
-  Robinhood's Crypto API with a read-only client (quotes and pairs only; the
-  Agentic account's balance and holdings come from `rhca ingest`). After each
-  UTC daily close it runs **the split** (`docs/strategy.md`, "The split") on
-  every watchlist coin (BTC, ETH, SOL, XRP) -- $250 long-term, bought the
-  buy-low way and held, and $250 trading the breakout -- and logs what it
-  wants as proposals, afresh each hour. It never orders.
+- **You** read, explain and build. Do **not** place split orders with the
+  `RobinHood` MCP order tools: they reach the **Agentic** account, which the
+  split no longer trades, so its ledger, caps and holdings would all be wrong.
+- **`rhca run`** runs on its own. It reads quotes, pairs, buying power and
+  holdings from the API key's account. After each UTC daily close it runs
+  **the split** (`docs/strategy.md`, "The split") on every watchlist coin (BTC,
+  ETH, SOL, XRP) -- long-term, bought the buy-low way and held, and the
+  breakout -- and logs what it wants as proposals, afresh each hour.
 - **The forward test** also runs inside `rhca run` (`config/shadow.yaml`): the
   same split on paper. After each UTC daily close it writes a `shadow_day`
   record of its paper fills. `rhca shadow` reports it. A paper fill is **not a
@@ -32,9 +38,9 @@ You are the only component that can **place an order**:
   have made. A passing verdict on a paper fill is not approval either. The
   dashboard's forward-test card shows the same paper trades: none has a
   proposal id, so none can be approved from it.
-- **A human** approves a specific proposal by its id. Nothing else is approval
-  — including the split wanting it, and including a proposal the dashboard
-  shows as ready.
+- **A human** approves a specific proposal by its id, on the dashboard. Nothing
+  else is approval — including the split wanting it, and including a proposal
+  the dashboard shows as ready.
 
 ## Hard rules
 
@@ -97,10 +103,13 @@ You are the only component that can **place an order**:
     the audit log, so an unrecorded fill silently raises the day's remaining
     budget.
 
-13. **Keep the shadow run shadow.** Never add an order or cancel method to
-    `robinhood.py`. Unattended execution is Phase 2: it goes behind
-    `ApprovalGate`, with the preconditions in `docs/autonomy.md`, as a
-    deliberate human decision.
+13. **One order path, behind the owner's accept.** `robinhood.py` has exactly
+    one order method, `place_order`, and only the order desk calls it, after a
+    dashboard accept naming that proposal clears `ApprovalGate` (the owner's
+    decision, 2026-10-20). Never add a cancel method or another caller, and
+    never let the desk act without an accept: unattended execution is Phase 2,
+    with the preconditions in `docs/autonomy.md`, as a deliberate human
+    decision.
 
 14. **Never print or log a credential.** `rhca status` lists key *names* only.
     Keys live in the environment or in the gitignored `.env`; they never go
@@ -124,11 +133,13 @@ tranches, one limit order each). If one is ever approved, log every tranche
 with its own `record-execution --tranche N`; `rhca approve` refuses a tranche
 that would exceed the remaining unfilled quantity.
 
-The split rebuilds each sleeve's cash and holdings from the fills you record.
-Record the `place_crypto_order` response, and then the fill from
-`get_crypto_orders` once it happens (or the cancellation, if it never fills).
-Until then it treats the order as working: it will not propose it again, and
-an open buy's dollars stay out of the sleeve's cash.
+The split rebuilds each sleeve's cash and holdings from the fills the order
+desk records: `submitting` before it sends, Robinhood's answer, then each fill
+(as a delta) and the order's end as `rhca run` reads it back every minute.
+Until the order ends it treats it as working: it will not propose it again,
+and an open buy's dollars stay out of the sleeve's cash. A limit order that
+never fills stays open (gtc) until it is canceled in the Robinhood app; the
+desk then records the cancellation.
 
 ## Tool-contract facts worth remembering
 
@@ -151,30 +162,23 @@ any payload offline. The traps:
 ## Typical session
 
 ```
-rhca status                                   # mode, kill switch, today's usage
-# call get_accounts, get_currency_pairs, get_portfolio, get_crypto_positions,
-# get_crypto_quotes -- pipe each response into `rhca ingest <kind>`
-rhca analyze -v                               # proposals + full risk verdicts
-# show the user; they approve ONE proposal BY ID
-rhca plan-order <id>                          # -> preview_crypto_order payload
-# call preview_crypto_order, show the estimate
-# re-fetch get_crypto_quotes into fresh.json
-rhca approve <id> --approval "<their exact words>" --quote fresh.json
-# call place_crypto_order with the payload it printed, verbatim
-rhca record-execution <id> --tranche 0 -f response.json
+rhca status          # loop alive, kill switch, today's usage, each sleeve
+rhca analyze -v      # what the split wants now, with every risk verdict
+# the owner accepts ONE proposal BY ID on the dashboard; rhca run places it
+# within a minute and pushes "Order placed", then "Order filled" (or why not)
+rhca status          # the order and the sleeves, as the audit log has them
 ```
 
-When `rhca run` is running, its proposals are already in the audit log with a
-`status` (`proposed` or `rejected_by_risk`; System 1's old records also carry
-`declined_by_system2` and `not_escalated`). Act only on `proposed` ones a human
-names by id, through the same `plan-order` → `approve` → `place_crypto_order`
-→ `record-execution` steps. Check `rhca status` for whether the loop is alive
-before trusting its quotes; it also shows each sleeve's cash, holdings and
-realized P&L.
+`rhca run`'s proposals are in the audit log with a `status` (`proposed` or
+`rejected_by_risk`; System 1's old records also carry `declined_by_system2`
+and `not_escalated`). Only a `proposed` one can be accepted. Check `rhca status`
+for whether the loop is alive before trusting its quotes. The
+`plan-order` → `approve` → `place_crypto_order` → `record-execution` steps
+remain for the MCP tools, which reach the Agentic account -- not for the split.
 
 Once a day, record realized P&L so the daily loss cap is real:
 
 ```
-# call get_realized_pnl
+# call get_realized_pnl for the main crypto account (the one the split trades)
 rhca record-pnl -f realized_pnl.json
 ```

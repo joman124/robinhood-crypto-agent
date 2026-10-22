@@ -2,7 +2,8 @@
 
 What these pin down: what the split wants is logged once an hour, even
 across a restart; nothing is logged when it wants nothing; one failing task
-never stops the loop; and the loop never reads the API key's account balance.
+never stops the loop; and the balance and holdings are the API key's account's,
+the one the split trades.
 """
 
 import json
@@ -33,8 +34,7 @@ LAST_CLOSE = str(round(BREAKOUT[-1], 2))
 
 
 class FakeRobinhood:
-    """The API key's account is the owner's main one, so the loop must not
-    read its balance or holdings: those two methods count their calls."""
+    """The API key's account: the owner's main one, which the split trades."""
 
     def __init__(self, mark=LAST_CLOSE):
         self.fail_pairs = False
@@ -91,7 +91,7 @@ def test_a_breakout_is_proposed_and_logged_as_the_splits(config):
     assert (record["strategy"], record["sleeve"], record["rule"]) == (
         "split", "short-term", "entry"
     )
-    assert record["mode"] == "shadow" and record["source"] == "rhca run"
+    assert record["mode"] == "live" and record["source"] == "rhca run"
     assert record["trigger_reason"].startswith("breakout entry: closed")
     heartbeat = json.loads(config.heartbeat_path.read_text())
     assert heartbeat["counts"]["proposed"] == 1
@@ -171,7 +171,19 @@ def test_the_first_proposal_per_coin_pushes_once_even_across_a_restart(config, m
     assert "first BTC-USD proposal" in title
     assert "BTC-USD -- short-term entry buy" in message
     assert "breakout entry" in message  # the one-liner on what fired
-    assert "approve by id" in message
+    assert "on the dashboard to place it" in message
+
+
+def test_system_1_proposals_do_not_silence_the_splits_first_push(config, monkeypatch):
+    """Every watchlist coin has System 1 proposals in the real log; they are
+    not the split's, so its first proposal of a coin still pushes."""
+    AuditLog(config.audit_path).append(
+        KIND_PROPOSAL, {"proposal_id": "251ab3500b11", "symbol": "BTC-USD", "mode": "shadow"}
+    )
+    sent = []
+    monkeypatch.setattr(runner_mod.push_mod, "notify", lambda *a: sent.append(a) or True)
+    make_runner(config, push_webhook=PUSH_WEBHOOK).cycle(force=True)
+    assert len(sent) == 1
 
 
 def test_no_push_without_a_webhook(config, monkeypatch):
@@ -263,29 +275,27 @@ def test_a_failed_near_push_is_retried_at_the_next_close(config, monkeypatch):
     assert len(attempts) == 2
 
 
-def agentic_snapshot(config):
-    """What `rhca ingest positions` and `rhca ingest portfolio` cache."""
+def test_the_loop_reads_the_traded_accounts_cash_and_holdings_from_the_key(config):
+    """The split trades the key's account: its cash, and every coin valued at
+    the mark, replace whatever an old `rhca ingest` cached."""
     cache = StateCache(config.data_dir / "market_state.json")
-    cache.put_positions([Position("BTC-USD", Decimal("0.002"))])
-    cache.put_portfolio_value(Decimal("500"))
-    cache.put_crypto_buying_power(Decimal("340"))
-    return cache
-
-
-def test_the_loop_leaves_the_ingested_agentic_snapshot_alone(config):
-    """The key reads the owner's main account; orders go to the Agentic one."""
-    cache = agentic_snapshot(config)
+    cache.put_positions([Position("ETH-USD", Decimal("1"))])  # a stale Agentic snapshot
     robinhood = FakeRobinhood()
-    runner = make_runner(config, robinhood=robinhood)
-    runner.cycle(force=True)
-    runner.cycle(force=True)
+    robinhood.holdings = lambda: [Position("BTC-USD", Decimal("0.01"))]
+    make_runner(config, robinhood=robinhood).cycle(force=True)
 
-    assert robinhood.account_reads == 0
+    assert robinhood.account_reads == 1
     assert list(cache.positions()) == ["BTC-USD"]
-    assert cache.portfolio_value() == Decimal("500")
-    assert cache.crypto_buying_power() == Decimal("340")
-    assert cache.account() is None
-    assert "BTC-USD" in cache.pairs()  # market data still comes from the key
+    assert cache.crypto_buying_power() == Decimal("5000")
+    assert cache.portfolio_value() == Decimal("5000") + Decimal("0.01") * robinhood.mark
+    assert "BTC-USD" in cache.pairs()
+
+
+def test_a_coin_with_no_quote_counts_at_zero_so_the_coin_limit_only_tightens(config):
+    cache = StateCache(config.data_dir / "market_state.json")
+    make_runner(config).cycle(force=True)  # holds XRP; the fake quotes only BTC
+    assert list(cache.positions()) == ["XRP-USD"]
+    assert cache.portfolio_value() == Decimal("5000")
 
 
 def test_the_heartbeat_names_the_keys_account_masked(config):

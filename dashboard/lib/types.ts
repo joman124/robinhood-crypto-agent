@@ -77,6 +77,8 @@ export interface Proposal {
   proposed_at: string | null;
   /** False when the risk engine blocked it — such a proposal has no Accept. */
   actionable: boolean;
+  /** Why the order desk would refuse a passing proposal (superseded, too old). */
+  blocker?: string | null;
   /** Always null for a split or ladder proposal: both are measured on P&L, not hit rate. */
   outcome: Outcome | null;
   /** "split" for the live rule's proposals, "ladder" for the retired trend

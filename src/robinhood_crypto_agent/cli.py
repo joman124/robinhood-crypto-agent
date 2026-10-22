@@ -16,12 +16,13 @@ Every command that accepts MCP output takes it as JSON on a path or on stdin,
 so nothing has to be retyped or paraphrased -- paraphrasing a tool response is
 how a fabricated fill ends up in an audit log.
 
-**``rhca run``, in shadow mode.** The real-time loop reads quotes and trading
-pairs from Robinhood's Crypto API with a read-only client and runs the split
-on each closed UTC day (see ``runner``). Balance and holdings are the
-Agentic account's, as ``rhca ingest`` last cached them. It proposes; it cannot
-order. Its proposals go through the same ``rhca approve`` gate. It also keeps
-the forward test's paper account (``shadow``), which ``rhca shadow`` reports.
+**``rhca run``.** The real-time loop reads quotes, pairs, buying power and
+holdings from Robinhood's Crypto API -- the key's account, the owner's main
+crypto account -- and runs the split on each closed UTC day (see ``runner``).
+It places an order only when the owner accepts that proposal by id on the
+dashboard, through the same approval gate (``execution/desk.py``). It also
+keeps the forward test's paper account (``shadow``), which ``rhca shadow``
+reports.
 """
 
 from __future__ import annotations
@@ -72,7 +73,6 @@ from .robinhood import PRIVATE_KEY_ENV as ROBINHOOD_PRIVATE_KEY_ENV
 from .robinhood import RobinhoodClient, generate_key_pair
 from .serde import proposal_from_dict
 from .store import PriceStore, StateCache
-from .store.state import SECTION_CRYPTO_BUYING_POWER
 from .strategy.breakout import Breakout
 from .strategy.hodl import MODES as LONG_MODES
 from .strategy.hodl import Accumulate
@@ -283,7 +283,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             verdict = f"DOES NOT MATCH the pinned {mask(expected)}"
         print(
             f"  robinhood    : API key reads crypto account {key_account} ({verdict}), "
-            "for quotes and pairs only"
+            "the account the split trades"
         )
     print()
 
@@ -1092,22 +1092,6 @@ def cmd_keygen(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def describe_ingested_balance(state: StateCache) -> str:
-    """The Agentic account's balance and holdings, as ``rhca ingest`` last cached them."""
-    buying_power = state.crypto_buying_power()
-    if buying_power is None:
-        return (
-            "balance NEVER INGESTED -- pipe its get_portfolio and get_crypto_positions "
-            "into `rhca ingest` (docs/runbook.md, 'Balance and holdings')"
-        )
-    age = next(a for a in state.ages() if a.name == SECTION_CRYPTO_BUYING_POWER)
-    return (
-        f"crypto buying power ${round_money(buying_power)}, "
-        f"{len(state.positions())} position(s), balance ingested "
-        f"{(age.age_seconds or 0.0) / 60:.0f} minutes ago"
-    )
-
-
 BREAKOUT = "breakout"
 SPLIT = "split"
 #: What --strategies accepts: the per-coin strategies, and the breakout and the
@@ -1504,7 +1488,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     account = robinhood.account()
     expected_account = os.environ.get(CRYPTO_ACCOUNT_ENV, "").strip()
     check_account(account, expected_account)
-    state = StateCache(config.data_dir / "market_state.json")
 
     dashboard_url = os.environ.get("RHCA_DASHBOARD_URL")
     dashboard_token = os.environ.get("RHCA_DASHBOARD_TOKEN")
@@ -1525,15 +1508,24 @@ def cmd_run(args: argparse.Namespace) -> int:
         format="%(asctime)s %(levelname)-7s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    print("rhca run -- SHADOW MODE: proposes and records, never places an order")
+    print(
+        "rhca run -- proposes and records; places an order only when you accept "
+        "that proposal by id on the dashboard"
+    )
     if loaded:
         print(f"  loaded from .env : {', '.join(loaded)}")
     pin = "pinned" if expected_account else f"NOT pinned -- set {CRYPTO_ACCOUNT_ENV}"
     print(
         f"  robinhood API key: crypto {mask(account.account_number)} ({pin}), "
-        "for quotes and pairs only"
+        "the account the split trades"
     )
-    print(f"  agentic account  : {describe_ingested_balance(state)}")
+    buying_power = account.buying_power
+    print(
+        "  buying power     : "
+        + (f"${round_money(buying_power)}" if buying_power is not None else "unknown")
+    )
+    if services.dashboard is None:
+        print("  orders           : none -- no dashboard configured, so nothing can be accepted")
     print(f"  watchlist        : {', '.join(config.watchlist)}")
     settings = config.strategy
     _, plan = split_rules(config)
@@ -1806,7 +1798,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync = sub.add_parser("dashboard-sync", help="push proposals and pull accept/decline decisions")
     sync.add_argument("--url", default=None, help="dashboard base URL (or RHCA_DASHBOARD_URL)")
     sync.add_argument("--token", default=None, help="bearer token (or RHCA_DASHBOARD_TOKEN)")
-    sync.add_argument("--limit", type=int, default=None)
+    sync.add_argument("--limit", type=int, default=dashboard_mod.MAX_PAYLOAD_PROPOSALS)
     sync.add_argument("--horizon", type=int, default=None)
     sync.add_argument("--hurdle", default=None)
     sync.add_argument("--repo-url", default=None, dest="repo_url")

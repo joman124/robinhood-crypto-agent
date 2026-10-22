@@ -35,20 +35,22 @@ it.
 2. On a computer, sign in to Robinhood's web classic site and open
    <https://robinhood.com/account/crypto>.
 3. Select **Add key**, and paste the public key from step 1.
-4. Under API actions, enable only the **read-only** ones: accounts, holdings,
-   products, quotes, and orders if listed as read. Leave both "place crypto
-   orders" options **off**. The shadow run never needs them, and a key without
-   them cannot trade even if it leaks.
+4. Under API actions, enable the read ones (accounts, holdings, products,
+   quotes, orders) **and placing crypto orders** -- the v1 option, without fee
+   tiers, if the two are listed separately: `rhca` calls the v1 endpoints.
+   Since 2026-10-20 a dashboard Accept places the order through this key
+   ([Placing orders](#placing-orders)). A key without order permission still
+   runs the loop; every accepted order is then refused (HTTP 403), recorded as
+   failed, and pushed. Leave cancel off: nothing here cancels.
 5. Save. Copy the API key Robinhood shows into `.env` as
    `ROBINHOOD_API_KEY=...`.
 
 **Which account.** A Robinhood Crypto API key only ever reads your **main**
 crypto account. The key page has no account picker, and Robinhood's docs
-describe access to the **Agentic** account, the one orders go to, only through
-its MCP server. The loop doesn't need more. It uses the key only for market
-data: quotes and trading pairs, which are the same whichever account reads
-them. The Agentic account's balance and holdings come through Claude Code
-instead ([step 2](#2-balance-and-holdings)).
+describe access to the **Agentic** account only through its MCP server. Since
+2026-10-20 the split trades the main account: the loop reads its buying power
+and holdings from the key every 10 minutes, and places accepted orders on it.
+The Agentic account is no longer part of the split.
 
 Pin your main crypto account in `.env`, with its full number or its last 4
 digits:
@@ -74,6 +76,11 @@ never the values. Keep `.env` to yourself: nothing ever needs it pasted
 anywhere.
 
 ### 2. Balance and holdings
+
+**Since 2026-10-20 this step is automatic:** `rhca run` reads the main
+account's buying power and holdings from the key every 10 minutes and
+overwrites anything ingested. What follows is how it worked for the Agentic
+account, kept for the record.
 
 The loop never reads a balance. Buying power, holdings and portfolio value are
 the Agentic account's, as you last ingested them. They drive the
@@ -240,6 +247,30 @@ Then, in Claude Code with the `RobinHood` MCP server connected:
    `rhca approve` on anything — it must refuse. `rhca kill-switch off`.
 3. **Check the contract guard.** Feed `rhca validate-order` a payload with the
    *alphanumeric* `account_number` and confirm it is rejected.
+
+## Placing orders
+
+Since 2026-10-20 a split order is placed one way: you accept the proposal on
+the dashboard by typing its id. Within a minute `rhca run`'s order desk
+(`execution/desk.py`):
+
+1. ignores an accept older than 15 minutes, or one you have since undone;
+2. checks the proposal is the split's, passed every risk rule, and was never
+   sent;
+3. runs `ApprovalGate` on a fresh quote: kill switch, no risk override, price
+   drift, remaining size; and, for a buy, the daily notional cap again;
+4. records `submitting`, then sends one limit order (gtc) through the key,
+   with a `client_order_id` derived from the proposal id -- so a retry or a
+   crash can never make a second order;
+5. reads the order back every minute and records each fill and its end.
+
+Each step that sends, refuses, fills or ends an order is pushed to
+`STREAK_PUSH_WEBHOOK` and logged. A send with no answer is looked up by its id
+for 10 minutes, then recorded failed. Undo on the dashboard does not cancel a
+sent order: cancel it in the Robinhood app, and the desk records it.
+
+The rest of this section is the MCP flow. Its order tools reach the Agentic
+account, which the split no longer trades: do not use them for split orders.
 
 ## Daily loop
 

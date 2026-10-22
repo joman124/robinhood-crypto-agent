@@ -15,7 +15,7 @@ export function Pipeline({ beat }: { beat: Heartbeat | null | undefined }) {
   if (beat === null) {
     return (
       <section className="panel">
-        <h2>Shadow loop</h2>
+        <h2>Live loop</h2>
         <p className="muted">—</p>
       </section>
     );
@@ -24,7 +24,7 @@ export function Pipeline({ beat }: { beat: Heartbeat | null | undefined }) {
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>Shadow loop</h2>
+        <h2>Live loop</h2>
         <span className="muted small">
           {beat.cycles ?? 0} cycles · <RelTime iso={beat.last_cycle_at} />
         </span>

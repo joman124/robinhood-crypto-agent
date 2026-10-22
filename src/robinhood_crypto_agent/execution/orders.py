@@ -11,6 +11,9 @@ priced at -- the ask for a buy, the bid for a sell -- which is what the
 backtest fills at. A ``market_orders_only`` pair gets a market order,
 since a limit would be refused.
 
+:func:`api_order_body` builds the same order for Robinhood's Crypto API, which
+the order desk sends once the owner accepts a proposal on the dashboard.
+
 Plans with several tranches (``STAGED``) are System 1's, and exist only in its
 records in the audit log. The payload builders here still handle any tranche
 of any plan, so an old proposal reads the same as ever.
@@ -147,6 +150,57 @@ def build_order_request(
         proposal_id=proposal.proposal_id,
         tranche_index=tranche_index,
     )
+
+
+#: Fixed forever: changing it would give an already-sent order a new id.
+ORDER_NAMESPACE = uuid.UUID("5f0c5d2e-8a43-4f53-9a43-6c1c7e2a9b10")
+
+
+def client_order_id(proposal_id: str, tranche_index: int = 0) -> str:
+    """The Robinhood API idempotency key for one tranche of one proposal.
+
+    Derived, not random, so a crash between sending and recording -- or a
+    retry -- can only ever refer to the one order, never create a second.
+    """
+    return str(uuid.uuid5(ORDER_NAMESPACE, f"{proposal_id}:{tranche_index}"))
+
+
+def api_order_body(
+    proposal: Proposal,
+    *,
+    tranche_index: int = 0,
+    constraints: PairConstraints | None = None,
+) -> dict[str, object]:
+    """The Robinhood Crypto API body for one tranche: the same order the MCP
+    payload describes -- quantity, limit at the snapped target price, gtc."""
+    tranche = next((t for t in proposal.plan.tranches if t.index == tranche_index), None)
+    if tranche is None:
+        raise ContractViolation(f"proposal {proposal.proposal_id} has no tranche {tranche_index}")
+    if tranche.quantity <= ZERO:
+        raise ContractViolation(f"proposal {proposal.proposal_id} has no quantity to order")
+
+    body: dict[str, object] = {
+        "client_order_id": client_order_id(proposal.proposal_id, tranche_index),
+        "side": proposal.side.value,
+        "type": tranche.order_type.value,
+        "symbol": proposal.symbol,
+    }
+    quantity = format_decimal(tranche.quantity)
+    if tranche.order_type is OrderType.LIMIT:
+        price = snap_price(tranche.target_price, proposal.side, constraints)
+        if price <= ZERO:
+            raise ContractViolation(f"proposal {proposal.proposal_id} has no limit price")
+        body["limit_order_config"] = {
+            "asset_quantity": quantity,
+            "limit_price": format_decimal(price),
+            "time_in_force": TimeInForce.GTC.value,
+        }
+    elif tranche.order_type is OrderType.MARKET:
+        body["market_order_config"] = {"asset_quantity": quantity}
+    else:
+        # The split only ever makes limit orders (market on a market-only pair).
+        raise ContractViolation(f"{tranche.order_type.value} orders are not sent through the API")
+    return body
 
 
 def build_plan_requests(

@@ -88,7 +88,7 @@ export function eventsOf(payload: Payload | null, decisions: Decision[]): AuditE
     }
     const beat = payload.pipeline;
     if (beat?.started_at) {
-      out.push({ key: "l", at: beat.started_at, type: "control", actor: "system", event: "Shadow loop started", ref: beat.mode ?? "shadow", result: `${beat.cycles ?? 0} cycles since`, tone: "violet", data: { mode: beat.mode, started_at: beat.started_at, cycles: beat.cycles, services: beat.services } });
+      out.push({ key: "l", at: beat.started_at, type: "control", actor: "system", event: "Loop started", ref: beat.mode ?? "live", result: `${beat.cycles ?? 0} cycles since`, tone: "violet", data: { mode: beat.mode, started_at: beat.started_at, cycles: beat.cycles, services: beat.services } });
     }
     if (beat?.last_error?.at) {
       out.push({ key: "e", at: beat.last_error.at, type: "control", actor: "system", event: `Loop error in ${beat.last_error.task ?? "a task"}`, ref: "rhca status", result: "Text kept on agent", tone: "amber", data: beat.last_error });
