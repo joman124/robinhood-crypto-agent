@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import backtest as backtest_mod
+from . import candidate_backtest as candidates_bt
 from . import dashboard as dashboard_mod
 from . import files as files_mod
 from . import portfolio_backtest as portfolio_mod
@@ -73,6 +74,7 @@ from .robinhood import PRIVATE_KEY_ENV as ROBINHOOD_PRIVATE_KEY_ENV
 from .robinhood import RobinhoodClient, generate_key_pair
 from .serde import proposal_from_dict
 from .store import PriceStore, StateCache
+from .strategy import candidates as candidates_mod
 from .strategy.breakout import Breakout
 from .strategy.hodl import MODES as LONG_MODES
 from .strategy.hodl import Accumulate
@@ -1103,14 +1105,20 @@ BACKTEST_CACHE_HOURS = 6
 
 
 def backtest_history(
-    config: AgentConfig, symbol: str, *, days: int, refresh: bool = False
+    config: AgentConfig,
+    symbol: str,
+    *,
+    days: int,
+    refresh: bool = False,
+    interval: int | None = None,
 ) -> list[Candle]:
-    """``days`` of Coinbase bars, cached under data/backtest/.
+    """``days`` of Coinbase bars, cached under data/backtest/. The bar size is
+    ``interval`` minutes, or config/strategy.yaml's when not given.
 
     Kept out of the price store on purpose: months of bars there would slow
     every read the live loop makes, and the loop needs only the recent ones.
     """
-    interval = config.strategy.bar_interval_minutes
+    interval = interval or config.strategy.bar_interval_minutes
     path = config.data_dir / "backtest" / f"{canonical(symbol)}-{interval}m.json"
     cached = files_mod.read_json(path)
     if cached is not None and not refresh:
@@ -1420,6 +1428,71 @@ def split_settings(
     return plan, long_pct, long_symbols, coin_cap
 
 
+#: The candidates' finest bar; their 4-hour and daily bars are built from it.
+CANDIDATE_INTERVAL_MINUTES = 60
+
+
+def cmd_backtest_candidates(args: argparse.Namespace) -> int:
+    """docs/candidates.md's rules against their bar, at every round trip swept."""
+    config = load_config(args.config_dir, data_dir=args.data_dir)
+    symbols = (
+        [canonical(s) for s in args.symbols.split(",") if s.strip()]
+        if args.symbols
+        else list(config.watchlist)
+    )
+    keys = [k.strip() for k in args.candidates.split(",") if k.strip()] if args.candidates else None
+    trips = [
+        to_decimal(t, field="round-trips") for t in args.round_trips.split(",") if t.strip()
+    ]
+    maker = to_decimal(args.maker_pct, field="maker-pct") if args.maker_pct is not None else None
+    try:
+        chosen = candidates_mod.select(keys)
+        costs = candidates_bt.sweep(trips, maker_pct=maker, maker_bars=args.maker_bars)
+    except ValueError as exc:
+        raise AgentError(str(exc)) from exc
+    if not costs:
+        raise AgentError("--round-trips must name at least one round trip")
+    if args.days <= 0:
+        raise AgentError("--days must be positive")
+    if args.roll_window < 0 or args.roll_step <= 0:
+        raise AgentError("--roll-window must be 0 (off) or days, and --roll-step positive")
+    capital = to_decimal(args.capital, field="capital")
+    if capital <= 0:
+        raise AgentError("--capital must be positive")
+
+    wanted = sorted({*symbols, *(s for c in chosen for s in c.symbols or ())})
+    warmup_days = max(c.warmup_days for c in chosen)
+    series: dict[str, list[Candle]] = {}
+    for symbol in wanted:
+        try:
+            series[symbol] = backtest_history(
+                config, symbol, days=args.days + warmup_days, refresh=args.refresh,
+                interval=CANDIDATE_INTERVAL_MINUTES,
+            )
+        except AgentError as exc:
+            print(f"  ! {symbol}: {exc}", file=sys.stderr)
+    series = {symbol: bars for symbol, bars in series.items() if bars}
+    if not series:
+        raise AgentError("no history to backtest: every symbol failed to load")
+
+    suite = candidates_bt.Suite(
+        series,
+        symbols=symbols,
+        capital=capital,
+        start=max(bars[-1].end for bars in series.values()) - timedelta(days=args.days),
+        min_trade=config.risk.min_notional_per_trade_usd,
+        window=timedelta(days=args.roll_window) if args.roll_window else None,
+        step=timedelta(days=args.roll_step),
+        progress=lambda message: print(message, file=sys.stderr, flush=True),
+    )
+    report = suite.run(chosen, costs)
+    if args.json:
+        print(json.dumps(candidates_bt.summary(report), indent=2))
+    else:
+        print(candidates_bt.render(report, verbose=args.verbose))
+    return EXIT_OK
+
+
 def cmd_shadow(args: argparse.Namespace) -> int:
     """The forward test's paper account, replayed from Coinbase's daily closes."""
     config = load_config(args.config_dir, data_dir=args.data_dir)
@@ -1698,6 +1771,54 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backtest.add_argument("--json", action="store_true", help="numbers as JSON")
     backtest.set_defaults(func=cmd_backtest)
+
+    candidates = sub.add_parser(
+        "backtest-candidates",
+        help="run docs/candidates.md's faster rules against their bar, at several round trips",
+    )
+    candidates.add_argument(
+        "--symbols", default=None,
+        help="comma-separated; default the watchlist (candidate 2 trades its own nine)",
+    )
+    candidates.add_argument(
+        "--days", type=int, default=1460, help="history tested, in days (default 1460, the bar's)"
+    )
+    candidates.add_argument(
+        "--candidates", default=None,
+        help=f"any of {', '.join(candidates_mod.CANDIDATE_KEYS)} (default all)",
+    )
+    candidates.add_argument(
+        "--round-trips",
+        default=",".join(str(t) for t in candidates_bt.DEFAULT_ROUND_TRIPS),
+        help="round trips to sweep, percent (default 1.9,1.0,0.5,0.2)",
+    )
+    candidates.add_argument(
+        "--maker-pct", default=None,
+        help="enter with resting limits that pay this percent instead of half the round trip "
+        "(default: enter as a taker)",
+    )
+    candidates.add_argument(
+        "--maker-bars", type=int, default=candidates_bt.DEFAULT_MAKER_BARS,
+        help="bars a resting entry waits for a fill before it is canceled (default 3)",
+    )
+    candidates.add_argument(
+        "--roll-window", type=int, default=90,
+        help="the consistency check's windows, in days (default 90; 0 = off, which leaves "
+        "every verdict incomplete)",
+    )
+    candidates.add_argument(
+        "--roll-step", type=int, default=30, help="days between rolling windows' starts (default 30)"
+    )
+    candidates.add_argument(
+        "--capital", default=str(portfolio_mod.DEFAULT_CAPITAL),
+        help="each candidate's starting account, dollars (default 500)",
+    )
+    candidates.add_argument("--refresh", action="store_true", help="refetch instead of the cache")
+    candidates.add_argument("--json", action="store_true", help="numbers as JSON")
+    candidates.add_argument(
+        "--verbose", "-v", action="store_true", help="every check's numbers, not just the verdicts"
+    )
+    candidates.set_defaults(func=cmd_backtest_candidates)
 
     keygen = sub.add_parser(
         "keygen", help="make the Robinhood API key pair; the private half goes into .env"

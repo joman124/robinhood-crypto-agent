@@ -56,6 +56,15 @@ windows -- until its trend exit was tested on real bars and failed its bar.
 4. **Any holding left from the retired ladder** is in neither sleeve and is
    never sold by the split; sell it by hand if you want it gone. It still
    counts toward the 20% per-coin limit.
+5. **Price Robinhood's v2 fee tiers, then run the candidates.** A faster rule
+   (4-hour or intraday) only pays at a round trip well under today's ~1.9%.
+   [`candidates.md`](./candidates.md) fixes nine candidates and their bar
+   (2026-10-23, before any run); `rhca backtest-candidates --days 1460` scores
+   them at 1.9%, 1.0%, 0.5% and 0.2%, which says what cost each needs. What a
+   $500 account would actually pay through v2 -- maker and taker, at the
+   lowest tier -- has not been measured; that number picks the column to
+   read. A candidate that clears its bar is still only a candidate: trading
+   anything faster than a daily close needs Phase 2 first.
 
 ## Done: dashboard UX (2026-09-23)
 
