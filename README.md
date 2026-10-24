@@ -145,6 +145,10 @@ rhca backtest --symbols BTC-USD,ETH-USD,SOL-USD,XRP-USD --days 730 --strategies 
 # ... and the split the agent trades: half held long-term, half in the breakout
 rhca backtest --days 1460 --roll-window 90 --strategies split
 
+# Faster candidate rules (4h, intraday) against their bar, at round trips from
+# today's 1.9% down to 0.2%: the cost at which each would pay (docs/candidates.md)
+rhca backtest-candidates --days 1460
+
 # The forward test: the split on paper since 2026-09-28, against its bar
 rhca shadow
 
@@ -178,6 +182,7 @@ src/robinhood_crypto_agent/
 ├── bootstrap.py        # Coinbase candles for a fresh checkout
 ├── backtest.py         # rhca backtest: the retired ladder vs its baselines
 ├── portfolio_backtest.py # the breakout and the split, as one account across coins
+├── candidate_backtest.py # rhca backtest-candidates: faster rules, any bar size, a cost sweep
 ├── shadow.py           # the forward test: the split on paper, one daily close at a time
 ├── net.py              # the one HTTP helper
 ├── agent.py            # the analysis pipeline: daily closes + ledger -> split -> proposals
@@ -197,7 +202,8 @@ src/robinhood_crypto_agent/
 ├── dashboard.py        # the payload the dashboard renders
 ├── mcp/                # the RobinHood tool contract and response parsers
 ├── store/              # price history and cached account state
-├── strategy/           # the split (live): breakout + hodl; the retired ladder
+├── strategy/           # the split (live): breakout + hodl; the retired ladder;
+│                       #   candidates.py, faster rules for the backtest only
 └── execution/          # order payloads, approval gate, kill switch
 
 dashboard/              # Next.js app, deployable to Vercel
