@@ -179,6 +179,23 @@ class TestRefusals:
         message = self.refused(config, broker, audit, accept(proposed["proposal_id"]))
         assert "passed every risk rule" in message
 
+    def test_a_risk_blocked_proposal_logged_as_proposed_even_with_the_override_phrase(
+        self, config, proposed, broker, audit
+    ):
+        """The gate's own no-override stands even if the status and the note's
+        redaction both failed: a dashboard accept never overrides a risk block."""
+        failed = {"findings": [{"rule": "max_position", "passed": False, "blocking": True}]}
+        relog(audit, proposed, proposal={**proposed["proposal"], "risk": failed})
+        pid = proposed["proposal_id"]
+        note = Decision(pid, DecisionKind.ACCEPT, utcnow(), note="OVERRIDE RISK CHECK")
+        message = self.refused(config, broker, audit, note)
+        assert "can never override a risk block" in message
+
+    def test_an_accept_naming_only_a_prefix_of_the_id(self, config, proposed, broker, audit):
+        """One accept names one whole id; a prefix is not a name for it."""
+        message = self.refused(config, broker, audit, accept(proposed["proposal_id"][:8]))
+        assert "no such proposal" in message
+
     def test_an_older_proposal_for_the_same_trade(self, config, proposed, broker, audit):
         """The next hour re-logs the trade under a new id; accepting the old
         one after it must never become a second order for the same trade."""

@@ -49,7 +49,7 @@ Proposals splits into two screens: the queue, and the review a tap opens.
 
 The pages re-fetch every minute while the tab is visible. Every animation
 settles to its final state under `prefers-reduced-motion`. `npm run check`
-runs the fate, segment and P&L self-checks.
+runs the fate, segment, P&L and session self-checks.
 
 ## What it does and does not do
 
@@ -187,3 +187,7 @@ rhca dashboard-sync --url http://localhost:3000 --token dev-token
 Decisions are **written** only by a server action behind the session cookie —
 there is no HTTP route that accepts a decision, so there is nowhere to POST a
 forged one.
+The session cookie carries the time it was issued, signed with
+`DASHBOARD_PASSWORD`, and the server refuses it after 12 hours. Signing out
+clears one browser; rotate `DASHBOARD_PASSWORD` to end every session. An accept
+is refused server-side unless the proposal id was typed back.

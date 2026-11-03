@@ -47,7 +47,7 @@ export function Airlock({ proposal, decision, canDecide, blocker, syncedAt, chec
       }
     });
   };
-  const choose = (kind: DecisionKind) => run(() => decide(id, kind, note));
+  const choose = (kind: DecisionKind) => run(() => decide(id, kind, note, typed));
 
   return (
     <section className="card">

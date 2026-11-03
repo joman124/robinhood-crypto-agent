@@ -11,7 +11,7 @@ import { revalidatePath } from "next/cache";
 import { cookies } from "next/headers";
 
 import { clearDecision, getPayload, recordDecision } from "@/lib/store";
-import { COOKIE_NAME, canDecide, checkPassword, passwordConfigured } from "@/lib/session";
+import { COOKIE_NAME, SESSION_MS, canDecide, checkPassword, passwordConfigured } from "@/lib/session";
 import type { DecisionKind } from "@/lib/types";
 
 /** Proposal ids are hex digests; anything else never reaches the store. */
@@ -40,6 +40,7 @@ export async function decide(
   proposalId: string,
   kind: DecisionKind,
   note?: string,
+  typedId?: string,
 ): Promise<ActionResult> {
   if (!(await canDecide())) {
     return {
@@ -55,6 +56,12 @@ export async function decide(
   }
   if (kind !== "accept" && kind !== "decline") {
     return { ok: false, error: "a decision must be accept or decline" };
+  }
+  // An accept names its proposal the way the terminal does: the owner types
+  // the id. Checked here too, so a UI change can never turn Accept into a
+  // one-click order.
+  if (kind === "accept" && (typedId ?? "").trim() !== proposalId) {
+    return { ok: false, error: "type the proposal id to accept it" };
   }
 
   // A risk-blocked proposal cannot be accepted from here. The agent's gate
@@ -118,7 +125,7 @@ export async function signIn(formData: FormData): Promise<ActionResult> {
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",
-    maxAge: 60 * 60 * 12,
+    maxAge: SESSION_MS / 1000,
   });
   revalidatePath("/", "layout");
   return { ok: true };
