@@ -33,7 +33,7 @@ from enum import Enum
 from typing import Any
 
 from .errors import AgentError
-from .models import parse_timestamp, utcnow
+from .models import parse_timestamp
 
 #: Decision text is echoed into the approval gate, so it is length-bounded and
 #: stripped of control characters before it is ever stored or replayed.
@@ -123,11 +123,16 @@ def decision_from_dict(data: dict[str, Any]) -> Decision:
             f"decision must be 'accept' or 'decline', got {raw_kind!r}"
         ) from None
 
+    # No default: a decision stamped "now" on every read would never go stale
+    # and never match the desk's (id, decided_at) handled key, so one accept
+    # would be retried every cycle until it went through.
     raw_time = data.get("decided_at")
     try:
-        decided_at = parse_timestamp(str(raw_time)) if raw_time else utcnow()
+        decided_at = parse_timestamp(str(raw_time)) if raw_time else None
     except ValueError:
-        decided_at = utcnow()
+        decided_at = None
+    if decided_at is None:
+        raise AgentError(f"decision on {proposal_id} has no readable decided_at")
 
     return Decision(
         proposal_id=proposal_id,

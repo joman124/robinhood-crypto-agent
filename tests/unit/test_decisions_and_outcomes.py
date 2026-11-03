@@ -43,7 +43,8 @@ class TestDecisionSafety:
 
     def test_override_phrase_is_redacted_from_notes(self):
         decision = decision_from_dict(
-            {"proposal_id": "abc123def456", "decision": "accept", "note": f"{OVERRIDE_PHRASE} now"}
+            {"proposal_id": "abc123def456", "decision": "accept",
+             "decided_at": "2026-10-22T12:00:00+00:00", "note": f"{OVERRIDE_PHRASE} now"}
         )
         assert OVERRIDE_PHRASE not in decision.note
         assert OVERRIDE_PHRASE not in decision.approval_text
@@ -118,7 +119,12 @@ class TestDecisionSafety:
 class TestDecisionParsing:
     def test_valid_decision_round_trips(self):
         decision = decision_from_dict(
-            {"proposal_id": "abc123def456", "decision": "decline", "note": "too wide a spread"}
+            {
+                "proposal_id": "abc123def456",
+                "decision": "decline",
+                "decided_at": "2026-10-22T12:00:00+00:00",
+                "note": "too wide a spread",
+            }
         )
         assert decision.kind is DecisionKind.DECLINE
         assert decision.to_dict()["proposal_id"] == "abc123def456"
@@ -136,6 +142,14 @@ class TestDecisionParsing:
     def test_malformed_decisions_are_rejected(self, payload):
         with pytest.raises(AgentError):
             decision_from_dict(payload)
+
+    @pytest.mark.parametrize("decided_at", [None, "", "yesterday-ish"])
+    def test_a_decision_without_a_readable_time_is_rejected(self, decided_at):
+        """Defaulting it to now would make an accept fresh again every cycle:
+        never stale, never 'handled', retried each minute until it fills."""
+        row = {"proposal_id": "abc123def456", "decision": "accept", "decided_at": decided_at}
+        with pytest.raises(AgentError, match="decided_at"):
+            decision_from_dict(row)
 
     def test_proposal_id_must_be_hex(self):
         """Stops arbitrary text reaching the gate's id matcher."""
