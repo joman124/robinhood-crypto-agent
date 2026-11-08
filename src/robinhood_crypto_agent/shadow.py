@@ -192,15 +192,14 @@ class Replay:
         return [f for f in self.fills if f.day == day]
 
 
-def replay(
-    daily: Mapping[str, Sequence[Candle]], config: AgentConfig, *, through: datetime
-) -> Replay:
-    """The split, and hold for comparison, from the start through ``through``."""
+def run_paper(
+    prepared: Mapping[str, Prepared], config: AgentConfig, *, through: datetime
+) -> SplitResult:
+    """The paper split from the start through ``through``: what ``replay`` runs,
+    and what the Time Machine runs on its replayed closes."""
     shadow = _shadow(config)
     rule, plan = rules(config)
-    prepared = {s: Prepared(list(bars), day_views(bars, rule)) for s, bars in daily.items() if bars}
-    window = dict(start=shadow.start, end=through + DAY)
-    split = run_split(
+    return run_split(
         prepared,
         rule,
         plan,
@@ -210,10 +209,22 @@ def replay(
         min_trade=config.risk.min_notional_per_trade_usd,
         long_symbols=shadow.long_symbols,
         coin_cap_pct=coin_cap_pct(config),
-        **window,
+        start=shadow.start,
+        end=through + DAY,
     )
+
+
+def replay(
+    daily: Mapping[str, Sequence[Candle]], config: AgentConfig, *, through: datetime
+) -> Replay:
+    """The split, and hold for comparison, from the start through ``through``."""
+    shadow = _shadow(config)
+    rule, _ = rules(config)
+    prepared = {s: Prepared(list(bars), day_views(bars, rule)) for s, bars in daily.items() if bars}
+    split = run_paper(prepared, config, through=through)
     hold = run_equal_hold(
-        prepared, capital=shadow.capital, round_trip_pct=DEFAULT_ROUND_TRIP_PCT, **window
+        prepared, capital=shadow.capital, round_trip_pct=DEFAULT_ROUND_TRIP_PCT,
+        start=shadow.start, end=through + DAY,
     )
     closes = {s: {bar.start: bar.close for bar in p.daily} for s, p in prepared.items()}
     return Replay(through, split, hold, prepared, rule, paper_fills(split, closes))

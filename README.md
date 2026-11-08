@@ -156,6 +156,12 @@ rhca shadow
 # paper P&L, max drawdown, an ASCII equity curve, and proposals/pass-rate by coin
 rhca report
 
+# The Time Machine: a breakout entry's odds, replayed on the coin's own past
+# days beside the rule's real record on it; or the forward test's odds of its
+# 3 priced fills (docs/timemachine.md). Never proposes.
+rhca timemachine --proposal <proposal-id>
+rhca timemachine --forward-test
+
 # Push proposals + outcomes to the dashboard, pull back your accept/decline
 rhca dashboard-sync --url https://your-project.vercel.app --token "$TOKEN"
 
@@ -184,6 +190,7 @@ src/robinhood_crypto_agent/
 ├── portfolio_backtest.py # the breakout and the split, as one account across coins
 ├── candidate_backtest.py # rhca backtest-candidates: faster rules, any bar size, a cost sweep
 ├── shadow.py           # the forward test: the split on paper, one daily close at a time
+├── timemachine.py      # rhca timemachine: a trade's odds, replayed on past days
 ├── net.py              # the one HTTP helper
 ├── agent.py            # the analysis pipeline: daily closes + ledger -> split -> proposals
 ├── ledger.py           # each sleeve's cash and holdings, from recorded fills

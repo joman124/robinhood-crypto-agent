@@ -74,11 +74,16 @@ tranche.
   market never crossed a line, so the test confirms nothing and disproves
   nothing about live behaviour, cost, or edge.
 
-- **One extension — to 180 closes (≈ 2026-03-26 close).** A single 90-day window
+- **One extension — to 180 closes (≈ 2027-03-26 close).** A single 90-day window
   can be a genuinely flat regime, so grant exactly one more window. If ≥ 3
   priced fills land in the meantime, score the bar. If 180 closes pass with
   still fewer than 3, **close the forward test with a documented no-trigger
   verdict** and stop treating it as a pending signal.
+
+`rhca timemachine --forward-test` gives the odds of reaching the 3 priced fills
+by each deadline, from replays of the coins' own past days
+([`timemachine.md`](./timemachine.md)). They are odds, not one of the bar's
+checks, and they move no deadline.
 
 **What a no-trigger verdict means operationally:** nothing changes. The split
 is already live under the 14 risk rules and the approve-by-id gate; the forward
@@ -93,4 +98,4 @@ fill restarts the clock on §2's sample count.
 |---|---|
 | What triggers a trade now | BTC breakout ≥ 86,507 / split < 72,359 · ETH ≥ 2,727 / < 2,145 · SOL ≥ 121.97 / < 87.36 · XRP ≥ 1.5271 / **< 1.2799 (−2.3%, the nearest)** |
 | Meaningful sample | ≥ 3 priced paper fills for the fidelity bar; ≥ 30 closed trades (~2 yr) to re-prove the edge — out of scope for this test |
-| No-trigger deadline | Inconclusive at 90 closes (2026-12-26) if < 3 fills; close with a no-trigger verdict at 180 closes (~2026-03-26) if still < 3 |
+| No-trigger deadline | Inconclusive at 90 closes (2026-12-26) if < 3 fills; close with a no-trigger verdict at 180 closes (~2027-03-26) if still < 3 |

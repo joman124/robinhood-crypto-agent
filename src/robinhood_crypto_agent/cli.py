@@ -47,11 +47,12 @@ from . import reports
 from . import runner as runner_mod
 from . import shadow as shadow_mod
 from . import summary as summary_mod
+from . import timemachine as timemachine_mod
 from .agent import Agent, MarketState, split_rules
 from .audit import AuditLog, day_from
 from .bootstrap import fetch_coinbase_history
 from .config import AgentConfig, load_config
-from .daily import latest_close
+from .daily import DailyBars, latest_close
 from .errors import AgentError
 from .execution.gate import ApprovalGate
 from .execution.kill_switch import REASON_DAILY_LOSS, REASON_MANUAL, KillSwitch
@@ -1517,6 +1518,51 @@ def cmd_report(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_timemachine(args: argparse.Namespace) -> int:
+    """A breakout entry's odds, or the forward test's, replayed on past days."""
+    config = load_config(args.config_dir, data_dir=args.data_dir)
+    audit = AuditLog(config.audit_path)
+    if args.forward_test and (args.symbol or args.proposal):
+        raise AgentError("--forward-test takes no coin or --proposal")
+    if args.symbol and args.proposal:
+        raise AgentError("name a coin or a --proposal, not both")
+    cache = DailyBars(config.data_dir / "daily")
+
+    def bars(symbol: str, days: int) -> list[Candle]:
+        return cache.get(symbol, days=days)
+
+    settings: dict[str, Any] = dict(
+        replays=args.replays, seed=args.seed, block_days=args.block_days,
+        sample_days=args.sample_days,
+    )
+    now = utcnow()
+    if args.forward_test:
+        if config.shadow is None:
+            raise AgentError("no forward test is configured: config/shadow.yaml is missing")
+        print("replaying the forward test...", file=sys.stderr, flush=True)
+        odds = timemachine_mod.forward_test(
+            config, audit, bars, now=now,
+            progress=lambda line: print(line, file=sys.stderr, flush=True), **settings,
+        )
+        if args.json:
+            print(json.dumps(timemachine_mod.forward_summary(odds), indent=2))
+        else:
+            print(timemachine_mod.render_forward(odds, config))
+        return EXIT_OK
+    trade = timemachine_mod.trade_odds(
+        config, audit, bars, now=now,
+        symbol=canonical(args.symbol) if args.symbol else None, proposal_id=args.proposal,
+        horizon=args.horizon,
+        round_trip_pct=to_decimal(args.round_trip, field="round-trip"),
+        **settings,
+    )
+    if args.json:
+        print(json.dumps(timemachine_mod.trade_summary(trade), indent=2))
+    else:
+        print(timemachine_mod.render_trade(trade))
+    return EXIT_OK
+
+
 def describe_forward_test(config: AgentConfig) -> str:
     """The ``rhca run`` banner's line for the forward test."""
     shadow = config.shadow
@@ -1694,6 +1740,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="the forward test at a glance, read from the log (no price fetch, no broker)",
     )
     report.set_defaults(func=cmd_report)
+
+    machine = sub.add_parser(
+        "timemachine",
+        help="a breakout entry's odds, or the forward test's, replayed on past days "
+        "(never proposes)",
+    )
+    machine.add_argument(
+        "symbol", nargs="?", default=None,
+        help="a coin: the breakout entering it at the last close",
+    )
+    machine.add_argument(
+        "--proposal", default=None, help="the breakout-entry proposal with this id instead"
+    )
+    machine.add_argument(
+        "--forward-test", action="store_true",
+        help="the odds the forward test reaches its 3 priced fills by its read and extension",
+    )
+    machine.add_argument(
+        "--replays", type=int, default=timemachine_mod.DEFAULT_REPLAYS,
+        help=f"how many futures to replay (default {timemachine_mod.DEFAULT_REPLAYS})",
+    )
+    machine.add_argument(
+        "--seed", type=int, default=timemachine_mod.DEFAULT_SEED,
+        help=f"the draws' seed; the same seed repeats a run (default {timemachine_mod.DEFAULT_SEED})",
+    )
+    machine.add_argument(
+        "--block-days", type=int, default=timemachine_mod.DEFAULT_BLOCK_DAYS,
+        help=f"mean run of consecutive past days in a replay (default "
+        f"{timemachine_mod.DEFAULT_BLOCK_DAYS})",
+    )
+    machine.add_argument(
+        "--sample-days", type=int, default=timemachine_mod.DEFAULT_SAMPLE_DAYS,
+        help=f"past days drawn from, and the history read (default "
+        f"{timemachine_mod.DEFAULT_SAMPLE_DAYS})",
+    )
+    machine.add_argument(
+        "--horizon", type=int, default=timemachine_mod.DEFAULT_HORIZON,
+        help=f"days a replayed trade runs before it is marked (default "
+        f"{timemachine_mod.DEFAULT_HORIZON})",
+    )
+    machine.add_argument(
+        "--round-trip", default=str(backtest_mod.DEFAULT_ROUND_TRIP_PCT),
+        help="round trip charged on a trade, percent (default 1.9)",
+    )
+    machine.add_argument("--json", action="store_true", help="numbers as JSON")
+    machine.set_defaults(func=cmd_timemachine)
 
     bootstrap = sub.add_parser(
         "bootstrap-history",
