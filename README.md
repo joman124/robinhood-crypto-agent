@@ -207,6 +207,7 @@ src/robinhood_crypto_agent/
 └── execution/          # order payloads, approval gate, kill switch
 
 dashboard/              # Next.js app, deployable to Vercel
+.claude/skills/rhca-*/  # Claude Code skills: the recurring rhca workflows, step by step
 ```
 
 ## Status

@@ -169,6 +169,9 @@ rhca analyze -v      # what the split wants now, with every risk verdict
 rhca status          # the order and the sleeves, as the audit log has them
 ```
 
+The skills in `.claude/skills/rhca-*/` walk these steps, so every session runs
+them the same way.
+
 `rhca run`'s proposals are in the audit log with a `status` (`proposed` or
 `rejected_by_risk`; System 1's old records also carry `declined_by_system2`
 and `not_escalated`). Only a `proposed` one can be accepted. Check `rhca status`
