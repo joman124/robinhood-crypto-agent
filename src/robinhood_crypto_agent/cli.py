@@ -1699,7 +1699,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="rhca",
         description=(
             "Robinhood crypto agent: analyzes, proposes, and gates execution. "
-            "Orders are placed only by Claude Code via MCP, after a human approves."
+            "A split order is placed only after the owner accepts its proposal by id "
+            "on the dashboard."
         ),
     )
     parser.add_argument("--config-dir", default="config", help="configuration directory")
@@ -1710,7 +1711,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser(
-        "run", help="the real-time loop in shadow mode: poll, run the split, propose, record"
+        "run",
+        help="the real-time loop: poll, run the split, propose, place accepted orders, record",
     )
     run.add_argument("--once", action="store_true", help="one cycle of every task, then exit")
     run.add_argument("--minutes", type=float, default=None, help="stop after this long")

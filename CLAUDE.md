@@ -163,14 +163,16 @@ any payload offline. The traps:
 
 ```
 rhca status          # loop alive, kill switch, today's usage, each sleeve
-rhca analyze -v      # what the split wants now, with every risk verdict
+rhca analyze -v --no-record   # what the split wants now, every risk verdict; logs nothing
 # the owner accepts ONE proposal BY ID on the dashboard; rhca run places it
 # within a minute and pushes "Order placed", then "Order filled" (or why not)
 rhca status          # the order and the sleeves, as the audit log has them
 ```
 
 The skills in `.claude/skills/rhca-*/` walk these steps, so every session runs
-them the same way.
+them the same way. Keep `--no-record` on a look: a recorded `rhca analyze` logs
+a newer proposal for the same coin, sleeve and rule, and the order desk then
+refuses the owner's accept of the loop's id as superseded.
 
 `rhca run`'s proposals are in the audit log with a `status` (`proposed` or
 `rejected_by_risk`; System 1's old records also carry `declined_by_system2`

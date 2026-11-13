@@ -15,7 +15,7 @@ config.py. Raising a risk ceiling is a deliberate code change, not a config edit
 
 | Limit | Ceiling | Shipped default |
 |---|---|---|
-| `max_notional_per_trade_usd` | 2500 | 50 (was 250; scaled to the $500 Agentic account on 2026-09-22) |
+| `max_notional_per_trade_usd` | 2500 | 50 (was 250; scaled to $500 on 2026-09-22, then the Agentic account's; now the split's $500 on the main account) |
 | `max_daily_notional_usd` | 10000 | 200 (was 1000) |
 | `max_daily_loss_usd` | 1000 | 40 (was 200) |
 | `max_position_pct_of_portfolio` | 25 | 20 (raised from 10 on 2026-09-28, for the split's two sleeves) |

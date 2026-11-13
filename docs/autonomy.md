@@ -69,11 +69,12 @@ there are two options, and they are not equivalent:
 
 **Decision, 2026-09-21.** The owner chose the second shape: a direct client
 feeds the real-time loop (now the split; see
-[`roadmap.md`](./roadmap.md)). It is built *read-only* first: `robinhood.py`
-holds credentials but has no order or cancel method. So today the blast radius
-of a bug is still a bad proposal, and `rhca run` is the shadow-mode evidence
-phase this document asks for. The order call is the Phase 2 change. It belongs
-behind `ApprovalGate` with the `AutoPolicy` above, not added to the client.
+[`roadmap.md`](./roadmap.md)). It was built *read-only* first: `robinhood.py`
+held credentials but had no order or cancel method. So until the decision
+below, the blast radius of a bug was still a bad proposal, and `rhca run` was
+the shadow-mode evidence phase this document asks for. The order call was
+planned as the Phase 2 change, behind `ApprovalGate` with the `AutoPolicy`
+above.
 
 **Decision, 2026-10-20.** The owner chose to approve orders with the
 dashboard's Accept button and to trade the main crypto account, the one the
@@ -86,15 +87,18 @@ order", bounded by the per-trade and daily caps, not "a bad proposal".
 
 ### 3. A dead-man's switch
 
-In propose-only, a loop that silently stops is harmless — you just get no
-proposals. Unattended, a stopped loop can leave a position open past its trend
-exit with nothing supervising it. Phase 2 needs a heartbeat: if the loop misses N
-consecutive cycles, engage the kill switch and notify.
+While every order is accepted by hand, a loop that silently stops places
+nothing, but it proposes nothing either, a breakout's stop included, so a held
+position can ride past its stop. Today the healthcheck ping
+([`runbook.md`](./runbook.md)) is how you hear of it. Unattended, nobody else
+is watching, so Phase 2 needs a heartbeat: if the loop misses N consecutive
+cycles, engage the kill switch and notify.
 
 ### 4. Automatic reconciliation
 
-Reconciling the audit log against `get_crypto_orders` is a manual step in
-`docs/runbook.md` today. Unattended it has to run every cycle, and any
+The order desk reads back every order it sent, each minute, but reconciling
+the whole audit log against what Robinhood holds is still a manual step in
+`docs/runbook.md`. Unattended it has to run every cycle, and any
 divergence between what the log says and what Robinhood holds must engage the
 kill switch rather than be reported and passed over. An agent that has lost
 track of its own position must not place the next order.

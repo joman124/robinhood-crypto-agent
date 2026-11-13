@@ -12,7 +12,8 @@ Where the project stands, and what the next session should pick up.
               |  200-day average and held; $250 in the breakout, stopped out on
               |  a trailing ATR stop; no coin over 20% of the account
               v
-[ 14 risk rules ] -> proposal -> a human approves by id -> Claude places it via MCP
+[ 14 risk rules ] -> proposal -> the owner accepts it by id on the dashboard
+                                   -> rhca run's order desk places it (since 2026-10-20)
 ```
 
 It replaced the trend ladder on 2026-09-28, by the owner's decision with the
@@ -104,5 +105,8 @@ Still open: the loop only syncs when `RHCA_DASHBOARD_URL` and
    tweak would make every backtest evidence about something else.
 5. **The split's state comes from recorded fills**, never from memory, so it
    survives a restart and never sells a coin it did not buy.
-6. **The Robinhood client stays read-only until Phase 2.**
+6. **One order path, behind the owner's accept.** The Robinhood client has
+   one order method, called only by the order desk after an accept clears
+   `ApprovalGate`: no cancel method, no other caller, and nothing unattended
+   until Phase 2 (CLAUDE.md, rule 13).
 7. **A failure is never an approval.**
