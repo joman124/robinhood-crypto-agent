@@ -5,13 +5,12 @@
 The real-time loop: Robinhood quotes in, Coinbase's daily closes, and the
 split ([`strategy.md`](./strategy.md#the-split-live)) run on every watchlist
 coin (BTC, ETH, SOL, XRP) after each UTC daily close. What the split wants is
-logged as a proposal for you to approve.
-**It cannot place an order** — the Robinhood client has no order method. It
-runs on this PC, in a terminal you leave open.
+logged as a proposal for you to accept on the dashboard. Since 2026-10-20 the
+loop also places an accepted order itself ([Placing orders](#placing-orders)).
+It runs on this PC, in a terminal you leave open.
 
-It reads only market data from Robinhood. The balance and holdings it sizes
-and checks against are the Agentic account's, and you feed those in through
-Claude Code (step 2).
+It reads quotes, pairs, buying power and holdings from Robinhood with the API
+key, which reaches only your main crypto account (step 2).
 
 ### 1. Keys (you create these; nothing else can)
 
@@ -215,17 +214,22 @@ hour, for as long as it still wants it:
 
 Each proposal is either `proposed` (passed all 14 risk rules) or
 `rejected_by_risk`. A `proposed` row is still only a proposal. Acting on it is
-the normal flow below: a human names the id, `rhca approve` re-checks
-everything, and Claude Code places the order through MCP.
+[Placing orders](#placing-orders): you accept its id on the dashboard, and the
+order desk re-checks everything and places it.
 
 `rhca status` shows each sleeve: its cash, what it holds of each coin and
 what that cost, the entry close of each short-term position, the tranches
-bought, and the realized P&L from the fills you recorded. That is the number
+bought, and the realized P&L from the recorded fills. That is the number
 to watch. `rhca accuracy` still reports the retired System 1's six-hour hit
 rate, for the record; the split's proposals are not scored there, because a
 breakout is held until its stop and a tranche for good.
 
 ## First run on a funded account
+
+These checks are for the MCP path, whose order tools reach the Agentic
+account. The split's own first run is the account pin in step 1 and the
+`--once` checks in step 4. The kill-switch check below covers both: the order
+desk runs the same `ApprovalGate`, so it refuses too while the switch is on.
 
 Before anything touches real money:
 
@@ -273,6 +277,11 @@ The rest of this section is the MCP flow. Its order tools reach the Agentic
 account, which the split no longer trades: do not use them for split orders.
 
 ## Daily loop
+
+The MCP path: an order on the Agentic account, through Claude Code. A split
+order never goes this way; you accept it on the dashboard
+([Placing orders](#placing-orders)). [Close the day](#close-the-day) applies
+to both.
 
 ### Ingest
 ```bash
@@ -334,23 +343,24 @@ chase it.
 
 ### The split's stops
 
-A `stop` proposal is a `proposed` sell like any other on the dashboard. Take
-it through the same steps: `plan-order`, preview, `approve` by its id, place,
-`record-execution`, and record the fill. Then re-ingest positions and
-portfolio. It sells only what the short-term sleeve holds; the long-term
-sleeve's tranches of the same coin stay.
+A `stop` proposal is a `proposed` sell like any other: accept it on the
+dashboard by its id, and the order desk places it
+([Placing orders](#placing-orders)). It sells only what the short-term sleeve
+holds; the long-term sleeve's tranches of the same coin stay.
 
-The split knows what each sleeve holds only from the fills you record. An
-unrecorded buy is never sold, and an unrecorded sell leaves the sleeve
-thinking it still holds the coin. An order recorded but not yet filled or
-canceled holds its place -- no second entry, stop or tranche while it works --
-and an open buy's dollars stay out of the sleeve's cash. Record the final
-state from `get_crypto_orders` either way. If a sell is blocked by
-`sell_coverage`, the holdings snapshot predates the buy: re-ingest positions.
+The split knows what each sleeve holds only from the recorded fills, which the
+order desk writes as it reads each order back. An unrecorded buy is never
+sold, and an unrecorded sell leaves the sleeve thinking it still holds the
+coin. An order recorded but not yet filled or canceled holds its place -- no
+second entry, stop or tranche while it works -- and an open buy's dollars stay
+out of the sleeve's cash. A limit order that never fills stays open (gtc)
+until you cancel it in the Robinhood app; the desk then records the
+cancellation. If a sell is blocked by `sell_coverage`, the holdings snapshot
+predates the buy: the loop re-reads holdings from the key every 10 minutes.
 
-The rule decides once a day. A proposal approved hours after the close may
-have drifted past the tolerance: `rhca analyze` makes a fresh one at the
-current quote, for the same decision.
+The rule decides once a day. An accept hours after the close may find the
+price past the drift tolerance. The loop logs the trade afresh each hour at
+the quote then, so accept the newest id.
 
 ### Close the day
 ```bash
