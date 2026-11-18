@@ -1108,14 +1108,14 @@ def conclusion(checks: Sequence[Check]) -> str:
     if failed:
         return (
             f"It fails {', '.join(failed)}: the split did not behave live as in its backtest. "
-            "Do not trade it; find out why first."
+            "Stop approving its proposals until the reason is found."
         )
     if unknown:
         return f"Not yet judged: nothing to measure {', '.join(unknown)} by. Keep it running."
     return (
-        "All three pass: the split behaved live as in its backtest. Trading it with real "
-        "money is still the owner's decision, and needs the risk-limit changes in "
-        "docs/strategy.md ('The split')."
+        "All three pass: the split behaved live as in its backtest, at Robinhood's real "
+        "cost. With fewer than 3 priced fills that is inconclusive, not a pass "
+        "(docs/forward-test-exit-criteria.md)."
     )
 
 

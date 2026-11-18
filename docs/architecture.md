@@ -1,21 +1,26 @@
 # Architecture
 
-## The split
+## The order path
 
 ```
-Claude Code ──── MCP ────► Robinhood         the only order path
-     │
-     │ JSON in / payloads out
-     ▼
-rhca (this package) ── read-only API ──► Robinhood   quotes, pairs
-                    ── HTTPS ──────────► Coinbase    public candles (history)
-                    ── order? ─────────►  ✗   (no code path exists)
+rhca run ── Crypto Trading API key ──► Robinhood   quotes, pairs, buying power,
+         │  (the main crypto account)               holdings, orders
+         └─ HTTPS ───────────────────► Coinbase    public candles (history)
+
+dashboard accept (by id) ─► order desk ─► ApprovalGate ─► place_order ─► Robinhood
+                            (execution/desk.py)            (robinhood.py)
+
+Claude Code ── MCP ──► Robinhood   the Agentic account: not the split's
 ```
 
-The package reads from Robinhood (`rhca run`, `robinhood.py`) and fetches
-Coinbase's public candles for history. It cannot place or cancel an order: the
-Robinhood client has only GET methods. So a bug in this repository costs a bad
-proposal, never a bad order.
+The package reads from Robinhood with the API key, which reaches only the
+main crypto account, and fetches Coinbase's public candles for history. Since
+2026-10-20 it also places orders, in one place: `robinhood.py` has exactly one
+order method, `place_order`, and none that cancels. Its only caller is the
+order desk, which acts only on the owner's fresh accept of one proposal on the
+dashboard, after `ApprovalGate` clears it on a fresh quote (CLAUDE.md, rule
+13). So a bug in the decision path still costs a bad proposal; a bad order
+also needs that accept, and is bounded by the per-trade and daily caps.
 
 The decision path is testable offline. Every network client is injected
 (`runner.Services`), and the test suite fakes each one and touches no network.
@@ -84,9 +89,10 @@ sleeve's reason.
 | `risk.py` | 14 rules, all evaluated, each naming itself |
 | `execution/orders.py` | One-order plans and validated order payloads |
 | `execution/gate.py` | The approval gate — the one path to an order payload |
+| `execution/desk.py` | The order desk: an accepted proposal, through the gate, sent once and followed to its fills |
 | `execution/kill_switch.py` | File-based, fail-safe stop |
 | `audit.py` | Append-only log; the daily caps are computed from it |
-| `robinhood.py` | Read-only, Ed25519-signed Crypto Trading API client — no order methods |
+| `robinhood.py` | Ed25519-signed Crypto Trading API client: reads, and one order method (`place_order`), no cancel |
 | `runner.py` | `rhca run`: cadences, once-per-bar dedupe, heartbeat, per-task failure isolation |
 | `bootstrap.py` | Coinbase candles: daily closes for the split, hourly bars for the charts |
 | `backtest.py` | `rhca backtest`: the retired ladder against its baselines, whole and in rolling windows |
@@ -94,6 +100,7 @@ sleeve's reason.
 | `strategy/hodl.py` | The long-term sleeve: when to buy (buy low, weekly DCA, lump sum); never sells |
 | `portfolio_backtest.py` | The breakout and the split, each as one account across coins |
 | `shadow.py` | The forward test: the split on paper, one `shadow_day` per daily close; `rhca shadow` |
+| `timemachine.py` | `rhca timemachine`: a trade's or the forward test's odds, replayed on past days |
 | `outcomes.py` | The retired System 1's six-hour hit rate, kept for its records |
 | `net.py` | The one HTTP helper: timeouts, size cap, error wording |
 

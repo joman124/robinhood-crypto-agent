@@ -1,4 +1,4 @@
-"""The read-only Robinhood Crypto API client: signing, key handling, REST shapes.
+"""The Robinhood Crypto API client: signing, key handling, REST shapes, one order call.
 
 The REST payloads below have the field names and types of live responses,
 captured on 2026-09-22 (every field is a string; quote timestamps carry

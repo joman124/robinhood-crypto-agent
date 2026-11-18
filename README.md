@@ -5,42 +5,45 @@ A crypto trading agent for Robinhood that trades one rule on its watchlist
 long-term -- a tranche at a time, only on a close under the 200-day average --
 and half trades the **breakout**: it buys a daily close above the prior
 20-day high and the 100-day average, sized by risk, and sells on a trailing
-stop. Fourteen risk rules check every proposal. Orders go only through
-[Claude Code](https://claude.com/claude-code) and the **RobinHood MCP
-server**, after a human approves each one by id.
+stop. Fourteen risk rules check every proposal, and an order is placed
+only after you accept that proposal by its id on the dashboard: `rhca run`'s
+order desk then sends that one limit order to your main crypto account.
 
-> ⚠️ **This trades real money.** `place_crypto_order` places a real order
-> against a real account. There is no paper-trading endpoint to point at.
+> ⚠️ **This trades real money.** Accepting a proposal on the dashboard places
+> a real order against a real account, and so does the MCP tool
+> `place_crypto_order`. There is no paper-trading endpoint to point at.
 > Read [`CLAUDE.md`](./CLAUDE.md) and [`docs/risk-controls.md`](./docs/risk-controls.md)
 > before running this against a funded account.
 
 ## The shape of the thing
 
-Claude holds the MCP connection. This Python package holds the decision logic,
-the risk limits, and the audit trail. It can *read* from Robinhood (see
-`rhca run` below), but **it has no code path that places an order**.
+This Python package holds the decision logic, the risk limits, the audit
+trail and, since 2026-10-20, the one order path. `rhca run` reads Robinhood
+with your Crypto Trading API key, and places an order only when you accept a
+**specific proposal by its id** on the dashboard.
 
 ```
-     ┌──────────────────────── Claude Code ────────────────────────┐
-     │  calls RobinHood MCP tools       runs the rhca CLI          │
-     └───────┬──────────────────────────────────┬─────────────────-┘
-             │ JSON responses                   │ proposals, payloads
-             ▼                                  ▼
-   get_crypto_quotes ──► rhca ingest ──► daily closes  ──► the split   
-   get_currency_pairs                                          │
-   get_crypto_positions                                        ▼
-   get_portfolio                                    sizing ──► risk engine
-                                                                │
-   place_crypto_order ◄── human approves by id ◄── rhca approve ┘
-             │
-             └──► rhca record-execution ──► append-only audit log
+ Coinbase daily closes ─┐
+ recorded fills ────────┼─► the split ─► sizing ─► 14 risk rules ─► proposal
+ Robinhood quotes ──────┘                                              │
+                                                     audit log ◄───────┤
+                                                         │             ▼
+                                                     dashboard ── you accept by id
+                                                                       │
+     Robinhood (main crypto account) ◄── one limit order ◄── order desk + ApprovalGate
+                    │
+                    └── each fill, read back every minute ──► audit log
 ```
 
-The split is the safety property: no code path in this repository can place an
-order. Submitting one requires Claude to call an MCP tool, and the CLI only
-hands it a payload after a human has approved a **specific proposal by id**.
+The accept is the safety property. The order desk (`execution/desk.py`) is
+the only caller of the client's one order method, and it acts only on a fresh
+accept naming one proposal, after `ApprovalGate` re-checks it on a fresh quote:
+the kill switch, price drift, remaining size and the daily cap. Nothing places
+an order on its own; that is Phase 2 ([`docs/autonomy.md`](./docs/autonomy.md)).
+Claude Code reads, explains and builds. Its `RobinHood` MCP order tools reach
+the Agentic account, which the split no longer trades ([`CLAUDE.md`](./CLAUDE.md)).
 
-### The real-time loop: `rhca run` (shadow mode)
+### The real-time loop: `rhca run`
 
 ```
 Coinbase daily closes ─► the split ─► 14 risk rules ─► proposal (priced off
@@ -49,11 +52,11 @@ Coinbase daily closes ─► the split ─► 14 risk rules ─► proposal (pri
      (each sleeve's state)                     audit log ─► dashboard
 ```
 
-`rhca run` polls Robinhood's Crypto Trading API with a **read-only** client (no
-order method exists), for quotes and trading pairs only. The balance and
-holdings it checks against are the Agentic account's, which Claude Code feeds
-in with `rhca ingest`. After each UTC daily close it runs the split, and logs
-what it wants as a proposal for a human to approve. Setup and keys:
+`rhca run` polls Robinhood's Crypto Trading API for quotes and trading pairs,
+and reads your main account's buying power and holdings with the same key
+every 10 minutes. After each UTC daily close it runs the split, and logs what
+it wants as a proposal for you to accept. It places an accepted order within a
+minute, and records its fills as it reads the order back. Setup and keys:
 [`docs/runbook.md`](./docs/runbook.md#shadow-run-rhca-run).
 
 It also keeps the **forward test**: the same split on paper from 2026-09-28,
@@ -87,8 +90,9 @@ proposes ([`docs/strategy.md`](./docs/strategy.md#the-forward-test)).
   `rhca accuracy` scored the retired System 1's predictions; the split holds
   for days or for good, so it is measured on P&L instead.)
 - **Has a web dashboard** ([`dashboard/`](./dashboard)) for reviewing proposals
-  and accepting or declining — which records a decision the agent replays
-  through the same approval gate, never an order.
+  and accepting or declining. It holds no Robinhood credentials: an accept is a
+  decision `rhca run` replays through the full approval gate, and if it passes,
+  the order desk places that one order.
 
 ## Setup
 
@@ -98,8 +102,8 @@ pip install -e ".[dev]"
 pytest                       # all offline, no account needed
 ruff check src tests
 
-export RHCA_RHS_ACCOUNT_NUMBER=...   # the NUMERIC rhs_account_number
-rhca status
+export RHCA_RHS_ACCOUNT_NUMBER=...   # the MCP path's NUMERIC rhs_account_number
+rhca status                          # rhca run's keys go in .env: docs/runbook.md
 ```
 
 CI runs the suite on Python 3.10, 3.11, 3.12 and 3.13, plus `ruff` and a smoke
@@ -119,8 +123,10 @@ tool response is never retyped or paraphrased.
 # The real-time loop (keys in .env -- see .env.example)
 rhca bootstrap-history          # 52 days of hourly Coinbase bars, for the charts
 rhca run --once                 # one pass of every task: the smoke test
-rhca run --keep-awake           # shadow mode until Ctrl+C
+rhca run --keep-awake           # the loop, until Ctrl+C
+# A split order: accept its proposal id on the dashboard; rhca run places it.
 
+# The MCP path (the Agentic account, never split orders):
 # 1. Ingest what Claude fetched
 rhca ingest accounts  -f accounts.json     # resolves rhs_account_number
 rhca ingest pairs     -f pairs.json        # increments, halts, market-only flags
@@ -183,8 +189,8 @@ sign-off to unattended execution.
 ```
 src/robinhood_crypto_agent/
 ├── cli.py              # the command surface
-├── runner.py           # rhca run: the real-time loop, shadow mode
-├── robinhood.py        # read-only Crypto Trading API client (no order methods)
+├── runner.py           # rhca run: the real-time loop, and the order desk's cadence
+├── robinhood.py        # Crypto Trading API client: reads, plus the desk's one order call
 ├── bootstrap.py        # Coinbase candles for a fresh checkout
 ├── backtest.py         # rhca backtest: the retired ladder vs its baselines
 ├── portfolio_backtest.py # the breakout and the split, as one account across coins
@@ -211,7 +217,7 @@ src/robinhood_crypto_agent/
 ├── store/              # price history and cached account state
 ├── strategy/           # the split (live): breakout + hodl; the retired ladder;
 │                       #   candidates.py, faster rules for the backtest only
-└── execution/          # order payloads, approval gate, kill switch
+└── execution/          # order payloads, approval gate, kill switch, the order desk
 
 dashboard/              # Next.js app, deployable to Vercel
 .claude/skills/rhca-*/  # Claude Code skills: the recurring rhca workflows, step by step
@@ -219,8 +225,9 @@ dashboard/              # Next.js app, deployable to Vercel
 
 ## Status
 
-**Phase 1 (today): analyze and propose.** The agent prepares a trade, you sign
-it off by naming its proposal id, and it submits. Every control in
+**Phase 1 (today): every order accepted by id.** The agent prepares a trade,
+you accept it by its proposal id on the dashboard, and the order desk places
+it. Every control in
 [`docs/risk-controls.md`](./docs/risk-controls.md) is live.
 
 **Phase 2 (intended): autonomous execution.** `execution_mode: auto` is the

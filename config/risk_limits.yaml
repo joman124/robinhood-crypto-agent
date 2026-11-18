@@ -3,10 +3,11 @@
 # load error, not a grant -- raising a ceiling is a reviewable code change.
 
 limits:
-  # Per-trade sizing. Scaled to the $500 Agentic account by the owner,
-  # 2026-09-22 (was 250 / 10). $50 matches the 10% concentration cap. The $5
-  # floor is the ladder's smallest step (config/strategy.yaml), and its largest
-  # step, $20, sits well under the cap.
+  # Per-trade sizing. Scaled to $500 by the owner, 2026-09-22 (was 250 / 10),
+  # when that was the Agentic account; since 2026-10-20 it is the split's $500
+  # (config/strategy.yaml, split_capital) on the main crypto account. $50 is
+  # 10% of it. The $5 floor is the smallest buy the split makes, and its largest,
+  # a breakout entry of at most $25, sits well under the cap.
   max_notional_per_trade_usd: 50       # ceiling: 2500
   min_notional_per_trade_usd: 5
 

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "robinhood-crypto-agent"
 version = "0.1.0"
-description = "A propose-only Robinhood crypto trading agent: a trend-filtered dip ladder on BTC and ETH, with every order approved by a human."
+description = "A Robinhood crypto trading agent: the split (long-term buy-low tranches plus a daily breakout) on BTC, ETH, SOL and XRP, with every order accepted by a human, by id."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

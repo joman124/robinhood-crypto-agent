@@ -1,8 +1,9 @@
-# Starts `rhca run` (shadow mode: it never orders) at boot, before anyone signs
-# in, and at sign-in if it is not running already. It replaces the Startup
-# folder shortcut, which waited for a sign-in: a restart overnight left the
-# loop down until morning, and each daily close it misses is a forward-test day
-# with no Robinhood price, which cannot be read afterwards (docs/runbook.md).
+# Starts `rhca run` at boot, before anyone signs in, and at sign-in if it is not
+# running already. It places only orders you accept on the dashboard. It
+# replaces the Startup folder shortcut, which waited for a sign-in: a restart
+# overnight left the loop down until morning, and each daily close it misses is
+# a forward-test day with no Robinhood price, which cannot be read afterwards
+# (docs/runbook.md).
 #
 # Run once, from PowerShell opened with "Run as administrator", in the repo:
 #   powershell -ExecutionPolicy Bypass -File scripts\install-boot-task.ps1
