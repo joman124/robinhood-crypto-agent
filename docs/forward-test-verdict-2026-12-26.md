@@ -6,7 +6,7 @@ the live audit log: `rhca report` (log only, no network) and `rhca shadow`
 (replays Coinbase daily closes, no `--backfill`, writes nothing). No order,
 config or dashboard was touched.
 
-**On 2026-12-27, re-run those two commands and update the bracketed numbers.**
+**On 2026-12-27, re-run those two commands and update the figures in §1–§4.**
 The figures here stop at the **2026-11-21 close (close 55 of 90)**, so 35
 closes are still to come. The branch decision in §4 is already settled. The
 bar checks in §5 are not final until close 90.
