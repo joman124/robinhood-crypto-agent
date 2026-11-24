@@ -127,7 +127,10 @@ Nothing in the code depends on a date, so the verdict changes none of this.
 
 ## Reproducing the counts
 
-Read-only. Run from the repo root.
+Read-only. Run from the repo root. The superseded count only grows. The
+drift-ok count moves with the price, because `rhca run` refreshes the cached
+quote every cycle: a re-run at 02:27 UTC, with a newer quote, gave 49 instead of
+51.
 
 ```python
 import json
