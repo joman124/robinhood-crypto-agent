@@ -185,6 +185,16 @@ class TestPayloadShape:
         assert payload["proposals"][0]["outcome"]["verdict"] == "win"
         assert payload["stats"]["overall"]["wins"] == 1
 
+    def test_drift_at_a_realistic_spread_is_ask_to_ask_like_the_gate(self, config, wide_quote):
+        """A fresh buy at a 1.9% spread is not shown as moved, so Accept stays open."""
+        audit = AuditLog(config.audit_path)
+        store = PriceStore(config.price_store_path)
+        store.record_quotes([wide_quote])
+        audit.record_proposal(replace(proposal(), reference_price=wide_quote.ask))
+        payload = build_payload(config, audit=audit, store=store)
+        assert payload["proposals"][0]["drift_pct"] == "0.000"
+        assert payload["market"]["BTC-USD"]["mark"] == "80000"
+
     def test_drift_is_measured_against_the_last_seen_mark(self, config):
         audit = AuditLog(config.audit_path)
         store = PriceStore(config.price_store_path)

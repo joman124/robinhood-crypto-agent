@@ -32,6 +32,7 @@ from robinhood_crypto_agent.models import (
     Tranche,
     utcnow,
 )
+from robinhood_crypto_agent.numeric import abs_pct_drift
 from robinhood_crypto_agent.sizing import SizingResult
 
 PAIR = PairConstraints(
@@ -343,4 +344,93 @@ class TestApprovalGate:
                 make_proposal(),
                 approval_text="execute abc123def456",
                 live_quote=self.live(),
+            )
+
+
+def moved(quote, factor):
+    """The whole book moved by ``factor``: bid, ask and mark together."""
+    f = Decimal(factor)
+    return Quote(quote.symbol, quote.bid * f, quote.ask * f, quote.mark * f, utcnow())
+
+
+class TestDriftAtARealisticSpread:
+    """The gate at the ~1.9% spread Robinhood quotes, not the fixture's 0.25%.
+
+    A buy is priced at the ask and a sell at the bid (agent.py), so the gate
+    compares the live price on the same side. Against the mid, the spread alone
+    read as ~0.95% and refused every fresh proposal. The tolerance stays 0.5%.
+    """
+
+    approval = "execute abc123def456"
+
+    def gate(self, config):
+        return ApprovalGate(
+            config,
+            kill_switch=KillSwitch(config.kill_switch_path),
+            audit=AuditLog(config.audit_path),
+        )
+
+    def buy(self, quote):
+        return replace(make_proposal(), reference_price=quote.ask)
+
+    def sell(self, quote):
+        return replace(make_proposal(), side=Side.SELL, reference_price=quote.bid)
+
+    def test_the_tolerance_is_still_half_a_percent(self, config):
+        assert config.risk.price_drift_tolerance_pct == Decimal("0.5")
+
+    def test_the_old_measure_refused_a_fresh_buy_at_this_spread(self, config, wide_quote):
+        """Why the fix exists: ask-then against mid-now is ~0.94% on an unmoved book."""
+        assert wide_quote.spread_pct == Decimal("1.9")
+        stale_measure = abs_pct_drift(wide_quote.mark, wide_quote.ask)
+        assert stale_measure > config.risk.price_drift_tolerance_pct
+
+    def test_a_fresh_buy_clears_the_gate(self, config, wide_quote):
+        auth = self.gate(config).authorize(
+            self.buy(wide_quote), approval_text=self.approval, live_quote=wide_quote
+        )
+        assert auth.drift_pct == Decimal("0")
+
+    def test_a_fresh_sell_clears_the_gate(self, config, wide_quote):
+        _, drift, _ = self.gate(config).clear(
+            self.sell(wide_quote), approval_text=self.approval, live_quote=wide_quote
+        )
+        assert drift == Decimal("0")
+
+    @pytest.mark.parametrize("factor", ["1.004", "0.996"])
+    def test_a_buy_whose_ask_moved_under_the_tolerance_clears(self, config, wide_quote, factor):
+        _, drift, _ = self.gate(config).clear(
+            self.buy(wide_quote), approval_text=self.approval,
+            live_quote=moved(wide_quote, factor),
+        )
+        assert drift == Decimal("0.4")
+
+    @pytest.mark.parametrize("factor", ["1.006", "0.994"])
+    def test_a_buy_whose_ask_really_moved_past_the_tolerance_is_refused(
+        self, config, wide_quote, factor
+    ):
+        with pytest.raises(ApprovalError, match=r"moved 0\.600%.*live ask"):
+            self.gate(config).authorize(
+                self.buy(wide_quote), approval_text=self.approval,
+                live_quote=moved(wide_quote, factor),
+            )
+
+    @pytest.mark.parametrize("factor", ["1.006", "0.994"])
+    def test_a_sell_whose_bid_really_moved_past_the_tolerance_is_refused(
+        self, config, wide_quote, factor
+    ):
+        with pytest.raises(ApprovalError, match=r"moved 0\.600%.*live bid"):
+            self.gate(config).clear(
+                self.sell(wide_quote), approval_text=self.approval,
+                live_quote=moved(wide_quote, factor),
+            )
+
+    def test_a_buy_with_no_live_ask_is_refused_not_measured_another_way(
+        self, config, wide_quote
+    ):
+        """No falling back to the mark or the bid: that is the bug this replaces."""
+        no_ask = replace(wide_quote, ask=Decimal("0"))
+        with pytest.raises(ApprovalError, match="no usable ask"):
+            self.gate(config).clear(
+                self.buy(wide_quote), approval_text=self.approval, live_quote=no_ask
             )

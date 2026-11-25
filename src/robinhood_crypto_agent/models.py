@@ -161,6 +161,14 @@ class Quote(JsonMixin):
     def mid(self) -> Decimal:
         return (self.bid + self.ask) / Decimal(2)
 
+    def price_for(self, side: Side) -> Decimal:
+        """What ``side`` trades at now: the ask for a buy, the bid for a sell.
+
+        A proposal's reference price is taken from the same side, so drift
+        compares like with like instead of reading the spread as movement.
+        """
+        return self.ask if side is Side.BUY else self.bid
+
 
 @dataclass(frozen=True)
 class Candle(JsonMixin):

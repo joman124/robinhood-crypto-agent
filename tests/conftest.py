@@ -101,6 +101,24 @@ def quote() -> Quote:
     )
 
 
+@pytest.fixture
+def wide_quote() -> Quote:
+    """BTC at the spread Robinhood actually quotes: 1.9% of the mark.
+
+    All four coins showed 1.84-1.92% (docs/drift-gate-decision-2026-11-25.md).
+    ``quote`` above is 0.25%, too narrow to show that a drift check against
+    the mid reads the spread itself as movement.
+    """
+    return Quote(
+        symbol="BTC-USD",
+        bid=Decimal("79240"),
+        ask=Decimal("80760"),
+        mark=Decimal("80000"),
+        observed_at=utcnow(),
+        previous_close=Decimal("79000"),
+    )
+
+
 def daily_candles(closes, *, symbol: str = "BTC-USD", last: datetime) -> list[Candle]:
     """UTC daily bars ending with the day that starts at ``last``, each with a
     high and low 1% either side of its close."""
