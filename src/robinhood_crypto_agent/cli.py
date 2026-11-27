@@ -54,6 +54,7 @@ from .bootstrap import fetch_coinbase_history
 from .config import AgentConfig, load_config
 from .daily import DailyBars, latest_close
 from .errors import AgentError
+from .execution.desk import MAX_PROPOSAL_AGE, latest_for_slot
 from .execution.gate import ApprovalGate
 from .execution.kill_switch import REASON_DAILY_LOSS, REASON_MANUAL, KillSwitch
 from .execution.orders import build_plan_requests
@@ -662,9 +663,33 @@ def _pair_constraints(state: StateCache, symbol: str) -> PairConstraints | None:
     return pair
 
 
+def _refuse_stale(audit: AuditLog, proposal) -> None:
+    """The order desk's superseded and age checks, for the terminal path.
+
+    Without them `rhca approve` took any id in the audit log, however old,
+    and an old id is where a wrong approval comes from
+    (docs/stale-live-proposals-2026-11-24.md).
+    """
+    record = audit.find_proposal(proposal.proposal_id) or {}
+    latest = latest_for_slot(audit, record)
+    if latest != proposal.proposal_id:
+        raise AgentError(
+            f"proposal {proposal.proposal_id} is superseded by {latest}: the same trade "
+            "was logged again under a new id. Approve the newest one, not this."
+        )
+    age = utcnow() - proposal.created_at
+    if age > MAX_PROPOSAL_AGE:
+        raise AgentError(
+            f"proposal {proposal.proposal_id} is {age.total_seconds() / 60:.0f} minutes "
+            f"old, past the {MAX_PROPOSAL_AGE.total_seconds() / 60:.0f} the order desk "
+            "allows. Run `rhca analyze` for a fresh proposal and approve that one."
+        )
+
+
 def cmd_approve(args: argparse.Namespace) -> int:
     config, state, store, audit = _context(args)
     proposal = _load_proposal(audit, args.proposal_id)
+    _refuse_stale(audit, proposal)
 
     quotes = parse_quotes(_read_json(args.quote)) if args.quote else []
     live = next(

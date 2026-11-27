@@ -49,6 +49,7 @@ from ..models import (
     Proposal,
     ProposalStatus,
     Quote,
+    Side,
 )
 from ..numeric import ZERO, abs_pct_drift
 from ..symbols import same_pair
@@ -245,16 +246,21 @@ class ApprovalGate:
                 f"the live quote is for {live_quote.symbol} but the proposal is for "
                 f"{proposal.symbol}"
             )
-        if live_quote.mark <= ZERO:
-            raise ApprovalError("the live quote has no usable mark price")
+        # Same side as the reference (agent.py prices a buy at the ask, a sell
+        # at the bid). Against the mid, a ~1.9% spread alone read as ~0.93%
+        # drift and refused every fresh proposal (docs/drift-gate-decision).
+        side_name = "ask" if proposal.side is Side.BUY else "bid"
+        live = live_quote.price_for(proposal.side)
+        if live <= ZERO:
+            raise ApprovalError(f"the live quote has no usable {side_name} price")
 
-        drift = abs_pct_drift(live_quote.mark, proposal.reference_price)
+        drift = abs_pct_drift(live, proposal.reference_price)
         tolerance = self.config.risk.price_drift_tolerance_pct
         if drift > tolerance:
             raise ApprovalError(
                 f"the price has moved {drift:.3f}% since proposal "
                 f"{proposal.proposal_id} was created (tolerance {tolerance}%). "
-                f"Reference {proposal.reference_price}, live {live_quote.mark}. "
+                f"Reference {proposal.reference_price}, live {side_name} {live}. "
                 "Generate a fresh proposal rather than filling against a stale quote."
             )
         return drift

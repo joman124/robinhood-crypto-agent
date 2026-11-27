@@ -14,6 +14,7 @@ from decimal import Decimal
 import pytest
 import yaml
 
+from robinhood_crypto_agent import cli as cli_mod
 from robinhood_crypto_agent.audit import AuditLog
 from robinhood_crypto_agent.cli import EXIT_BLOCKED, EXIT_ERROR, EXIT_OK, main
 from robinhood_crypto_agent.daily import latest_close
@@ -294,6 +295,43 @@ def test_price_drift_refuses_a_stale_proposal(workspace, capsys):
         == EXIT_ERROR
     )
     assert "price has moved" in capsys.readouterr().err
+
+
+def _approve(workspace, proposal_id):
+    return workspace.run(
+        "approve", proposal_id, "--approval", f"execute {proposal_id}",
+        "--quote", workspace.path("quotes.json"),
+    )
+
+
+def test_approve_refuses_a_superseded_split_proposal(workspace, capsys):
+    """The desk's superseded check, on the terminal path too (PR #43 section 4)."""
+    workspace.bootstrap()
+    old_id = workspace.first_proposal_id(capsys)
+    audit = workspace.audit
+    record = {k: v for k, v in audit.find_proposal(old_id).items() if k not in ("kind", "recorded_at")}
+    split = {**record, "strategy": "split", "sleeve": "long_term", "rule": "tranche"}
+    audit.append("proposal", split)
+    audit.append("proposal", {**split, "proposal_id": "f" * 12})
+
+    assert _approve(workspace, old_id) == EXIT_ERROR
+    assert f"superseded by {'f' * 12}" in capsys.readouterr().err
+
+
+def test_approve_refuses_a_proposal_past_the_desks_age_limit(workspace, capsys, monkeypatch):
+    workspace.bootstrap()
+    proposal_id = workspace.first_proposal_id(capsys)
+    later = cli_mod.utcnow() + timedelta(minutes=76)
+    monkeypatch.setattr(cli_mod, "utcnow", lambda: later)
+
+    assert _approve(workspace, proposal_id) == EXIT_ERROR
+    assert "past the 75 the order desk allows" in capsys.readouterr().err
+
+
+def test_approve_still_takes_the_newest_fresh_proposal(workspace, capsys):
+    workspace.bootstrap()
+    proposal_id = workspace.first_proposal_id(capsys)
+    assert _approve(workspace, proposal_id) == EXIT_OK
 
 
 def test_kill_switch_blocks_approval_then_releases(workspace, capsys):

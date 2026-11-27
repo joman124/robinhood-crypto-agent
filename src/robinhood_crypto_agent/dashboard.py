@@ -38,7 +38,7 @@ from .execution.desk import MAX_PROPOSAL_AGE, slot_of
 from .execution.kill_switch import KillSwitch
 from .files import read_json
 from .ledger import STRATEGY_SPLIT, split_book
-from .models import ProposalStatus, parse_timestamp, utcnow
+from .models import ProposalStatus, Quote, Side, parse_timestamp, utcnow
 from .numeric import abs_pct_drift, format_decimal, round_money, to_decimal
 from .outcomes import (
     DEFAULT_HORIZON_BARS,
@@ -161,7 +161,7 @@ def build_payload(
 
     proposals: list[dict[str, Any]] = []
     outcomes: list[Outcome] = []
-    marks = _latest_marks(store, config.watchlist)
+    quotes = _latest_quotes(store, config.watchlist)
     executions = _executions_by_proposal(audit)
 
     records = list(audit.events(kind=KIND_PROPOSAL))
@@ -187,7 +187,9 @@ def build_payload(
         row["proposed_at"] = record.get("recorded_at")
         row.update(_proposal_detail(record))
         row["drift_pct"] = _drift(
-            record.get("reference_price"), marks.get(canonical(str(record.get("symbol", ""))))
+            record.get("reference_price"),
+            record.get("side"),
+            quotes.get(canonical(str(record.get("symbol", "")))),
         )
         row["execution"] = executions.get(str(record.get("proposal_id")))
         row["outcome"] = outcome.to_dict() if outcome is not None else None
@@ -237,8 +239,8 @@ def build_payload(
             "price_drift_tolerance_pct": str(config.risk.price_drift_tolerance_pct),
         },
         "market": {
-            symbol: {"mark": format_decimal(mark), "observed_at": at}
-            for symbol, (mark, at) in marks.items()
+            symbol: {"mark": format_decimal(q.mark), "observed_at": q.observed_at.isoformat()}
+            for symbol, q in quotes.items()
         },
         "kill_switch": {
             "engaged": kill.engaged,
@@ -332,27 +334,29 @@ def _proposal_detail(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _latest_marks(store: PriceStore, symbols: Sequence[str]) -> dict[str, tuple[Decimal, str]]:
-    marks = {}
+def _latest_quotes(store: PriceStore, symbols: Sequence[str]) -> dict[str, Quote]:
+    quotes = {}
     for symbol in symbols:
         quote = store.latest_quote(symbol)
         if quote is not None:
-            marks[canonical(symbol)] = (quote.mark, quote.observed_at.isoformat())
-    return marks
+            quotes[canonical(symbol)] = quote
+    return quotes
 
 
-def _drift(reference: Any, latest: tuple[Decimal, str] | None) -> str | None:
-    """How far the last seen mark sits from the proposal's reference price --
-    the same measure the approval gate refuses on, as of the last sync."""
+def _drift(reference: Any, side: Any, latest: Quote | None) -> str | None:
+    """How far the last seen ask (a buy) or bid (a sell) sits from the
+    proposal's reference price -- the same measure the approval gate refuses
+    on, as of the last sync."""
     if latest is None or reference is None:
         return None
     try:
         ref = to_decimal(reference, field="reference_price")
-    except AgentError:
+        live = latest.price_for(Side(side))
+    except (AgentError, ValueError):
         return None
-    if ref <= 0:
+    if ref <= 0 or live <= 0:
         return None
-    return str(round_money(abs_pct_drift(latest[0], ref), 3))
+    return str(round_money(abs_pct_drift(live, ref), 3))
 
 
 def _executions_by_proposal(audit: AuditLog) -> dict[str, dict[str, Any]]:

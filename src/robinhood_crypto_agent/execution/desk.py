@@ -254,13 +254,7 @@ class OrderDesk:
         )
 
     def _latest_for_slot(self, record: dict[str, Any]) -> str:
-        """The newest split proposal for the same coin, sleeve and rule."""
-        slot = slot_of(record)
-        latest = str(record.get("proposal_id"))
-        for other in self.audit.events(kind=KIND_PROPOSAL):
-            if other.get("strategy") == STRATEGY_SPLIT and slot_of(other) == slot:
-                latest = str(other.get("proposal_id"))
-        return latest
+        return latest_for_slot(self.audit, record)
 
     def _quote(self, symbol: str) -> Quote:
         quote = next(
@@ -448,6 +442,16 @@ def _record(
         overridden=overridden,
         raw_response=raw,
     )
+
+
+def latest_for_slot(audit: AuditLog, record: dict[str, Any]) -> str:
+    """The newest split proposal for the same coin, sleeve and rule."""
+    slot = slot_of(record)
+    latest = str(record.get("proposal_id"))
+    for other in audit.events(kind=KIND_PROPOSAL):
+        if other.get("strategy") == STRATEGY_SPLIT and slot_of(other) == slot:
+            latest = str(other.get("proposal_id"))
+    return latest
 
 
 def slot_of(record: dict[str, Any]) -> tuple[Any, Any, Any]:
